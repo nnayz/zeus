@@ -1,0 +1,49 @@
+[workspace]
+members = [
+    "crates/zeus-app",
+    "crates/zeus-client",
+    "crates/zeus-node",
+    "crates/zeus-mcp",
+    "crates/zeus-proto",
+    "crates/zeus-term",
+    "crates/zeus-ui",
+    "crates/zeus-usage",
+    "crates/zeus-updater",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.95"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+zeus-client = { path = "crates/zeus-client" }
+zeus-node = { path = "crates/zeus-node" }
+zeus-proto = { path = "crates/zeus-proto" }
+zeus-term = { path = "crates/zeus-term" }
+zeus-ui = { path = "crates/zeus-ui" }
+zeus-usage = { path = "crates/zeus-usage" }
+zeus-updater = { path = "crates/zeus-updater" }
+gpui = { git = "https://github.com/zed-industries/zed.git", rev = "dc2a339d5d043da448a3f7ddc7c0a85c63864aad" }
+gpui_platform = { git = "https://github.com/zed-industries/zed.git", rev = "dc2a339d5d043da448a3f7ddc7c0a85c63864aad", features = ["font-kit"] }
+image = { version = "0.25.1", default-features = false }
+nucleo-matcher = "0.3"
+notify = "8.2"
+smallvec = { version = "1.6", features = ["union", "const_new"] }
+futures-core = "0.3"
+getrandom = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.40.1", features = ["bundled"] }
+sha2 = "0.10"
+tempfile = "3"
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+unicode-segmentation = "1"
+
+[patch."https://github.com/zed-industries/zed.git"]
+# Zeus does not use GPUI vector paths during normal rendering: brand marks are
+# rasterized through CoreGraphics. Upstream nevertheless allocates full-window
+# path/MSAA targets on every resize. Keep our renderer patch local and pinned to
+# the exact Zed revision used by `gpui`.
+gpui_macos = { path = "vendor/gpui_macos" }

@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 2,
+  "id": "generic",
+  "version": "1",
+  "statusModel": "processOnly",
+  "agent": {
+    "displayName": "Agent",
+    "shortLabel": "agent",
+    "glyph": "▸",
+    "firstClass": false,
+    "statusAuthority": "process"
+  },
+  "rules": []
+}

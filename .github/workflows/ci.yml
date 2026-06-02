@@ -1,0 +1,99 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  engine:
+    name: Swift engine (daemon + CLI)
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate shell scripts
+        run: bash -n scripts/*.sh zeus/scripts/*.sh
+      - name: Install and audit browser sidecar
+        working-directory: sidecar
+        run: |
+          npm ci
+          npm audit --omit=dev
+      - name: Test
+        run: swift test
+      - name: Release build
+        run: swift build -c release
+
+  app:
+    name: Rust app (zeus)
+    runs-on: macos-15
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: zeus
+    steps:
+      - uses: actions/checkout@v4
+      # rust-toolchain.toml pins 1.95.0 with clippy + rustfmt.
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            zeus/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('zeus/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --workspace
+      - name: Release build
+        run: cargo build --workspace --release
+
+  bundle:
+    name: Package zeus.app (unsigned)
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            zeus/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('zeus/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+      - name: Install cargo-packager
+        run: cargo install cargo-packager --locked
+      - name: Package
+        env:
+          ZEUS_DIST_DIR: ${{ runner.temp }}/zeus-dist
+        run: zeus/scripts/package.sh
+      - name: Verify bundle structure and signature
+        run: |
+          app="${RUNNER_TEMP}/zeus-dist/zeus.app"
+          plutil -lint "${app}/Contents/Info.plist"
+          test -x "${app}/Contents/Resources/bin/zeusd"
+          test -x "${app}/Contents/Resources/bin/zeusd-holder"
+          test -x "${app}/Contents/Resources/bin/zeus"
+          codesign --verify --deep --strict "${app}"
+
+  browser-sidecar:
+    name: Browser sidecar integration
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install sidecar and browser engines
+        working-directory: sidecar
+        run: |
+          npm ci
+          npx playwright install chromium webkit firefox
+      - name: Run browser integration tests
+        env:
+          ZEUS_RUN_BROWSER_TESTS: "1"
+        run: swift test --filter BrowserPoolTests

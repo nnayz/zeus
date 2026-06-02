@@ -1,0 +1,40 @@
+Zeus — third-party attributions
+==================================
+
+herdr (https://github.com/herdrdev/herdr)
+-----------------------------------------
+Licensed under the Apache License, Version 2.0.
+A copy of the license is available at http://www.apache.org/licenses/LICENSE-2.0
+
+The screen-detection predicates in the following files are ADAPTED from
+herdr's TOML screen manifests (`src/detect/manifests/*.toml`):
+
+    Sources/ZeusCore/Resources/manifests/amp.json
+    Sources/ZeusCore/Resources/manifests/antigravity.json
+    Sources/ZeusCore/Resources/manifests/copilot.json
+    Sources/ZeusCore/Resources/manifests/devin.json
+    Sources/ZeusCore/Resources/manifests/droid.json
+    Sources/ZeusCore/Resources/manifests/grok.json
+    Sources/ZeusCore/Resources/manifests/hermes.json
+    Sources/ZeusCore/Resources/manifests/kilo.json
+    Sources/ZeusCore/Resources/manifests/kimi.json
+    Sources/ZeusCore/Resources/manifests/kiro.json
+    Sources/ZeusCore/Resources/manifests/opencode.json
+    Sources/ZeusCore/Resources/manifests/pi.json
+    Sources/ZeusCore/Resources/manifests/qoder.json
+
+Changes made: the rules were translated from herdr's TOML rule schema into
+Zeus's JSON predicate schema, re-prioritised for Zeus's evaluator (which
+stops at the first matching rule by descending priority), restricted to the
+screen regions Zeus implements, and paired with capture regions. Rules that
+depend on herdr-only regions (`top_non_empty_lines`, `after_last_horizontal_rule`,
+`after_last_prompt_marker`) were dropped rather than approximated.
+
+The `"agent"` capability blocks in those files — binaries, resume specs,
+session-id flags, approve/deny keystrokes, env hygiene, injection wiring — are
+Zeus's own; herdr does not model most of them. Binary names and resume
+argv were cross-checked against herdr's `src/detect/mod.rs` and
+`src/agent_resume.rs`.
+
+The manifests for claude-code, codex, cursor, gemini, generic, and shell are
+Zeus's own and predate this attribution.

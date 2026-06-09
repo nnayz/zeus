@@ -20,16 +20,34 @@ import Testing
     defer { try? FileManager.default.removeItem(at: root) }
     let repo = root.appendingPathComponent("repo").path
 
+    // Two hazards here, both of which hung this test on CI for twelve minutes
+    // until the job was killed with no failure reported.
+    //
+    // A `Pipe()` nobody reads deadlocks the child as soon as it fills the
+    // buffer, and `waitUntilExit()` then waits forever for a process that can
+    // never make progress. Send the output to /dev/null: this test asserts on
+    // exit status, never on what git printed.
+    //
+    // And an unbounded wait on a subprocess has no place in a test suite — a
+    // git that stalls for any reason at all should fail this test, not stall
+    // the run. Bound it and say which command hung.
     func run(_ args: [String], in dir: String) throws {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: git)
         p.arguments = args
         p.currentDirectoryURL = URL(fileURLWithPath: dir)
-        p.standardOutput = Pipe()
-        p.standardError = Pipe()
+        p.standardOutput = FileHandle.nullDevice
+        p.standardError = FileHandle.nullDevice
+        let finished = DispatchSemaphore(value: 0)
+        p.terminationHandler = { _ in finished.signal() }
         try p.run()
-        p.waitUntilExit()
-        #expect(p.terminationStatus == 0, "git \(args.joined(separator: " "))")
+        let command = "git \(args.joined(separator: " "))"
+        guard finished.wait(timeout: .now() + 60 * testTimeoutScale) == .success else {
+            p.terminate()
+            Issue.record("\(command) did not exit; terminated it")
+            return
+        }
+        #expect(p.terminationStatus == 0, "\(command)")
     }
 
     try FileManager.default.createDirectory(

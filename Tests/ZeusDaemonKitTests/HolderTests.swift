@@ -156,7 +156,15 @@ func runBlockingServer(_ body: @escaping @Sendable () throws -> Void) -> Task<Vo
     defer { try? FileManager.default.removeItem(at: directory) }
 
     let managerPaths = HolderManagerPaths(directory: directory)
-    let manager = HolderManagerServer(directory: directory, idleTimeout: 0.1)
+    // The manager arms its idle-shutdown timer the moment it starts listening,
+    // so this timeout has to outlast everything between here and the first
+    // launch below — the socket coming up, two fixtures being built, two child
+    // processes spawning. At 0.1s it raced on CI: the manager shut itself down
+    // before the first isAlive() poll, and no amount of waiting brought back a
+    // process that had already exited. The tail of the test still asserts the
+    // idle shutdown, just on a deadline a loaded runner can meet.
+    let manager = HolderManagerServer(
+        directory: directory, idleTimeout: 2 * testTimeoutScale)
     let managerTask = runBlockingServer { try manager.run() }
     let managerClient = HolderManagerClient(socketPath: managerPaths.socket.path)
     try await waitUntil(timeout: .seconds(5)) { managerClient.isAlive() }

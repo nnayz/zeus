@@ -36,15 +36,30 @@ import Testing
         p.executableURL = URL(fileURLWithPath: git)
         p.arguments = args
         p.currentDirectoryURL = URL(fileURLWithPath: dir)
+        // Inheriting stdin is what let git block on this runner: give it
+        // /dev/null so anything that wants input reads EOF and gives up. The
+        // environment is pinned for the same reason — no terminal prompts, and
+        // none of the ambient system or user git config a CI image may carry.
+        p.standardInput = FileHandle.nullDevice
         p.standardOutput = FileHandle.nullDevice
         p.standardError = FileHandle.nullDevice
+        p.environment = [
+            "PATH": "/usr/bin:/bin",
+            "HOME": root.path,
+            "GIT_TERMINAL_PROMPT": "0",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_OPTIONAL_LOCKS": "0",
+        ]
         let finished = DispatchSemaphore(value: 0)
         p.terminationHandler = { _ in finished.signal() }
         try p.run()
         let command = "git \(args.joined(separator: " "))"
-        guard finished.wait(timeout: .now() + 60 * testTimeoutScale) == .success else {
+        // Deliberately not scaled: 60s is already absurd for these commands,
+        // and a scaled bound only means a hung run takes longer to say so.
+        guard finished.wait(timeout: .now() + 60) == .success else {
             p.terminate()
-            Issue.record("\(command) did not exit; terminated it")
+            Issue.record("\(command) did not exit within 60s; terminated it")
             return
         }
         #expect(p.terminationStatus == 0, "\(command)")

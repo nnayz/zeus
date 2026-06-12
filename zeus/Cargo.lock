@@ -1327,6 +1327,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "zeus-engine"
+version = "0.1.0"
+dependencies = [
+ "zeus-proto",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "zeus-node"
 version = "0.1.0"
 dependencies = [

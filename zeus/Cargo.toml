@@ -2,6 +2,7 @@
 members = [
     "crates/zeus-app",
     "crates/zeus-client",
+    "crates/zeus-engine",
     "crates/zeus-node",
     "crates/zeus-mcp",
     "crates/zeus-proto",
@@ -19,6 +20,7 @@ license = "Apache-2.0"
 
 [workspace.dependencies]
 zeus-client = { path = "crates/zeus-client" }
+zeus-engine = { path = "crates/zeus-engine" }
 zeus-node = { path = "crates/zeus-node" }
 zeus-proto = { path = "crates/zeus-proto" }
 zeus-term = { path = "crates/zeus-term" }

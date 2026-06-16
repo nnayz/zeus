@@ -21,7 +21,9 @@ const DESTRUCTIVE: &[&str] = &[
     "> /dev/",
 ];
 
-const NETWORK: &[&str] = &["curl ", "wget ", "http://", "https://", "ssh ", "scp ", "nc "];
+const NETWORK: &[&str] = &[
+    "curl ", "wget ", "http://", "https://", "ssh ", "scp ", "nc ",
+];
 
 const FILE_WRITE: &[&str] = &[
     "write", "edit", "mv ", "cp ", "mkdir", "touch ", "chmod", "chown",

@@ -18,6 +18,7 @@
 //!   it can be built and tested while the existing daemon keeps serving live
 //!   sessions.
 
+pub mod control;
 pub mod detect;
 pub mod log;
 pub mod pty;
@@ -26,6 +27,7 @@ pub mod screen;
 pub mod session;
 pub mod status;
 
+pub use control::ControlServer;
 pub use detect::{ManifestEngine, ManifestState, ScreenObservation, ScreenSnapshot};
 pub use log::OutputLog;
 pub use pty::{Exit, Pty, PtySpec};

@@ -1,10 +1,36 @@
 # zeus
 
-Native macOS orchestrator for coding agents. Run Claude Code, Codex, Cursor, Gemini, and
-plain shells in parallel — across git worktrees or on remote hosts — each with a live status
-(working / needs-you / done), tmux-like persistence (closing the app never kills a session; a
-daemon restart brings conversations back), a menu-bar rollup, and an MCP server so agents can
-spawn and orchestrate other agents.
+[![CI](https://github.com/nnayz/zeus/actions/workflows/ci.yml/badge.svg)](https://github.com/nnayz/zeus/actions/workflows/ci.yml)
+
+Native macOS orchestrator for coding agents. Run Claude Code, Codex, Cursor, Gemini and plain
+shells in parallel — across git worktrees or on remote hosts — each with a live status
+(working / needs-you / done) and tmux-like persistence: closing the app never kills a session,
+and a daemon restart brings conversations back.
+
+![zeus](docs/images/zeus.png)
+
+## Install
+
+Download the latest DMG from [Releases](https://github.com/nnayz/zeus/releases/latest),
+open it, and drag zeus to Applications. Universal (Apple silicon and Intel), signed and
+notarized. zeus updates itself from there.
+
+macOS 15 or newer.
+
+## What it does
+
+- **Many agents at once.** Each session is a real terminal with a real PTY. Group them by
+  project, split them across git worktrees, or run them on a remote host over ssh+tmux.
+- **Status you can trust.** zeus reads what an agent actually painted on its screen and tells
+  you which ones are working, which are waiting on you, and which are done — so you can watch
+  ten sessions without reading ten terminals.
+- **Sessions outlive the app.** A background daemon owns the PTYs. Quit zeus, reopen it, and
+  everything is still there.
+- **Agents can orchestrate agents.** An MCP server lets a running agent spawn another one,
+  watch it, read its output, and answer its prompts.
+
+First-class status detection and resume are Claude Code and Codex. Cursor and Gemini run with
+partial support, and anything else runs as a terminal with running/exited status.
 
 ## Architecture
 
@@ -13,57 +39,48 @@ Two processes, one wire protocol:
 - **`zeus`** — the desktop app: Rust + [GPUI](https://github.com/zed-industries/zed). Owns the
   window, sidebar, terminal renderer, command palette, and usage accounting. Lives in
   [`zeus/`](zeus/).
-- **`zeusd`** — headless Swift daemon, launched by the app and outliving it. Owns PTYs and
-  child agent processes, an offset-addressed output log per session (for detach/replay), a
+- **`zeusd`** — a headless Swift daemon, launched by the app and outliving it. Owns PTYs and
+  child agent processes, an offset-addressed output log per session (for detach and replay), a
   headless terminal emulator for status detection, the session registry and persistence,
   worktrees, and the control socket.
-- **`zeus`** — small CLI: `mcp-stdio` (the MCP shim injected into agents), `hook`/`notify`
-  (fail-open forwarders wired into Claude hooks and Codex notify), and `status`/`doctor`.
 
-`zeusd-holder` is a tiny helper that owns the PTY master so sessions survive a daemon
-crash or restart.
+`zeus` is a small CLI: the MCP shim injected into agents, the hook and notify forwarders, and
+`status`/`doctor`. `zeusd-holder` owns the PTY master so sessions survive a daemon restart.
 
-### Swift packages
+> **A Rust port of the engine is in progress** in `zeus/crates/zeus-engine`, so that zeus can run
+> on Linux and Windows. It is not shipped — the released app runs the Swift daemon above. See
+> [`zeus/PORT.md`](zeus/PORT.md) for what is done and what is left.
 
-| Target | Role |
-|---|---|
-| `ZeusCore` | Domain models (SessionRecord, status, attention, titles) and agent manifests |
-| `ZeusProtocol` | Control-channel NDJSON envelope + binary data-channel frame codec |
-| `ZeusClient` | `DaemonClient` + `SessionAttachment` actors |
-| `ZeusDetection` | JSON manifest engine + `StatusReducer` state machine |
-| `ZeusGit` / `ZeusMCP` / `ZeusDaemonKit` | Worktrees, MCP server, PTY/log/registry/IPC |
-| `ZeusHolderKit` / `CZeusPTY` | PTY ownership that outlives the daemon |
+## Adding an agent
 
-## Build & run
+Agent support is data, not code. Each agent is one JSON file in
+`Sources/ZeusCore/Resources/manifests/` describing how to spawn it, how to resume, which keys
+approve or deny a prompt, and the screen rules that decide whether it is working, waiting, or
+done. Copy the closest existing manifest and adjust it — no Swift or Rust required. This is the
+easiest way to contribute.
 
-The app needs both toolchains: Rust 1.95 (pinned in `zeus/rust-toolchain.toml`) and Swift 6
-with the Xcode command-line tools.
+## Building from source
+
+Needs both toolchains: Rust (pinned in `zeus/rust-toolchain.toml`) and Swift 6 with the Xcode
+command-line tools. The first Rust build compiles GPUI from a pinned Zed revision and takes a
+while.
 
 ```sh
-# Engine
-swift build
-swift test
-
-# App
-cd zeus
-cargo build
+swift build && swift test          # engine
+cd zeus && cargo build             # app
 cargo run -p zeus-app
 
-# Full bundle (builds the daemon, holder, and CLI into zeus.app)
-zeus/scripts/package.sh
+zeus/scripts/package.sh            # full bundle
 zeus/scripts/install-local.sh
 ```
 
-See [`zeus/PACKAGING.md`](zeus/PACKAGING.md) for signing and notarization,
-[`zeus/NODE.md`](zeus/NODE.md) for running agents on a remote VPS node, and
-[`zeus/PERF.md`](zeus/PERF.md) for the rendering performance gates.
+[`zeus/PACKAGING.md`](zeus/PACKAGING.md) covers signing and notarization,
+[`zeus/UPDATING.md`](zeus/UPDATING.md) the updater and release flow,
+[`zeus/NODE.md`](zeus/NODE.md) running agents on a remote VPS node.
 
-## Agent support
+## Contributing
 
-First-class status detection and resume: Claude Code and Codex. Cursor and Gemini run with
-partial support (see the manifests for what each one wires up); everything else runs as a
-generic terminal with running/exited status. Detection rules are data — they live in
-`Sources/ZeusCore/Resources/manifests/` and adding an agent is a JSON file, not code.
+See [CONTRIBUTING.md](CONTRIBUTING.md). Bug reports, fixes, and new agent manifests all welcome.
 
 ## License
 

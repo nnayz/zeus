@@ -5,6 +5,23 @@ and transactional local↔cloud handoff, see [NODE.md](NODE.md).
 
 `zeus` is the Rust + GPUI desktop app. The workspace holds the protocol/client core, terminal renderer, shared design system, session store, usage accounting, and window/sidebar shell. [`PLAN.md`](PLAN.md) is the historical record of the port from the retired Swift client, kept for its architecture and coexistence notes.
 
+## Install
+
+```sh
+brew install --cask nnayz/zeus/zeus
+```
+
+Or download the DMG from [the latest release](https://github.com/nnayz/zeus/releases/latest).
+Either way you get the same universal build, signed and notarized, so it opens
+without a Gatekeeper prompt.
+
+The cask lives in [nnayz/homebrew-zeus](https://github.com/nnayz/homebrew-zeus)
+rather than `homebrew-cask`, which requires a notability threshold the project
+does not meet yet. It declares `auto_updates true`, so Homebrew installs zeus
+once and then leaves it alone — zeus updates itself after that, and
+`brew upgrade` will not clobber a build the app moved itself to. See
+[UPDATING.md](UPDATING.md) for how that works.
+
 ## Toolchain and GPUI pin
 
 - Rust: `1.95.0` (stable, pinned by `rust-toolchain.toml`)

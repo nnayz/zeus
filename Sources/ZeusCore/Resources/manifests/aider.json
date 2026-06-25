@@ -1,0 +1,81 @@
+{
+  "_notice": "Screen rules authored from live captures of aider 0.86.2 (PTY runs; gitignore/model-warning/create-file confirms, request spinner, bare and ask-mode prompts). Every predicate below matches text aider actually painted; nothing is guessed from docs.",
+  "schemaVersion": 2,
+  "id": "aider",
+  "version": "2026.08.05.1",
+  "statusModel": "full",
+  "agent": {
+    "displayName": "Aider",
+    "shortLabel": "aider",
+    "glyph": "✎",
+    "aliases": [
+      "aider",
+      "aider-chat"
+    ],
+    "firstClass": true,
+    "statusAuthority": "screen",
+    "binary": "aider",
+    "returnToLoginShell": true,
+    "resume": {
+      "style": "latest",
+      "token": "--restore-chat-history"
+    },
+    "_resumeNotice": "aider has no session ids; --restore-chat-history (verified in 0.86.2 --help) replays .aider.chat.history.md into a fresh process, so latest-style is the only resume that means anything here.",
+    "foregroundExecNames": [
+      "aider",
+      "aider-chat"
+    ],
+    "_execNotice": "aider is a Python console script, so the exec path is the venv interpreter; pipx (~/.local/pipx/venvs/aider/...) and uv (~/.local/share/uv/tools/aider-chat/...) both put an identifying directory on the path, which the component match catches. A bare system-python install is the same blind spot the node-based agents already document.",
+    "approve": {
+      "text": "y",
+      "submit": true
+    },
+    "deny": {
+      "text": "n",
+      "submit": true
+    }
+  },
+  "rules": [
+    {
+      "id": "confirm-prompt",
+      "state": "blockedPermission",
+      "priority": 1000,
+      "region": "bottom_non_empty_lines",
+      "regionLines": 4,
+      "when": {
+        "contains": "(y)es/(n)o"
+      },
+      "flags": [
+        "visible_blocker"
+      ],
+      "capture": {
+        "region": "bottom_non_empty_lines",
+        "regionLines": 6,
+        "maxChars": 400
+      },
+      "_notice": "Every aider confirm goes through the same prompt: 'Create new file? (Y)es/(N)o [Yes]:', 'Add .aider* to .gitignore (recommended)? (Y)es/(N)o [Yes]:', 'Open documentation url for more info? (Y)es/(N)o/(D)on't ask again [Yes]:', and the (A)ll/(S)kip-all file variants — all contain '(Y)es/(N)o'. Explicit capture because aider draws no prompt box, so the default prompt_box_body capture would come back empty."
+    },
+    {
+      "id": "working-spinner",
+      "state": "working",
+      "priority": 900,
+      "region": "bottom_non_empty_lines",
+      "regionLines": 3,
+      "when": {
+        "lineRegex": "^\\s*[░█]{2}"
+      },
+      "_notice": "aider's spinner is a two-block sweep ('░█ Waiting for openai/…', '█░ Generating commit message with …') that walks across the line with leading spaces. Matching the glyph pair keeps the rule model- and message-agnostic. Streaming shows no stable marker after the first token, so the engine holds this state until the prompt rule flips to idle — which is the transition aider actually makes."
+    },
+    {
+      "id": "idle-prompt",
+      "state": "idle",
+      "priority": 500,
+      "region": "bottom_non_empty_lines",
+      "regionLines": 1,
+      "when": {
+        "lineRegex": "^\\s*[a-z-]*>\\s*$"
+      },
+      "_notice": "Ready prompt is a bare '>' in code mode and '<mode>>' after /chat-mode ('ask>  ' captured live, trailing spaces included) — mode names are lowercase words, hence [a-z-]*. Scoped to the single bottom non-blank line so quoted '>' lines in scrollback cannot fire it."
+    }
+  ]
+}

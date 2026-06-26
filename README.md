@@ -11,9 +11,17 @@ and a daemon restart brings conversations back.
 
 ## Install
 
-Download the latest DMG from [Releases](https://github.com/nnayz/zeus/releases/latest),
-open it, and drag zeus to Applications. Universal (Apple silicon and Intel), signed and
-notarized. zeus updates itself from there.
+```sh
+brew install --cask nnayz/zeus/zeus
+```
+
+Or download the latest DMG from [Releases](https://github.com/nnayz/zeus/releases/latest),
+open it, and drag zeus to Applications. Either way it is the same universal build (Apple
+silicon and Intel), signed and notarized. zeus updates itself from there.
+
+The tap has to be named in full — a bare `zeus` resolves only against Homebrew's default
+taps. The cask lives in [nnayz/homebrew-zeus](https://github.com/nnayz/homebrew-zeus)
+rather than `homebrew-cask`, which requires a notability threshold zeus does not meet yet.
 
 macOS 15 or newer.
 

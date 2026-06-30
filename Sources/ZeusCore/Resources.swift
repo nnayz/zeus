@@ -78,6 +78,37 @@ public struct PRCheck: Codable, Hashable, Sendable {
     }
 }
 
+/// One visible item in the pull request conversation. GitHub returns issue
+/// comments and submitted reviews as separate collections; the daemon folds
+/// both into this small, chronological wire shape so clients can render one
+/// familiar review timeline without knowing GitHub's GraphQL object graph.
+public struct PRDiscussionItem: Codable, Hashable, Sendable {
+    /// "comment" or "review".
+    public var kind: String
+    public var author: String
+    public var body: String
+    /// APPROVED / CHANGES_REQUESTED / COMMENTED for submitted reviews.
+    public var state: String?
+    public var createdAt: Date?
+    public var url: String?
+
+    public init(
+        kind: String,
+        author: String,
+        body: String,
+        state: String? = nil,
+        createdAt: Date? = nil,
+        url: String? = nil
+    ) {
+        self.kind = kind
+        self.author = author
+        self.body = body
+        self.state = state
+        self.createdAt = createdAt
+        self.url = url
+    }
+}
+
 /// GitHub-side state of a PR captured as a session artifact, fetched by the
 /// daemon via the `gh` CLI. Raw enum-ish fields keep GitHub's own uppercase
 /// vocabulary (OPEN / MERGEABLE / CHANGES_REQUESTED …) so nothing is lost in
@@ -86,6 +117,10 @@ public struct PullRequestStatus: Codable, Hashable, Sendable {
     public var url: String
     public var number: Int
     public var title: String?
+    public var author: String?
+    public var body: String?
+    public var baseRefName: String?
+    public var headRefName: String?
     /// OPEN / MERGED / CLOSED.
     public var state: String
     public var isDraft: Bool
@@ -111,12 +146,18 @@ public struct PullRequestStatus: Codable, Hashable, Sendable {
     public var checksPending: Int
     /// The individual checks behind the counts, for detail UI.
     public var checks: [PRCheck]?
+    /// Issue comments and submitted reviews, sorted oldest first.
+    public var discussion: [PRDiscussionItem]?
     public var fetchedAt: Date
 
     public init(
         url: String,
         number: Int,
         title: String? = nil,
+        author: String? = nil,
+        body: String? = nil,
+        baseRefName: String? = nil,
+        headRefName: String? = nil,
         state: String,
         isDraft: Bool = false,
         reviewDecision: String? = nil,
@@ -133,11 +174,16 @@ public struct PullRequestStatus: Codable, Hashable, Sendable {
         checksFailed: Int = 0,
         checksPending: Int = 0,
         checks: [PRCheck]? = nil,
+        discussion: [PRDiscussionItem]? = nil,
         fetchedAt: Date
     ) {
         self.url = url
         self.number = number
         self.title = title
+        self.author = author
+        self.body = body
+        self.baseRefName = baseRefName
+        self.headRefName = headRefName
         self.state = state
         self.isDraft = isDraft
         self.reviewDecision = reviewDecision
@@ -154,6 +200,7 @@ public struct PullRequestStatus: Codable, Hashable, Sendable {
         self.checksFailed = checksFailed
         self.checksPending = checksPending
         self.checks = checks
+        self.discussion = discussion
         self.fetchedAt = fetchedAt
     }
 

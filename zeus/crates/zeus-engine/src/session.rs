@@ -275,6 +275,33 @@ impl Session {
         self.shared.screen.lock().expect("screen").lines()
     }
 
+    /// The emulator's current geometry.
+    pub fn screen_size(&self) -> (usize, usize) {
+        self.shared.screen.lock().expect("screen").size()
+    }
+
+    /// Sends text the way a user would.
+    ///
+    /// Non-submitting input goes through raw — pickers and permission dialogs
+    /// read the literal keypress. A submitted prompt is framed as a bracketed
+    /// paste when the child has that mode on (so embedded newlines don't
+    /// submit the composer early), and the Enter is a SEPARATE write after a
+    /// short settle — never riding the same buffer, where a truncated paste
+    /// also loses or misfires it. Ported from `AgentSession.sendText`.
+    pub fn send_text(&self, text: &str, submit: bool) -> std::io::Result<()> {
+        if !submit {
+            return self.write_input(text.as_bytes());
+        }
+        let framed = if self.shared.screen.lock().expect("screen").bracketed_paste() {
+            format!("\x1b[200~{text}\x1b[201~")
+        } else {
+            text.to_string()
+        };
+        self.write_input(framed.as_bytes())?;
+        std::thread::sleep(Duration::from_millis(30));
+        self.write_input(b"\r")
+    }
+
     /// Sends bytes to the child, as if typed.
     pub fn write_input(&self, bytes: &[u8]) -> std::io::Result<()> {
         match &self.transport {

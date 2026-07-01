@@ -20,6 +20,7 @@ license = "Apache-2.0"
 
 [workspace.dependencies]
 alacritty_terminal = { version = "0.26", default-features = false }
+base64 = "0.22"
 zeus-client = { path = "crates/zeus-client" }
 zeus-engine = { path = "crates/zeus-engine" }
 zeus-node = { path = "crates/zeus-node" }

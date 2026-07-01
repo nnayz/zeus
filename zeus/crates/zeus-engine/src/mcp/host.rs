@@ -28,6 +28,7 @@ const WAIT_POLL: Duration = Duration::from_millis(100);
 pub struct RegistryHost {
     registry: Arc<Mutex<Registry>>,
     logs_dir: PathBuf,
+    holder: Option<crate::session::HolderConfig>,
     /// The session calling these tools, when it identified itself.
     caller: Option<String>,
 }
@@ -37,8 +38,15 @@ impl RegistryHost {
         Self {
             registry,
             logs_dir: logs_dir.into(),
+            holder: None,
             caller: std::env::var(SESSION_ID_ENV).ok(),
         }
+    }
+
+    /// Spawn sessions through holders, so they survive this process.
+    pub fn with_holder(mut self, holder: crate::session::HolderConfig) -> Self {
+        self.holder = Some(holder);
+        self
     }
 
     /// Overrides the calling session, for tests and for hosts that know the
@@ -352,6 +360,7 @@ impl RegistryHost {
             manifest_id: kind.clone(),
             authority,
             logs_dir: self.logs_dir.clone(),
+            holder: self.holder.clone(),
         };
         registry
             .spawn(spec, record)

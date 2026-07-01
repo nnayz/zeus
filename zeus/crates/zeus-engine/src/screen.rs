@@ -100,17 +100,31 @@ impl HeadlessScreen {
     }
 
     /// Feeds raw PTY output into the emulator.
+    ///
+    /// The whole chunk goes to the parser in one call — vte has a batched
+    /// fast path for plain text that byte-at-a-time feeding defeats, and the
+    /// difference is multi-x on heavy output like build logs.
     pub fn feed(&mut self, bytes: &[u8]) {
         self.scan_progress(bytes);
-        for byte in bytes {
-            self.parser.advance(&mut self.term, &[*byte]);
-        }
+        let title_before = self.title.clone();
+        self.parser.advance(&mut self.term, bytes);
         self.drain_events();
 
-        let digest = self.digest();
-        if digest != self.last_digest {
-            self.last_digest = digest;
-            self.content_seq += 1;
+        // Damage is the cheap gate: when the emulator reports nothing
+        // touched, skip fingerprinting entirely. When it does (which includes
+        // invisible changes like a cursor toggle), a direct cell hash — no
+        // per-line String allocation — decides whether the *content* changed.
+        let damaged = match self.term.damage() {
+            alacritty_terminal::term::TermDamage::Full => true,
+            alacritty_terminal::term::TermDamage::Partial(mut lines) => lines.next().is_some(),
+        };
+        self.term.reset_damage();
+        if damaged || self.title != title_before {
+            let digest = self.digest_cells();
+            if digest != self.last_digest {
+                self.last_digest = digest;
+                self.content_seq += 1;
+            }
         }
     }
 
@@ -136,6 +150,19 @@ impl HeadlessScreen {
         self.term
             .mode()
             .contains(alacritty_terminal::term::TermMode::ALT_SCREEN)
+    }
+
+    /// Whether the child has bracketed-paste mode on — submitted prompts are
+    /// then framed as a paste so embedded newlines don't submit early.
+    pub fn bracketed_paste(&self) -> bool {
+        self.term
+            .mode()
+            .contains(alacritty_terminal::term::TermMode::BRACKETED_PASTE)
+    }
+
+    /// The current grid geometry.
+    pub fn size(&self) -> (usize, usize) {
+        (self.geometry.cols, self.geometry.rows)
     }
 
     /// The visible grid as plain text, trailing blank lines removed.
@@ -180,18 +207,24 @@ impl HeadlessScreen {
         }
     }
 
-    /// Cheap content fingerprint, so `content_seq` only advances when the
-    /// visible screen actually changed. Detection uses that to skip
-    /// re-evaluating a frame it has already judged.
-    fn digest(&self) -> u64 {
+    /// Content fingerprint hashed straight off the grid cells, so
+    /// `content_seq` only advances when the visible screen actually changed.
+    /// Detection uses that to skip re-evaluating a frame it has already
+    /// judged.
+    fn digest_cells(&self) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        for line in self.lines() {
-            line.hash(&mut hasher);
+        let grid = self.term.grid();
+        for row in 0..self.geometry.rows {
+            let line = Line(row as i32);
+            for column in 0..self.geometry.cols {
+                grid[line][Column(column)].c.hash(&mut hasher);
+            }
         }
         self.title.hash(&mut hasher);
         hasher.finish()
     }
+
 
     /// Extracts `ESC ] 9 ; 4 ; state ; value` progress reports.
     ///

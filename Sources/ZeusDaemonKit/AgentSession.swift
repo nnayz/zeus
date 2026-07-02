@@ -568,24 +568,41 @@ public actor AgentSession {
     }
 
     private var gridFlushScheduled = false
+    private var lastGridFlushAt: ContinuousClock.Instant?
+    /// The coalescing ceiling during bursts. Sustained output paints at this
+    /// cadence; a lone frame after quiet is never delayed by it. ~60fps: the
+    /// conversion cost only exists while output flows AND a sink is attached,
+    /// so background sessions and idle budgets are untouched. Matched by the
+    /// client's `ACTIVE_REPAINT_INTERVAL` and `RESIZE_CADENCE`.
+    private static let gridFlushInterval: Duration = .milliseconds(16)
     /// Cursor state (col, row, visible) carried by the last broadcast grid
     /// frame, so cursor-only movement still produces a frame (see flushGrid).
     private var lastSentCursor: (col: Int, row: Int, visible: Bool)?
 
-    /// Coalesce grid emission: terminal output is readable at 20fps, while every
-    /// flush costs a screen→cells conversion here and client-side grid painting.
-    /// Input is still written immediately; only visual delivery is paced.
+    /// Leading-edge coalescing, like the client's RepaintPacer: the first
+    /// output after a quiet spell flushes IMMEDIATELY — that frame is the echo
+    /// of a keystroke at an idle prompt, the latency-critical case, and a
+    /// trailing-only timer used to add a flat 50ms to it. Only when another
+    /// flush happened within the interval does the timer coalesce, capping
+    /// burst work. Idle cost is unchanged: no output, no timer.
     private func scheduleGridFlush() {
         guard !gridFlushScheduled else { return }
-        gridFlushScheduled = true
-        Task { [weak self] in
-            try? await Task.sleep(for: .milliseconds(50))
-            await self?.flushGrid()
+        let now = ContinuousClock.now
+        if let last = lastGridFlushAt, now - last < Self.gridFlushInterval {
+            gridFlushScheduled = true
+            let remaining = Self.gridFlushInterval - (now - last)
+            Task { [weak self] in
+                try? await Task.sleep(for: remaining)
+                await self?.flushGrid()
+            }
+            return
         }
+        flushGrid()
     }
 
     private func flushGrid() {
         gridFlushScheduled = false
+        lastGridFlushAt = ContinuousClock.now
         scanArtifactsIfDue()
         // Feeding the emulator above keeps snapshots and later attachments
         // authoritative. With no consumers, however, converting every row into

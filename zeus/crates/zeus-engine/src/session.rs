@@ -361,6 +361,24 @@ impl Session {
             .scrollback_cells(first_row, max_rows)
     }
 
+    /// Signals the whole child tree. For held sessions the holder walks the
+    /// tree with pid-identity checks; a direct session signals its group.
+    /// Returns the (pid, start-time) samples the holder observed, when held.
+    pub fn signal_tree(&self, signal: i32) -> std::io::Result<Vec<(i32, i64)>> {
+        match &self.transport {
+            Transport::Direct(pty) => {
+                pty.lock().expect("pty").kill_group(signal)?;
+                Ok(Vec::new())
+            }
+            Transport::Held(client) => Ok(client
+                .signal(signal)
+                .map_err(holder_io_error)?
+                .into_iter()
+                .map(|sample| (sample.pid, sample.start_sec))
+                .collect()),
+        }
+    }
+
     fn write_raw(&self, bytes: &[u8]) -> std::io::Result<()> {
         match &self.transport {
             Transport::Direct(pty) => {

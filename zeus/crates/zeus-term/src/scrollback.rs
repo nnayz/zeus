@@ -173,6 +173,13 @@ impl ScrollbackViewport {
         self.cache.len()
     }
 
+    /// Content sequence the fetched-row cache belongs to. Renderer-side caches
+    /// derived from those rows must invalidate when this moves.
+    #[must_use]
+    pub const fn cache_seq(&self) -> Option<u64> {
+        self.cache_seq
+    }
+
     #[must_use]
     pub fn max_offset(&self, visible_rows: usize) -> i64 {
         if self.geometry_known {

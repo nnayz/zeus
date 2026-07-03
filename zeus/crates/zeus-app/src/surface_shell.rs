@@ -226,6 +226,24 @@ impl UtilitySurfaces {
             })
             .detach();
         }
+        // This view is `.cached()` in RootView, so ambient window redraws no
+        // longer reach it: store changes must notify it directly.
+        {
+            let mut changes = store_runtime.changes();
+            cx.spawn(async move |this, cx| {
+                loop {
+                    match changes.recv().await {
+                        Ok(()) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            if this.update(cx, |_, cx| cx.notify()).is_err() {
+                                return;
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                    }
+                }
+            })
+            .detach();
+        }
         Self {
             focus,
             surface: if settings_preview.is_some() {

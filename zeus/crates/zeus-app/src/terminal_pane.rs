@@ -1060,8 +1060,8 @@ impl TerminalPane {
         cx.notify();
     }
 
-    fn close_find(&mut self, _: &CloseFind, window: &mut Window, cx: &mut Context<Self>) {
-        if self.close_find_for_selected(window) {
+    fn close_find(&mut self, _: &CloseFind, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.close_find_for_selected() {
             cx.stop_propagation();
             cx.notify();
         } else {
@@ -1069,7 +1069,7 @@ impl TerminalPane {
         }
     }
 
-    fn close_find_for_selected(&mut self, window: &mut Window) -> bool {
+    fn close_find_for_selected(&mut self) -> bool {
         let Some(id) = self.selected_id() else {
             return false;
         };
@@ -1080,19 +1080,18 @@ impl TerminalPane {
             return false;
         }
         resident.element.set_find_highlights(Vec::new());
-        window.refresh();
         true
     }
 
-    fn find_next(&mut self, _: &FindNext, window: &mut Window, cx: &mut Context<Self>) {
-        self.navigate_find(false, window, cx);
+    fn find_next(&mut self, _: &FindNext, _window: &mut Window, cx: &mut Context<Self>) {
+        self.navigate_find(false, cx);
     }
 
-    fn find_previous(&mut self, _: &FindPrevious, window: &mut Window, cx: &mut Context<Self>) {
-        self.navigate_find(true, window, cx);
+    fn find_previous(&mut self, _: &FindPrevious, _window: &mut Window, cx: &mut Context<Self>) {
+        self.navigate_find(true, cx);
     }
 
-    fn navigate_find(&mut self, backwards: bool, window: &mut Window, cx: &mut Context<Self>) {
+    fn navigate_find(&mut self, backwards: bool, cx: &mut Context<Self>) {
         let Some(id) = self.selected_id() else {
             return;
         };
@@ -1108,7 +1107,6 @@ impl TerminalPane {
             resident.element.find_next(find);
         }
         resident.element.sync_find_highlights(find);
-        window.refresh();
         cx.stop_propagation();
         cx.notify();
     }
@@ -1425,7 +1423,7 @@ impl TerminalPane {
                 "escape" => {
                     resident.find = None;
                     resident.element.set_find_highlights(Vec::new());
-                    window.refresh();
+                    cx.notify();
                 }
                 "enter" => {
                     if event.keystroke.modifiers.shift {
@@ -1434,7 +1432,7 @@ impl TerminalPane {
                         resident.element.find_next(find);
                     }
                     resident.element.sync_find_highlights(find);
-                    window.refresh();
+                    cx.notify();
                 }
                 // Everything else is text editing, through the same key map the
                 // command palette and Quick Open use.
@@ -1573,7 +1571,6 @@ impl TerminalPane {
                 row,
             }) => resident.attachment.scroll(direction, lines, col, row),
             Some(WheelRoute::Local { .. }) => {
-                window.refresh();
                 if let Some(request) = resident
                     .element
                     .begin_scrollback_fetch(usize::from(visible_rows))
@@ -2017,11 +2014,14 @@ impl TerminalPane {
                         1 => resident.element.begin_selection(col, row),
                         _ => resident.element.select_word(col, row),
                     }
-                    window.refresh();
+                    // notify, never window.refresh(): refresh() flags the
+                    // whole frame as caching-disabled, repainting every cached
+                    // view at pointer-event rate.
+                    cx.notify();
                 }),
             )
             .on_mouse_move(
-                cx.listener(|this, event: &gpui::MouseMoveEvent, window, _cx| {
+                cx.listener(|this, event: &gpui::MouseMoveEvent, window, cx| {
                     if event.pressed_button != Some(MouseButton::Left) {
                         return;
                     }
@@ -2035,7 +2035,7 @@ impl TerminalPane {
                         return;
                     };
                     resident.element.drag_selection(col, row);
-                    window.refresh();
+                    cx.notify();
                 }),
             )
             .on_scroll_wheel(cx.listener(Self::handle_scroll))
@@ -2083,12 +2083,11 @@ impl TerminalPane {
                     .gap(px(5.0))
                     .child(sf_symbol("arrow.down", 11.5, rgba(0xffffff99)))
                     .child(format!("{view_offset} lines · Return to live"))
-                    .on_click(cx.listener(move |this, _, window, cx| {
+                    .on_click(cx.listener(move |this, _, _window, cx| {
                         if let Some(resident) = this.residents.get_mut(&return_id) {
                             resident
                                 .element
                                 .scroll_to_live(usize::from(resident.last_size.1));
-                            window.refresh();
                             cx.notify();
                         }
                     })),
@@ -2240,24 +2239,24 @@ impl TerminalPane {
                                     "find-previous",
                                     "chevron.up",
                                     cx,
-                                    |this, w, cx| {
-                                        this.navigate_find(true, w, cx);
+                                    |this, _w, cx| {
+                                        this.navigate_find(true, cx);
                                     },
                                 ))
                                 .child(find_icon_button(
                                     "find-next",
                                     "chevron.down",
                                     cx,
-                                    |this, w, cx| {
-                                        this.navigate_find(false, w, cx);
+                                    |this, _w, cx| {
+                                        this.navigate_find(false, cx);
                                     },
                                 ))
                                 .child(find_icon_button(
                                     "find-close",
                                     "xmark",
                                     cx,
-                                    |this, w, cx| {
-                                        this.close_find_for_selected(w);
+                                    |this, _w, cx| {
+                                        this.close_find_for_selected();
                                         cx.notify();
                                     },
                                 )),

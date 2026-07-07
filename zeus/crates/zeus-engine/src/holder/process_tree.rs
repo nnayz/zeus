@@ -108,7 +108,7 @@ pub fn signal(root: i32, signal: i32) -> Vec<HolderProcessSample> {
     let tree = enumerate(root);
     let mut ordered = tree.clone();
     if signal == libc::SIGCONT {
-        ordered.sort_by(|a, b| b.start_sec.cmp(&a.start_sec));
+        ordered.sort_by_key(|sample| std::cmp::Reverse(sample.start_sec));
     }
     signal_group(root, signal);
     for sample in &ordered {

@@ -173,9 +173,11 @@ impl ManifestEngine {
 
         // Region text is shared across rules — five of claude's ten read
         // `whole_recent` — so extract and join each region at most once per
-        // snapshot. Keyed by region and line count, since
+        // snapshot, along with the case-folded copy that `contains` predicates
+        // search (folding ~12KB per predicate per evaluation dwarfed the
+        // search itself). Keyed by region and line count, since
         // `bottom_non_empty_lines` varies by count.
-        let mut cache: HashMap<(RegionKind, usize), (Vec<String>, String)> = HashMap::new();
+        let mut cache: HashMap<(RegionKind, usize), (Vec<String>, String, String)> = HashMap::new();
 
         let mut winner: Option<&Rule> = None;
         for rule in &manifest.rules {
@@ -183,10 +185,12 @@ impl ManifestEngine {
             let entry = cache.entry(key).or_insert_with(|| {
                 let lines = regions::extract(rule.region, rule.region_lines, snapshot);
                 let text = lines.join("\n");
-                (lines, text)
+                let text_lower = text.to_lowercase();
+                (lines, text, text_lower)
             });
             let context = manifest::PredicateContext {
                 text: &entry.1,
+                text_lower: &entry.2,
                 lines: &entry.0,
                 progress_state: snapshot.osc_progress_state,
             };

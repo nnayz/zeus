@@ -136,6 +136,19 @@ fn main() {
         server.events(),
         Arc::new(AtomicBool::new(false)),
     );
+    let _governor = zeus_engine::governor::spawn_governor(
+        Arc::clone(&registry),
+        server.events(),
+        server.attach_hub(),
+        server.governor_config(),
+        Arc::new(AtomicBool::new(false)),
+    );
+    let _pr_monitor = zeus_engine::pr_monitor::spawn_pr_monitor(
+        Arc::clone(&registry),
+        server.events(),
+        server.attach_hub(),
+        Arc::new(AtomicBool::new(false)),
+    );
     let _persist_flusher = zeus_engine::registry::spawn_persist_flusher(
         Arc::clone(&registry),
         Arc::new(AtomicBool::new(false)),

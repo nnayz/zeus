@@ -235,6 +235,7 @@ impl Registry {
             let manifest_id = record.kind.id().to_string();
             let record_status = record.status.clone();
             let record_needs_input = record.needs_input.clone();
+            let record_hibernated = record.hibernation.is_some();
             let spec = SessionSpec {
                 id: session_id.clone(),
                 // The holder owns the real spec; this one only shapes the
@@ -247,9 +248,13 @@ impl Registry {
             };
             let seeded = (!matches!(record_status, SessionStatus::Exited(_)))
                 .then(|| (record_status.clone(), record_needs_input.clone()));
+            let was_hibernated = record_hibernated;
             match Session::adopt_with_status(spec, holder, &stat, Arc::clone(&self.engine), seeded)
             {
                 Ok(session) => {
+                    if was_hibernated {
+                        let _ = session.set_hibernated(true);
+                    }
                     self.sessions.insert(session_id.clone(), session);
                     adopted.push(session_id);
                 }
@@ -405,6 +410,27 @@ impl Registry {
         Ok(())
     }
 
+    /// SIGCONTs a hibernated session's tree, flushes any input queued while
+    /// it was frozen, and clears the record. A no-op for awake sessions, so
+    /// every input path can call it unconditionally.
+    pub fn wake_session(&mut self, id: &str) -> std::io::Result<()> {
+        let hibernated = self
+            .records
+            .get(id)
+            .is_some_and(|record| record.hibernation.is_some())
+            || self.sessions.get(id).is_some_and(Session::is_hibernated);
+        if !hibernated {
+            return Ok(());
+        }
+        if let Some(session) = self.sessions.get(id) {
+            session.signal_tree(libc::SIGCONT)?;
+            // Flush AFTER the CONT so the tree is drinking again.
+            let _ = session.set_hibernated(false);
+        }
+        self.set_hibernation(id, None);
+        Ok(())
+    }
+
     /// Folds identity a hook payload carried into the record: the agent-side
     /// conversation id (what makes resume possible), the live transcript path
     /// (it MOVES when the agent enters a worktree), and a first-prompt title
@@ -450,7 +476,9 @@ impl Registry {
     ) -> std::io::Result<()> {
         let tree = {
             let session = self.sessions.get(id).ok_or_else(|| not_found(id))?;
-            session.signal_tree(libc::SIGSTOP)?
+            let tree = session.signal_tree(libc::SIGSTOP)?;
+            let _ = session.set_hibernated(true);
+            tree
         };
         self.set_hibernation(
             id,

@@ -960,10 +960,13 @@ fn pump_held(
     exit_marker_floor: u64,
     manifest_id: String,
 ) {
-    let mut offset = {
+    let (mut offset, mut watcher) = {
         let mut log = shared.log.lock().expect("log");
         log.refresh_from_disk();
-        log.preferred_replay_start(REPLAY_BUDGET)
+        (
+            log.preferred_replay_start(REPLAY_BUDGET),
+            log_watch::LogWatcher::new(log.path()),
+        )
     };
     let mut marker_buffer: Vec<u8> = Vec::new();
     let mut last_liveness = Instant::now();
@@ -985,10 +988,14 @@ fn pump_held(
 
         if chunk.is_empty() {
             replaying = false;
-            // Quiet: advance the reducer's timers, and periodically make sure
-            // the holder is still there at all. Attached or Working sessions
-            // keep the fast tick; idle background ones sleep longer.
-            std::thread::sleep(shared.quiet_tick());
+            // Quiet: block on the log watcher, which wakes the instant the
+            // holder appends — the tick interval is only the ceiling for
+            // reducer timers and the liveness probe. Attached or Working
+            // sessions keep the fast ceiling; idle background ones stretch it.
+            match watcher.as_mut() {
+                Some(watcher) => watcher.wait(shared.quiet_tick()),
+                None => std::thread::sleep(shared.quiet_tick()),
+            }
             let outcome = shared
                 .reducer
                 .lock()
@@ -1089,6 +1096,132 @@ fn pump_held(
     );
     apply(&shared, &outcome);
     shared.exited.store(true, Ordering::SeqCst);
+}
+
+/// Wakes the held pump the moment the holder appends to the log, instead of
+/// sleep-polling between reads. The Swift daemon used a DispatchSource for
+/// exactly this; without it every byte of held-session output arrives up to a
+/// quiet-tick late, which reads as ~10fps scrolling in a TUI.
+#[cfg(target_os = "macos")]
+mod log_watch {
+    use std::path::{Path, PathBuf};
+    use std::time::Duration;
+
+    pub struct LogWatcher {
+        kq: i32,
+        fd: i32,
+        path: PathBuf,
+    }
+
+    impl LogWatcher {
+        pub fn new(path: &Path) -> Option<Self> {
+            // SAFETY: plain kqueue creation; failure is handled.
+            let kq = unsafe { libc::kqueue() };
+            if kq < 0 {
+                return None;
+            }
+            let mut watcher = Self {
+                kq,
+                fd: -1,
+                path: path.to_path_buf(),
+            };
+            watcher.arm();
+            Some(watcher)
+        }
+
+        fn arm(&mut self) {
+            if self.fd >= 0 {
+                // SAFETY: closing a descriptor this struct owns.
+                unsafe { libc::close(self.fd) };
+                self.fd = -1;
+            }
+            let Ok(cpath) = std::ffi::CString::new(self.path.as_os_str().as_encoded_bytes())
+            else {
+                return;
+            };
+            // SAFETY: O_EVTONLY opens for watching without inhibiting unmount.
+            let fd = unsafe { libc::open(cpath.as_ptr(), libc::O_EVTONLY) };
+            if fd < 0 {
+                return; // not created yet: wait() degrades to a plain sleep
+            }
+            self.fd = fd;
+            let event = libc::kevent {
+                ident: fd as usize,
+                filter: libc::EVFILT_VNODE,
+                flags: libc::EV_ADD | libc::EV_CLEAR,
+                fflags: libc::NOTE_WRITE
+                    | libc::NOTE_EXTEND
+                    | libc::NOTE_DELETE
+                    | libc::NOTE_RENAME,
+                data: 0,
+                udata: std::ptr::null_mut(),
+            };
+            // SAFETY: registering one initialized event; no output requested.
+            unsafe {
+                libc::kevent(
+                    self.kq,
+                    &event,
+                    1,
+                    std::ptr::null_mut(),
+                    0,
+                    std::ptr::null(),
+                )
+            };
+        }
+
+        /// Blocks until the log changes or `timeout` passes. EV_CLEAR keeps
+        /// writes that land between waits queued, so wakeups are never lost.
+        pub fn wait(&mut self, timeout: Duration) {
+            if self.fd < 0 {
+                self.arm();
+                if self.fd < 0 {
+                    std::thread::sleep(timeout);
+                    return;
+                }
+            }
+            let spec = libc::timespec {
+                tv_sec: timeout.as_secs() as libc::time_t,
+                tv_nsec: libc::c_long::from(timeout.subsec_nanos()),
+            };
+            // SAFETY: zeroed kevent output slot, valid timeout.
+            let mut out = unsafe { std::mem::zeroed::<libc::kevent>() };
+            let woke = unsafe { libc::kevent(self.kq, std::ptr::null(), 0, &mut out, 1, &spec) };
+            if woke > 0 && out.fflags & (libc::NOTE_DELETE | libc::NOTE_RENAME) != 0 {
+                // Rotation replaced the file: track the new incarnation.
+                self.arm();
+            }
+        }
+    }
+
+    impl Drop for LogWatcher {
+        fn drop(&mut self) {
+            if self.fd >= 0 {
+                // SAFETY: descriptors this struct owns.
+                unsafe { libc::close(self.fd) };
+            }
+            unsafe { libc::close(self.kq) };
+        }
+    }
+}
+
+/// Platform gap, named: non-macOS builds sleep-poll at the tick interval.
+/// Linux wants an inotify equivalent here.
+#[cfg(not(target_os = "macos"))]
+mod log_watch {
+    use std::path::Path;
+    use std::time::Duration;
+
+    pub struct LogWatcher;
+
+    impl LogWatcher {
+        pub fn new(_path: &Path) -> Option<Self> {
+            None
+        }
+
+        pub fn wait(&mut self, timeout: Duration) {
+            std::thread::sleep(timeout);
+        }
+    }
 }
 
 /// Convenience for tests and callers that just want the shipped rules.

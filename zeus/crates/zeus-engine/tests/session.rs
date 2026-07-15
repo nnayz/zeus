@@ -58,6 +58,7 @@ fn spec(
         authority,
         logs_dir: logs.to_path_buf(),
         holder: None,
+        defer_launch: false,
     }
 }
 

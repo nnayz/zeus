@@ -52,6 +52,11 @@ const HOT_WINDOW_SECS: u64 = 30;
 /// The same hard startup-work bound the Swift daemon enforced.
 const REPLAY_BUDGET: usize = 256 << 10;
 
+/// Quiet time after the last output before a screen checkpoint is written,
+/// the Swift daemon's `checkpointSettleDelay`. Bursts coalesce into one
+/// write; an idle screen is checkpointed within about a second.
+const CHECKPOINT_SETTLE: Duration = Duration::from_secs(1);
+
 /// Quiet time between holder liveness probes: a holder that died markerless
 /// (SIGKILL, machine issues) must not leave a forever-live session behind.
 /// Elapsed-based so the probe cadence is the same on fast and idle ticks.
@@ -960,15 +965,47 @@ fn pump_held(
     exit_marker_floor: u64,
     manifest_id: String,
 ) {
-    let (mut offset, mut watcher) = {
+    let (checkpoint_path, mut offset, mut watcher, mut marker_buffer) = {
         let mut log = shared.log.lock().expect("log");
         log.refresh_from_disk();
-        (
-            log.preferred_replay_start(REPLAY_BUDGET),
-            log_watch::LogWatcher::new(log.path()),
-        )
+        let checkpoint_path = crate::checkpoint::ScreenCheckpoint::path_for_log(log.path());
+        let watcher = log_watch::LogWatcher::new(log.path());
+        let tail = log.tail_offset();
+        // A fresh-enough checkpoint seeds the emulator from a few KiB and
+        // replay resumes at its offset. "Fresh enough" preserves the hard
+        // startup-work bound: the remaining tail must fit the same budget a
+        // cold replay would use, even if a checkpoint went stale during a
+        // sustained output flood. Anything unusable is a cache miss.
+        let restored = crate::checkpoint::ScreenCheckpoint::load(&checkpoint_path)
+            .filter(|checkpoint| {
+                checkpoint.log_offset <= tail
+                    && tail - checkpoint.log_offset <= REPLAY_BUDGET as u64
+            })
+            .filter(|checkpoint| {
+                shared.screen.lock().expect("screen").restore(
+                    &checkpoint.grid,
+                    checkpoint.alt_screen,
+                    checkpoint.bracketed_paste,
+                    checkpoint.mouse_reporting,
+                )
+            });
+        match restored {
+            Some(checkpoint) => (
+                checkpoint_path,
+                checkpoint.log_offset,
+                watcher,
+                checkpoint.marker_buffer,
+            ),
+            None => (
+                checkpoint_path,
+                log.preferred_replay_start(REPLAY_BUDGET),
+                watcher,
+                Vec::new(),
+            ),
+        }
     };
-    let mut marker_buffer: Vec<u8> = Vec::new();
+    let mut last_checkpoint_key: Option<CheckpointKey> = None;
+    let mut checkpoint_dirty_at: Option<Instant> = None;
     let mut last_liveness = Instant::now();
     let mut last_eval_seq = 0u64;
     let mut last_scan_at = None;
@@ -987,7 +1024,29 @@ fn pump_held(
         };
 
         if chunk.is_empty() {
-            replaying = false;
+            if replaying {
+                replaying = false;
+                // The replay tail is drained: checkpoint immediately, as the
+                // Swift daemon does right after `replayExistingLog`.
+                if checkpoint_dirty_at.take().is_some() {
+                    persist_checkpoint(
+                        &shared,
+                        &checkpoint_path,
+                        offset,
+                        &marker_buffer,
+                        &mut last_checkpoint_key,
+                    );
+                }
+            } else if checkpoint_dirty_at.is_some_and(|at| at.elapsed() >= CHECKPOINT_SETTLE) {
+                checkpoint_dirty_at = None;
+                persist_checkpoint(
+                    &shared,
+                    &checkpoint_path,
+                    offset,
+                    &marker_buffer,
+                    &mut last_checkpoint_key,
+                );
+            }
             // Quiet: block on the log watcher, which wakes the instant the
             // holder appends — the tick interval is only the ceiling for
             // reducer timers and the liveness probe. Attached or Working
@@ -1051,6 +1110,7 @@ fn pump_held(
         }
 
         if !output.is_empty() {
+            checkpoint_dirty_at = Some(Instant::now());
             let observation = {
                 let mut screen = shared.screen.lock().expect("screen");
                 screen.feed(&output);
@@ -1076,6 +1136,19 @@ fn pump_held(
         }
     }
 
+    // Detaching or exiting: capture the final screen, so the next daemon
+    // seeds from a checkpoint instead of pushing a raw tail through a fresh
+    // emulator — the Swift daemon's teardown persist.
+    if checkpoint_dirty_at.is_some() {
+        persist_checkpoint(
+            &shared,
+            &checkpoint_path,
+            offset,
+            &marker_buffer,
+            &mut last_checkpoint_key,
+        );
+    }
+
     if shared.stop.load(Ordering::SeqCst) && exit_status.is_none() {
         return; // detaching, not exiting: the held child lives on
     }
@@ -1096,6 +1169,64 @@ fn pump_held(
     );
     apply(&shared, &outcome);
     shared.exited.store(true, Ordering::SeqCst);
+}
+
+/// Everything a checkpoint's content is a function of, mirroring the Swift
+/// `CheckpointKey`: grid and cursor state derive from fed log bytes (tracked
+/// by the offset and the screen's `content_seq`), so equal keys mean a
+/// byte-identical checkpoint that need not be rewritten.
+#[derive(Clone, Copy, PartialEq)]
+struct CheckpointKey {
+    offset: u64,
+    content_seq: u64,
+    marker_bytes: usize,
+    alt_screen: bool,
+    bracketed_paste: bool,
+    mouse_reporting: bool,
+}
+
+/// Writes the current screen as a durable checkpoint, skipping the write when
+/// nothing observable changed since the last one.
+fn persist_checkpoint(
+    shared: &Shared,
+    path: &Path,
+    offset: u64,
+    marker_buffer: &[u8],
+    last_key: &mut Option<CheckpointKey>,
+) {
+    let (grid, alt_screen, bracketed_paste, mouse_reporting, content_seq) = {
+        let screen = shared.screen.lock().expect("screen");
+        (
+            screen.full_snapshot(),
+            screen.is_alt_screen(),
+            screen.bracketed_paste(),
+            screen.mouse_reporting(),
+            screen.content_seq(),
+        )
+    };
+    let key = CheckpointKey {
+        offset,
+        content_seq,
+        marker_bytes: marker_buffer.len(),
+        alt_screen,
+        bracketed_paste,
+        mouse_reporting,
+    };
+    if *last_key == Some(key) {
+        return;
+    }
+    let checkpoint = crate::checkpoint::ScreenCheckpoint {
+        log_offset: offset,
+        grid,
+        marker_buffer: marker_buffer.to_vec(),
+        alt_screen,
+        bracketed_paste,
+        mouse_reporting,
+    };
+    // A failed write must not stop the session; the checkpoint is a cache.
+    if checkpoint.write_atomically(path).is_ok() {
+        *last_key = Some(key);
+    }
 }
 
 /// Wakes the held pump the moment the holder appends to the log, instead of

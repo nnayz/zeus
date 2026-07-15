@@ -576,6 +576,7 @@ impl ControlServer {
             authority,
             logs_dir: self.logs_dir.clone(),
             holder: self.holder.clone(),
+            defer_launch: true,
         };
         registry
             .spawn(spec, record)
@@ -707,6 +708,7 @@ impl ControlServer {
             authority,
             logs_dir: self.logs_dir.clone(),
             holder: self.holder.clone(),
+            defer_launch: true,
         };
         let mut registry = self.registry.lock().map_err(poisoned)?;
         registry
@@ -759,6 +761,7 @@ impl ControlServer {
             authority: descriptor.authority(),
             logs_dir: self.logs_dir.clone(),
             holder: self.holder.clone(),
+            defer_launch: true,
         };
         let mut registry = self.registry.lock().map_err(poisoned)?;
         registry
@@ -1453,6 +1456,7 @@ impl ControlServer {
             authority: descriptor.authority(),
             logs_dir: self.logs_dir.clone(),
             holder: self.holder.clone(),
+            defer_launch: true,
         })
     }
 

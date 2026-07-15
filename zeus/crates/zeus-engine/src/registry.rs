@@ -245,6 +245,7 @@ impl Registry {
                 authority: crate::session::authority_for(&manifest_id, &self.engine),
                 logs_dir: logs_dir.to_path_buf(),
                 holder: Some(holder.clone()),
+                defer_launch: false,
             };
             let seeded = (!matches!(record_status, SessionStatus::Exited(_)))
                 .then(|| (record_status.clone(), record_needs_input.clone()));

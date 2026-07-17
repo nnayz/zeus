@@ -491,6 +491,7 @@ impl RegistryHost {
         let mut pty = crate::pty::PtySpec::new(argv, &home);
         pty.env = std::env::vars().collect();
         pty.env.retain(|(key, _)| key != "NO_COLOR");
+        crate::control::absolutize_remote_argv0(&mut pty);
 
         let mut record = crate::control::new_record(&id, kind, &spawn_cwd);
         record.host = Some(host.id.clone());

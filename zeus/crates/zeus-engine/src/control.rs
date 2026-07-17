@@ -674,6 +674,7 @@ impl ControlServer {
         let mut pty = crate::pty::PtySpec::new(argv, &home);
         pty.env = std::env::vars().collect();
         pty.env.retain(|(key, _)| key != "NO_COLOR");
+        absolutize_argv0(&mut pty);
         if let (Some(cols), Some(rows)) = (p.initial_cols, p.initial_rows) {
             pty.cols = cols.clamp(2, u16::MAX as i64) as u16;
             pty.rows = rows.clamp(2, u16::MAX as i64) as u16;
@@ -752,6 +753,7 @@ impl ControlServer {
         let mut pty = crate::pty::PtySpec::new(argv, &home);
         pty.env = std::env::vars().collect();
         pty.env.retain(|(key, _)| key != "NO_COLOR");
+        absolutize_argv0(&mut pty);
         let spec = crate::session::SessionSpec {
             id: record.id.0.clone(),
             pty,
@@ -1762,6 +1764,36 @@ fn resolve_on_path(binary: &str) -> Option<String> {
         }
     }
     None
+}
+
+
+/// Resolves a spec's bare argv[0] to an absolute path against its own env
+/// PATH (daemon PATH as fallback). The process that execs it may be a
+/// long-lived holder manager whose environment predates this daemon —
+/// program lookup happens THERE, so a bare "ssh" can exit 127 no matter
+/// what env the spec carries.
+pub(crate) fn absolutize_remote_argv0(pty: &mut crate::pty::PtySpec) {
+    absolutize_argv0(pty);
+}
+
+fn absolutize_argv0(pty: &mut crate::pty::PtySpec) {
+    if let Some(first) = pty.argv.first_mut()
+        && !first.contains('/')
+    {
+        let path = pty
+            .env
+            .iter()
+            .rev()
+            .find(|(key, _)| key == "PATH")
+            .map(|(_, value)| value.clone())
+            .or_else(|| std::env::var("PATH").ok());
+        if let Some(resolved) = path
+            .as_deref()
+            .and_then(|path| crate::agent::resolve_on_path(first, path))
+        {
+            *first = resolved;
+        }
+    }
 }
 
 fn migrate_control_error(error: crate::migrate::MigrateError) -> ControlError {

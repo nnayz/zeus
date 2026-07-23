@@ -919,6 +919,7 @@ impl TerminalPane {
                         .element
                         .complete_scrollback_fetch(result, visible_rows);
                 }
+                self.pump_scrollback_fetch(&id, visible_rows);
                 if self.selected_id().as_ref() == Some(&id) {
                     cx.notify();
                 }
@@ -1574,6 +1575,37 @@ impl TerminalPane {
         }
     }
 
+    /// Starts the next queued scrollback fetch for `id`, if the viewport wants
+    /// one and none is in flight. Called from wheel events AND from fetch
+    /// completion: a fast wheel burst queues the next window while a fetch is
+    /// in flight, and nothing else would ever start it — the stranded queue
+    /// painted as a transient blank region in deep scrollback.
+    fn pump_scrollback_fetch(&mut self, id: &SessionId, visible_rows: usize) {
+        let Some(resident) = self.residents.get_mut(id) else {
+            return;
+        };
+        let Some(request) = resident.element.begin_scrollback_fetch(visible_rows) else {
+            return;
+        };
+        let client = Arc::clone(self.runtime.client());
+        let pane_tx = self.pane_tx.clone();
+        let fetch_id = id.clone();
+        self.tokio.spawn(async move {
+            match client
+                .read_scrollback_cells(&fetch_id, request.first_row, request.max_rows)
+                .await
+            {
+                Ok(result) => {
+                    let _ =
+                        pane_tx.send(PaneEvent::ScrollbackCells(fetch_id, result, visible_rows));
+                }
+                Err(_) => {
+                    let _ = pane_tx.send(PaneEvent::ScrollbackFailed(fetch_id));
+                }
+            }
+        });
+    }
+
     fn handle_scroll(
         &mut self,
         event: &ScrollWheelEvent,
@@ -1624,31 +1656,7 @@ impl TerminalPane {
                 row,
             }) => resident.attachment.scroll(direction, lines, col, row),
             Some(WheelRoute::Local { .. }) => {
-                if let Some(request) = resident
-                    .element
-                    .begin_scrollback_fetch(usize::from(visible_rows))
-                {
-                    let client = Arc::clone(self.runtime.client());
-                    let pane_tx = self.pane_tx.clone();
-                    let fetch_id = id.clone();
-                    self.tokio.spawn(async move {
-                        match client
-                            .read_scrollback_cells(&fetch_id, request.first_row, request.max_rows)
-                            .await
-                        {
-                            Ok(result) => {
-                                let _ = pane_tx.send(PaneEvent::ScrollbackCells(
-                                    fetch_id,
-                                    result,
-                                    usize::from(visible_rows),
-                                ));
-                            }
-                            Err(_) => {
-                                let _ = pane_tx.send(PaneEvent::ScrollbackFailed(fetch_id));
-                            }
-                        }
-                    });
-                }
+                self.pump_scrollback_fetch(&id, usize::from(visible_rows));
             }
             None => return,
         }

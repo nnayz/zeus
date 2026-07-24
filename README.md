@@ -1,6 +1,8 @@
 # zeus
 
 [![CI](https://github.com/nnayz/zeus/actions/workflows/ci.yml/badge.svg)](https://github.com/nnayz/zeus/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![GitHub release](https://img.shields.io/github/v/release/nnayz/zeus)](https://github.com/nnayz/zeus/releases/latest)
 
 Native macOS orchestrator for coding agents. Run Claude Code, Codex, Cursor, Gemini and plain
 shells in parallel — across git worktrees or on remote hosts — each with a live status
@@ -24,6 +26,20 @@ taps. The cask lives in [nnayz/homebrew-zeus](https://github.com/nnayz/homebrew-
 rather than `homebrew-cask`, which requires a notability threshold zeus does not meet yet.
 
 macOS 15 or newer.
+
+## 60-second tour
+
+1. Add a project directory and create a session for Claude Code, Codex, another
+   supported agent, or a plain shell.
+2. Start several sessions, ideally in separate git worktrees when they edit the
+   same repository.
+3. Watch the sidebar instead of every terminal: it shows which agents are
+   working, waiting for you, or done.
+4. Quit and reopen zeus. The daemon keeps each PTY alive and replays the session
+   when you return.
+
+The [getting-started guide](docs/GETTING_STARTED.md) covers remote hosts, MCP
+orchestration, diagnostics, local data, and uninstalling.
 
 ## What it does
 
@@ -74,22 +90,41 @@ command-line tools. The first Rust build compiles GPUI from a pinned Zed revisio
 while.
 
 ```sh
-swift build && swift test          # engine
-cd zeus && cargo build             # app
-cargo run -p zeus-app
+swift build && swift test                  # engine
+(cd zeus && cargo build)                   # app
+(cd zeus && cargo run -p zeus-app)         # run the app from source
 
-zeus/scripts/package.sh            # full bundle
+zeus/scripts/package.sh                    # full bundle
 zeus/scripts/install-local.sh
+```
+
+Run the same core checks as CI with one command:
+
+```sh
+./scripts/check.sh
 ```
 
 [`zeus/PACKAGING.md`](zeus/PACKAGING.md) covers signing and notarization,
 [`zeus/UPDATING.md`](zeus/UPDATING.md) the updater and release flow,
 [`zeus/NODE.md`](zeus/NODE.md) running agents on a remote VPS node.
 
+The [documentation index](docs/README.md) links user and engineering guides.
+
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). Bug reports, fixes, and new agent manifests all welcome.
+See [CONTRIBUTING.md](CONTRIBUTING.md). Bug reports, fixes, docs, and new agent
+manifests are all welcome. New contributors can start with
+[`good first issue`](https://github.com/nnayz/zeus/labels/good%20first%20issue)
+or [`help wanted`](https://github.com/nnayz/zeus/labels/help%20wanted).
+
+Questions belong in [Discussions](https://github.com/nnayz/zeus/discussions),
+reproducible bugs in [Issues](https://github.com/nnayz/zeus/issues), and
+vulnerabilities in [private security reports](SECURITY.md). See the
+[roadmap](ROADMAP.md), [support guide](SUPPORT.md), [privacy notice](PRIVACY.md),
+and [governance](GOVERNANCE.md) for project expectations.
 
 ## License
 
-Apache 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+Zeus's original source is Apache 2.0. Builds also contain third-party software
+under its own licenses; see [LICENSE](LICENSE), [NOTICE](NOTICE), and the
+machine-checked dependency policy in [`license-policy.json`](license-policy.json).

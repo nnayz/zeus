@@ -78,16 +78,21 @@ If the app sits somewhere the user cannot write, the writability check fails
 One-time setup is the Developer ID cert and notary profile described in
 [PACKAGING.md](PACKAGING.md). No Sparkle keys.
 
+First open and merge a normal pull request that updates the `zeus-app` version
+and lockfile. Then check out the clean, current `main` branch and run:
+
 ```sh
 zeus/scripts/release.sh 0.4.1
 ```
 
-Which bumps `crates/zeus-app/Cargo.toml` (and commits the bump), runs clippy +
-tests, builds a universal binary, bundles the Swift daemon, signs it,
+The script refuses to release a version that does not match the manifest, a
+dirty checkout, or a commit other than the current `origin/main`. It runs
+clippy + tests, builds a universal binary, bundles the Swift daemon, signs it,
 **notarizes and staples the .app first**, then builds and notarizes the DMG
 from that stapled bundle, produces the update zip, rebuilds `appcast.json` from
-the currently published feed, and creates the GitHub Release with all three
-attached. It then updates, commits, **pushes, and reads back** the Homebrew cask;
+the currently published feed, generates `SHA256SUMS` and a reviewed dependency
+license inventory, and creates the GitHub Release at that exact source commit.
+It then updates, commits, **pushes, and reads back** the Homebrew cask;
 the release does not report success until the remote cask checksum matches the
 published DMG.
 
@@ -118,11 +123,9 @@ running from the replaced bundle, so a release that changes `zeusd` does not
 take effect until that daemon is restarted by other means. The app half updates
 immediately; the daemon half waits.
 
-It does not push the source. Finish with:
-
-```sh
-git push && git tag zeus-v0.4.1 && git push origin zeus-v0.4.1
-```
+The canonical release tag is `v<version>`. `gh release create` creates that tag
+at the verified `origin/main` commit; do not create a second `zeus-v<version>`
+tag. Source is merged before release rather than pushed after binary publication.
 
 ### Why the .app is notarized before the DMG
 

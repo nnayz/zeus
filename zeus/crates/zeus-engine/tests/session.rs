@@ -17,8 +17,7 @@ use zeus_engine::status::{Authority, ClaudeHook};
 use zeus_proto::{NeedsInputKind, SessionStatus};
 
 fn manifest_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../Sources/ZeusCore/Resources/manifests")
+    zeus_engine::detect::bundled_manifest_dir()
         .canonicalize()
         .expect("manifests directory")
 }
@@ -58,6 +57,7 @@ fn spec(
         authority,
         logs_dir: logs.to_path_buf(),
         holder: None,
+        remote: None,
         defer_launch: false,
     }
 }

@@ -6,6 +6,9 @@ members = [
     "crates/zeus-node",
     "crates/zeus-mcp",
     "crates/zeus-proto",
+    "crates/zeus-pty",
+    "crates/zeus-remote",
+    "crates/zeus-terminal-state",
     "crates/zeus-term",
     "crates/zeus-ui",
     "crates/zeus-usage",
@@ -25,6 +28,8 @@ zeus-client = { path = "crates/zeus-client" }
 zeus-engine = { path = "crates/zeus-engine" }
 zeus-node = { path = "crates/zeus-node" }
 zeus-proto = { path = "crates/zeus-proto" }
+zeus-pty = { path = "crates/zeus-pty" }
+zeus-terminal-state = { path = "crates/zeus-terminal-state" }
 zeus-term = { path = "crates/zeus-term" }
 zeus-ui = { path = "crates/zeus-ui" }
 zeus-usage = { path = "crates/zeus-usage" }
@@ -46,6 +51,7 @@ sha2 = "0.11"
 tempfile = "3"
 tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 unicode-segmentation = "1"
+zeroize = { version = "1", features = ["derive"] }
 
 # No [profile.release] overrides, deliberately: both `lto = "thin"` and
 # `codegen-units = 1` make the linker reject gpui_macos's Objective-C statics

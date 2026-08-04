@@ -35,7 +35,8 @@ This is the record of replacing it with `crates/diri-engine`.
 | Session | **done** | Self-driving: polled pump, ticks while quiet, kills its child on drop |
 | Registry + persistence | **done** | Reads and round-trips the real `state.json` — 30 sessions, 84 projects preserved |
 | Control socket | **core done** | Handshake, list, send_text, resize, read_screen, kill over NDJSON on an owner-only socket. Unported methods answer `not_found` rather than dropping the connection |
-| Spawn over the wire | not started | `session.spawn` needs the agent argv/injection builder |
+| Agent descriptors | **done** | argv, env scrubbing, colour assertion, resume flags — all read from the manifest |
+| Spawn over the wire | not started | `session.spawn` still needs hook/MCP injection wiring |
 | Hooks / MCP / git / worktrees | not started | |
 | Swift daemon retirement | not started | Only after the above ships and is proven |
 
@@ -48,6 +49,10 @@ This is the record of replacing it with `crates/diri-engine`.
   `SIGWINCH` ignored and agents never repaint after a resize. Tested directly.
 - **Emulation.** Grepping the byte stream would misread erased text as present.
   A real emulator is not optional, which is why a dependency is justified here.
+- **Authority was code when it should have been data.** The port briefly
+  hardcoded "claude-code" to pick the hooks-led reducer. Every manifest already
+  declares `agent.statusAuthority`; reading it means a new agent gets the right
+  behavior by existing as a file.
 
 ## Windows, specifically
 

@@ -351,15 +351,14 @@ pub fn load_engine(manifests: &Path) -> std::io::Result<(Arc<ManifestEngine>, Ve
     Ok((Arc::new(engine), failed))
 }
 
-/// Maps a manifest's status model onto the reducer authority the daemon uses.
+/// The reducer authority for an agent, as its manifest declares it.
+///
+/// This used to special-case "claude-code" in code. It is data: each manifest
+/// carries `agent.statusAuthority`, so a new agent gets the right behavior by
+/// existing as a file.
 pub fn authority_for(manifest_id: &str, engine: &ManifestEngine) -> Authority {
-    match engine.manifest(manifest_id).map(|m| m.status_model) {
-        Some(crate::detect::StatusModel::ProcessOnly) | None => Authority::ProcessOnly,
-        // Claude drives from hooks and arbitrates with the screen; everything
-        // else with a full status model is screen-led.
-        Some(crate::detect::StatusModel::Full) if manifest_id == "claude-code" => {
-            Authority::HooksPrimary
-        }
-        Some(crate::detect::StatusModel::Full) => Authority::ScreenPrimary,
-    }
+    engine
+        .manifest(manifest_id)
+        .and_then(|manifest| manifest.agent.as_ref())
+        .map_or(Authority::ProcessOnly, |agent| agent.authority())
 }

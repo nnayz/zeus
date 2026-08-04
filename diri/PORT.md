@@ -34,7 +34,8 @@ This is the record of replacing it with `crates/diri-engine`.
 | End-to-end pipeline | **done** | Real process → PTY → emulator → manifest → reducer → needs-input |
 | Session | **done** | Self-driving: polled pump, ticks while quiet, kills its child on drop |
 | Registry + persistence | **done** | Reads and round-trips the real `state.json` — 30 sessions, 84 projects preserved |
-| Control socket | not started | NDJSON protocol, must match the Swift wire format |
+| Control socket | **core done** | Handshake, list, send_text, resize, read_screen, kill over NDJSON on an owner-only socket. Unported methods answer `not_found` rather than dropping the connection |
+| Spawn over the wire | not started | `session.spawn` needs the agent argv/injection builder |
 | Hooks / MCP / git / worktrees | not started | |
 | Swift daemon retirement | not started | Only after the above ships and is proven |
 

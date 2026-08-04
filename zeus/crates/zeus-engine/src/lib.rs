@@ -22,10 +22,12 @@ pub mod detect;
 pub mod log;
 pub mod pty;
 pub mod screen;
+pub mod session;
 pub mod status;
 
 pub use detect::{ManifestEngine, ManifestState, ScreenObservation, ScreenSnapshot};
 pub use log::OutputLog;
 pub use pty::{Exit, Pty, PtySpec};
 pub use screen::HeadlessScreen;
+pub use session::{Session, SessionSpec, SessionView};
 pub use status::{Authority, ReducerOutcome, StatusReducer, StatusSignal};

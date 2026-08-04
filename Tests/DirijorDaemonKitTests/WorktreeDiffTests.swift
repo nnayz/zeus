@@ -157,10 +157,27 @@ private func runGit(_ arguments: [String], cwd: URL) throws {
     process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
     process.arguments = arguments
     process.currentDirectoryURL = cwd
+    // Same hardening as WorktreeDetectionTests: no inherited stdin to block on,
+    // no terminal prompts, and no ambient git config from the host. Every
+    // identity these tests need is passed with -c at the call site.
+    process.standardInput = FileHandle.nullDevice
+    process.environment = [
+        "PATH": "/usr/bin:/bin",
+        "HOME": cwd.path,
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_OPTIONAL_LOCKS": "0",
+    ]
+    let finished = DispatchSemaphore(value: 0)
+    process.terminationHandler = { _ in finished.signal() }
     try process.run()
-    process.waitUntilExit()
+    let command = "git \(arguments.joined(separator: " "))"
+    guard finished.wait(timeout: .now() + 60) == .success else {
+        process.terminate()
+        throw ControlError.internalError("\(command) did not exit within 60s")
+    }
     guard process.terminationStatus == 0 else {
-        throw ControlError.internalError(
-            "git \(arguments.joined(separator: " ")) exited \(process.terminationStatus)")
+        throw ControlError.internalError("\(command) exited \(process.terminationStatus)")
     }
 }

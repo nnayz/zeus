@@ -1,0 +1,107 @@
+[package]
+name = "diri-app"
+version = "0.4.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "diri"
+path = "src/main.rs"
+
+[features]
+default = ["audio-playback"]
+audio-playback = []
+
+[package.metadata.packager]
+product-name = "diri"
+identifier = "com.dirijor.diri"
+category = "public.app-category.developer-tools"
+formats = ["app"]
+target-triple = "universal-apple-darwin"
+icons = ["../../assets/icon.icns"]
+binaries = [{ path = "diri", main = true }]
+
+[package.metadata.packager.macos]
+minimum-system-version = "15.0"
+info-plist-path = "../../assets/Info.plist"
+entitlements = "../../assets/diri.entitlements"
+background-app = false
+
+[dependencies]
+diri-client.workspace = true
+diri-proto.workspace = true
+diri-term.workspace = true
+diri-ui.workspace = true
+diri-updater.workspace = true
+diri-usage.workspace = true
+gpui.workspace = true
+gpui_platform.workspace = true
+getrandom.workspace = true
+image.workspace = true
+nucleo-matcher.workspace = true
+notify.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+smallvec.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+unicode-segmentation.workspace = true
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "=0.6.2"
+objc2 = "=0.6.4"
+objc2-app-kit = { version = "=0.3.2", default-features = false, features = [
+    "NSApplication",
+    "NSBezierPath",
+    "NSBitmapImageRep",
+    "NSBox",
+    "NSButton",
+    "NSButtonCell",
+    "NSCell",
+    "NSColor",
+    "NSControl",
+    "NSFont",
+    "NSFontDescriptor",
+    "NSGraphics",
+    "NSGraphicsContext",
+    "NSImage",
+    "NSImageView",
+    "NSImageRep",
+    "NSPanel",
+    "NSParagraphStyle",
+    "NSResponder",
+    "NSStatusBar",
+    "NSStatusBarButton",
+    "NSStatusItem",
+    "NSText",
+    "NSTextField",
+    "NSView",
+    "NSVisualEffectView",
+    "NSWindow",
+    "objc2-core-foundation",
+] }
+objc2-foundation = { version = "=0.3.2", default-features = false, features = [
+    "NSArray",
+    "NSBundle",
+    "NSError",
+    "NSGeometry",
+    "NSObject",
+    "NSSet",
+    "NSString",
+] }
+objc2-user-notifications = { version = "=0.3.2", default-features = false, features = [
+    "UNNotification",
+    "UNNotificationAction",
+    "UNNotificationCategory",
+    "UNNotificationContent",
+    "UNNotificationRequest",
+    "UNNotificationResponse",
+    "UNNotificationSound",
+    "UNNotificationTrigger",
+    "UNUserNotificationCenter",
+    "block2",
+] }

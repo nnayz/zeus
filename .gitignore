@@ -1,0 +1,14 @@
+.build/
+.build-*/
+.DS_Store
+xcuserdata/
+dist/
+sidecar/node_modules/
+.swiftpm/
+.skill-build/
+
+# Rust build output
+diri/target/
+
+# Agent worktrees created by Claude Code (EnterWorktree) — never committed.
+.claude/worktrees/

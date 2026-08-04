@@ -1,0 +1,1129 @@
+use std::collections::HashSet;
+use std::sync::Arc;
+
+use diri_proto::{
+    AgentKind, AttentionLevel, DateMillis, ExitInfo, ExitReason, Project, ProjectId, Resumability,
+    SessionId, SessionListResult, SessionRecord, SessionStatus, TitleSource,
+};
+use tempfile::tempdir;
+use tokio::sync::mpsc;
+
+use crate::notifications::NotificationSound;
+
+use super::{
+    ClickModifiers, DefaultAgent, EventEnvelope, InspectorTab, Prefs, SessionStore, StoreEffect,
+    StoreEventChange, TerminalResidency, WindowMode, WindowPlacement, event_publication_policy,
+};
+use crate::switcher::{OverviewFilter, OverviewLane, SwitcherKey};
+
+fn id(value: &str) -> SessionId {
+    SessionId::new(value)
+}
+
+fn pid(value: &str) -> ProjectId {
+    ProjectId::new(value)
+}
+
+fn session(value: &str, project: &str, created: f64) -> SessionRecord {
+    SessionRecord {
+        id: id(value),
+        kind: AgentKind::CLAUDE_CODE,
+        cwd: format!("/work/{project}"),
+        project_id: pid(project),
+        worktree_path: None,
+        git_branch: None,
+        title: value.to_owned(),
+        title_source: TitleSource::Placeholder,
+        agent_session_id: None,
+        transcript_path: None,
+        status: SessionStatus::Idle,
+        needs_input: None,
+        resumability: Resumability::Live,
+        parent: None,
+        created_at: DateMillis(created),
+        updated_at: DateMillis(created),
+        last_turn_completed_at: None,
+        last_seen_at: None,
+        pinned: false,
+        archived_at: None,
+        remote_active: false,
+        host: None,
+        hibernation: None,
+        memory_bytes: None,
+        artifacts: None,
+        pull_requests: None,
+        listening_ports: None,
+        foreground_agent: None,
+    }
+}
+
+fn project(value: &str, name: &str) -> Project {
+    Project {
+        id: pid(value),
+        root: format!("/work/{value}"),
+        name: name.to_owned(),
+        pinned_order: None,
+    }
+}
+
+fn hydrated(
+    sessions: Vec<SessionRecord>,
+    projects: Vec<Project>,
+    prefs: Prefs,
+) -> (SessionStore, mpsc::UnboundedReceiver<StoreEffect>) {
+    let (mut store, effects) = SessionStore::headless(prefs);
+    store.hydrate(SessionListResult { sessions, projects });
+    (store, effects)
+}
+
+fn drain(effects: &mut mpsc::UnboundedReceiver<StoreEffect>) -> Vec<StoreEffect> {
+    let mut drained = Vec::new();
+    while let Ok(effect) = effects.try_recv() {
+        drained.push(effect);
+    }
+    drained
+}
+
+#[test]
+fn switcher_store_integration_commits_only_on_control_release() {
+    let sessions = vec![
+        session("one", "a", 3.0),
+        session("two", "a", 2.0),
+        session("three", "a", 1.0),
+    ];
+    let (mut store, _effects) = hydrated(sessions, vec![project("a", "A")], Prefs::default());
+    store.select(id("two"));
+    store.select(id("three"));
+
+    assert!(store.handle_switcher_key(SwitcherKey::Tab {
+        control: true,
+        shift: false,
+    }));
+    assert_eq!(store.selected_session_id(), Some(&id("three")));
+    assert_eq!(store.switcher_state().highlighted(), Some(&id("two")));
+
+    assert!(!store.handle_switcher_modifiers_changed(false));
+    assert_eq!(store.selected_session_id(), Some(&id("two")));
+    assert!(!store.switcher_state().is_visible());
+
+    store.handle_switcher_key(SwitcherKey::Tab {
+        control: true,
+        shift: true,
+    });
+    assert_eq!(store.switcher_state().highlighted(), Some(&id("one")));
+    assert!(store.handle_switcher_key(SwitcherKey::Escape));
+    assert_eq!(store.selected_session_id(), Some(&id("two")));
+}
+
+#[test]
+fn hydrate_restores_the_last_selected_session_instead_of_the_first() {
+    let prefs = Prefs {
+        last_selected_session: Some(id("two")),
+        ..Prefs::default()
+    };
+    let (store, _) = hydrated(
+        vec![session("one", "a", 2.0), session("two", "a", 1.0)],
+        vec![project("a", "A")],
+        prefs,
+    );
+
+    assert_eq!(store.selected_session_id(), Some(&id("two")));
+    assert!(store.terminal_residency().contains(&id("two")));
+}
+
+#[test]
+fn stale_restored_selection_falls_back_and_is_replaced() {
+    let prefs = Prefs {
+        last_selected_session: Some(id("gone")),
+        ..Prefs::default()
+    };
+    let (store, _) = hydrated(
+        vec![session("one", "a", 2.0), session("two", "a", 1.0)],
+        vec![project("a", "A")],
+        prefs,
+    );
+
+    assert_eq!(store.selected_session_id(), Some(&id("one")));
+    assert_eq!(store.preferences().last_selected_session, Some(id("one")));
+}
+
+#[test]
+fn overview_store_integration_filters_selects_and_bulk_closes() {
+    let live = session("live", "a", 2.0);
+    let mut ended = session("ended", "a", 1.0);
+    ended.status = SessionStatus::Exited(ExitInfo {
+        reason: ExitReason::Exited,
+        code: Some(0),
+        signal: None,
+    });
+    let (mut store, mut effects) =
+        hydrated(vec![live, ended], vec![project("a", "A")], Prefs::default());
+    drain(&mut effects);
+
+    store.toggle_overview();
+    store.set_overview_filter(OverviewFilter::Lane(OverviewLane::Ended));
+    store.select_all_overview_sessions();
+    assert_eq!(
+        store.overview_state().selection(),
+        &HashSet::from([id("ended")])
+    );
+    assert!(store.close_overview_selection());
+    assert_eq!(drain(&mut effects), vec![StoreEffect::Remove(id("ended"))]);
+    assert!(store.overview_state().selection().is_empty());
+}
+
+#[test]
+fn projection_uses_manual_ranks_then_created_at_fallback() {
+    let prefs = Prefs {
+        sidebar_project_order: vec![pid("z")],
+        sidebar_session_order: vec![id("old-ranked")],
+        ..Prefs::default()
+    };
+    let (mut store, _) = hydrated(
+        vec![
+            session("old-ranked", "a", 1.0),
+            session("new", "a", 3.0),
+            session("middle", "a", 2.0),
+            session("z-session", "z", 4.0),
+        ],
+        vec![project("a", "Alpha"), project("z", "Zulu")],
+        prefs,
+    );
+
+    let projection = store.sidebar_projection();
+    assert_eq!(projection.projects[0].project.id, pid("z"));
+    assert_eq!(
+        projection.projects[1]
+            .sessions
+            .iter()
+            .map(|session| session.id.clone())
+            .collect::<Vec<_>>(),
+        vec![id("old-ranked"), id("new"), id("middle")]
+    );
+}
+
+#[test]
+fn projection_synthesizes_projects_and_handles_archived_selection() {
+    let active = session("active", "missing", 2.0);
+    let mut archived = session("archived", "missing", 1.0);
+    archived.worktree_path = Some("/repo/worktrees/feature-one".to_owned());
+    archived.archived_at = Some(DateMillis(20.0));
+    let (mut store, _) = hydrated(vec![active, archived], vec![], Prefs::default());
+
+    let first = store.sidebar_projection();
+    assert_eq!(first.projects[0].project.id, pid("missing"));
+    assert_eq!(first.projects[0].project.root, "/work/missing");
+    assert_eq!(first.ordered_sessions.len(), 1);
+    assert!(Arc::ptr_eq(&first, &store.sidebar_projection()));
+
+    store.select(id("archived"));
+    let selected = store.sidebar_projection();
+    assert_eq!(
+        selected
+            .ordered_sessions
+            .iter()
+            .map(|session| session.id.clone())
+            .collect::<Vec<_>>(),
+        vec![id("active"), id("archived")]
+    );
+
+    let mut lone = session("lone", "synthetic", 1.0);
+    lone.worktree_path = Some("/repo/worktrees/feature-two".to_owned());
+    let (mut lone_store, _) = hydrated(vec![lone], vec![], Prefs::default());
+    let synthesized = lone_store.sidebar_projection();
+    assert_eq!(
+        synthesized.projects[0].project.root,
+        "/repo/worktrees/feature-two"
+    );
+    assert_eq!(synthesized.projects[0].project.name, "feature-two");
+}
+
+#[test]
+fn projection_reuses_one_session_record_per_sidebar_row() {
+    let (mut store, _) = hydrated(
+        vec![session("one", "p", 1.0)],
+        vec![project("p", "P")],
+        Prefs::default(),
+    );
+
+    let projection = store.sidebar_projection();
+    let grouped: &SessionRecord = &projection.projects[0].sessions[0];
+    let ordered: &SessionRecord = &projection.ordered_sessions[0];
+    assert!(
+        std::ptr::eq(grouped, ordered),
+        "sidebar order must share the row record instead of cloning its transcript metadata"
+    );
+}
+
+#[test]
+fn multi_select_matches_finder_command_and_visible_shift_ranges() {
+    let mut archived = session("archived", "p", 0.0);
+    archived.archived_at = Some(DateMillis(10.0));
+    let prefs = Prefs {
+        sidebar_expanded_archives: vec![pid("p")],
+        ..Prefs::default()
+    };
+    let (mut store, _) = hydrated(
+        vec![
+            session("one", "p", 3.0),
+            session("two", "p", 2.0),
+            session("three", "p", 1.0),
+            archived,
+        ],
+        vec![project("p", "Project")],
+        prefs,
+    );
+    store.select(id("one"));
+
+    store.sidebar_click(
+        id("three"),
+        ClickModifiers {
+            command: true,
+            shift: false,
+        },
+    );
+    assert_eq!(
+        store.sidebar_selection,
+        HashSet::from([id("one"), id("three")])
+    );
+    assert_eq!(store.selected_session_id, Some(id("one")));
+
+    store.sidebar_click(
+        id("archived"),
+        ClickModifiers {
+            command: false,
+            shift: true,
+        },
+    );
+    assert_eq!(
+        store.sidebar_selection,
+        HashSet::from([id("three"), id("archived")])
+    );
+
+    store.sidebar_click(id("two"), ClickModifiers::default());
+    assert!(store.sidebar_selection.is_empty());
+    assert_eq!(store.selected_session_id, Some(id("two")));
+}
+
+#[test]
+fn focus_neighbor_prefers_same_project_below_then_above_then_global() {
+    let records = vec![
+        session("a-top", "a", 4.0),
+        session("a-mid", "a", 3.0),
+        session("a-low", "a", 2.0),
+        session("b-top", "b", 1.0),
+    ];
+    let projects = vec![project("a", "A"), project("b", "B")];
+
+    let (mut below, _) = hydrated(records.clone(), projects.clone(), Prefs::default());
+    below.select(id("a-mid"));
+    below.focus_neighbor(&HashSet::from([id("a-mid")]));
+    assert_eq!(below.selected_session_id, Some(id("a-low")));
+
+    let (mut above, _) = hydrated(records.clone(), projects.clone(), Prefs::default());
+    above.select(id("a-low"));
+    above.focus_neighbor(&HashSet::from([id("a-low")]));
+    assert_eq!(above.selected_session_id, Some(id("a-mid")));
+
+    let (mut global_below, _) = hydrated(records.clone(), projects.clone(), Prefs::default());
+    global_below.select(id("a-mid"));
+    global_below.focus_neighbor(&HashSet::from([id("a-top"), id("a-mid"), id("a-low")]));
+    assert_eq!(global_below.selected_session_id, Some(id("b-top")));
+
+    let (mut global_above, _) = hydrated(records, projects, Prefs::default());
+    global_above.select(id("b-top"));
+    global_above.focus_neighbor(&HashSet::from([id("b-top")]));
+    assert_eq!(global_above.selected_session_id, Some(id("a-low")));
+}
+
+#[test]
+fn selection_drives_mru_and_residency_eviction_signals_detach() {
+    let (mut store, mut effects) = hydrated(
+        vec![
+            session("one", "p", 4.0),
+            session("two", "p", 3.0),
+            session("three", "p", 2.0),
+            session("four", "p", 1.0),
+        ],
+        vec![project("p", "P")],
+        Prefs::default(),
+    );
+    drain(&mut effects);
+    store.select(id("two"));
+    store.select(id("three"));
+    store.select(id("four"));
+    assert_eq!(
+        store.mru_sessions(),
+        vec![id("four"), id("three"), id("two"), id("one")]
+    );
+    assert!(drain(&mut effects).contains(&StoreEffect::DetachAttachment(id("one"))));
+
+    let mut residency = TerminalResidency::new(3);
+    residency.touch(id("a"));
+    residency.touch(id("b"));
+    residency.touch(id("c"));
+    let update = residency.touch(id("d"));
+    assert_eq!(update.evicted, Some(id("a")));
+    assert_eq!(update.resident, vec![id("d"), id("c"), id("b")]);
+}
+
+#[test]
+fn default_residency_keeps_only_the_visible_terminal_attached() {
+    let mut residency = TerminalResidency::default();
+    residency.touch(id("visible"));
+    let update = residency.touch(id("next"));
+
+    assert_eq!(update.evicted, Some(id("visible")));
+    assert_eq!(update.resident, vec![id("next")]);
+}
+
+#[test]
+fn spawn_response_focuses_session_when_event_arrives_first() {
+    let (mut store, mut effects) = hydrated(
+        vec![session("existing", "p", 1.0)],
+        vec![project("p", "P")],
+        Prefs::default(),
+    );
+    drain(&mut effects);
+
+    // The daemon can publish session.updated before the spawn RPC response.
+    // At event time the old tab is still selected, so the new record is not
+    // granted terminal residency yet.
+    store.upsert_session(session("spawned", "p", 2.0));
+    assert!(!store.terminal_residency().contains(&id("spawned")));
+
+    // Applying the later RPC result must do everything a real tab selection
+    // does; otherwise the pane remains on "Preparing terminal…" until clicked.
+    store.apply_spawn_result(id("spawned"));
+
+    assert_eq!(store.selected_session_id(), Some(&id("spawned")));
+    assert!(store.terminal_residency().contains(&id("spawned")));
+}
+
+#[test]
+fn attention_rollup_and_needs_input_sort_use_proto_derivation() {
+    let mut done = session("done", "p", 1.0);
+    done.last_turn_completed_at = Some(DateMillis(50.0));
+    done.last_seen_at = Some(DateMillis(40.0));
+    let mut older_input = session("older-input", "p", 2.0);
+    older_input.status = SessionStatus::NeedsInput(diri_proto::NeedsInputKind::Question);
+    older_input.updated_at = DateMillis(100.0);
+    let mut newer_input = session("newer-input", "p", 3.0);
+    newer_input.status = SessionStatus::NeedsInput(diri_proto::NeedsInputKind::Permission);
+    newer_input.updated_at = DateMillis(200.0);
+    let (store, _) = hydrated(
+        vec![done, older_input, newer_input],
+        vec![project("p", "P")],
+        Prefs::default(),
+    );
+
+    assert_eq!(store.global_attention(), AttentionLevel::NeedsInput);
+    assert_eq!(
+        store
+            .needs_input_sessions()
+            .iter()
+            .map(|session| session.id.clone())
+            .collect::<Vec<_>>(),
+        vec![id("newer-input"), id("older-input")]
+    );
+}
+
+#[test]
+fn hidden_needs_input_update_emits_chime_and_notification_effect() {
+    let (mut store, mut effects) = hydrated(
+        vec![session("visible", "p", 2.0)],
+        vec![project("p", "P")],
+        Prefs::default(),
+    );
+    drain(&mut effects);
+
+    let mut hidden = session("hidden", "p", 1.0);
+    hidden.status = SessionStatus::NeedsInput(diri_proto::NeedsInputKind::Permission);
+    store.upsert_session(hidden);
+
+    let transition = drain(&mut effects)
+        .into_iter()
+        .find_map(|effect| match effect {
+            StoreEffect::StatusTransition(transition) => Some(transition),
+            _ => None,
+        })
+        .expect("needs-input update should emit a status transition");
+    assert_eq!(transition.sound, Some(NotificationSound::NeedsInput));
+    assert!(transition.notification.is_some());
+}
+
+#[test]
+fn auto_resume_is_attempted_once_per_run() {
+    let mut record = session("restart", "p", 1.0);
+    record.status = SessionStatus::Exited(ExitInfo {
+        reason: ExitReason::DaemonRestart,
+        code: None,
+        signal: None,
+    });
+    record.resumability = Resumability::Resumable;
+    let (mut store, mut effects) = hydrated(
+        vec![record.clone()],
+        vec![project("p", "P")],
+        Prefs::default(),
+    );
+
+    assert_eq!(
+        drain(&mut effects)
+            .into_iter()
+            .filter(|effect| matches!(
+                effect,
+                StoreEffect::Resume {
+                    automatic: true,
+                    ..
+                }
+            ))
+            .count(),
+        1
+    );
+    store.upsert_session(record);
+    assert!(!store.auto_resume_if_needed(&id("restart")));
+    assert!(drain(&mut effects).is_empty());
+}
+
+#[test]
+fn cold_boot_only_auto_resumes_the_selected_session() {
+    let restart_session = |value: &str, created: f64| {
+        let mut record = session(value, "p", created);
+        record.status = SessionStatus::Exited(ExitInfo {
+            reason: ExitReason::DaemonRestart,
+            code: None,
+            signal: None,
+        });
+        record.resumability = Resumability::Resumable;
+        record
+    };
+    let (mut store, mut effects) = hydrated(
+        vec![
+            restart_session("newest", 3.0),
+            restart_session("middle", 2.0),
+            restart_session("oldest", 1.0),
+        ],
+        vec![project("p", "P")],
+        Prefs::default(),
+    );
+
+    assert_eq!(store.selected_session_id(), Some(&id("newest")));
+    let automatic_resumes: Vec<_> = drain(&mut effects)
+        .into_iter()
+        .filter_map(|effect| match effect {
+            StoreEffect::Resume {
+                id,
+                automatic: true,
+            } => Some(id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        automatic_resumes,
+        vec![id("newest")],
+        "cold boot must not revive every previously running agent"
+    );
+
+    store.select(id("middle"));
+    let selected_resumes: Vec<_> = drain(&mut effects)
+        .into_iter()
+        .filter_map(|effect| match effect {
+            StoreEffect::Resume {
+                id,
+                automatic: true,
+            } => Some(id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        selected_resumes,
+        vec![id("middle")],
+        "an offline conversation should revive when the user selects it"
+    );
+}
+
+#[test]
+fn close_confirmation_only_gates_running_sessions() {
+    let running = session("running", "p", 2.0);
+    let mut exited = session("exited", "p", 1.0);
+    exited.status = SessionStatus::Exited(ExitInfo {
+        reason: ExitReason::Exited,
+        code: Some(0),
+        signal: None,
+    });
+    let (mut store, mut effects) = hydrated(
+        vec![running, exited],
+        vec![project("p", "P")],
+        Prefs::default(),
+    );
+    drain(&mut effects);
+
+    store.request_close(vec![id("exited")]);
+    assert!(store.pending_close.is_none());
+    assert!(drain(&mut effects).contains(&StoreEffect::Remove(id("exited"))));
+
+    store.request_close(vec![id("running")]);
+    assert_eq!(
+        store.pending_close.as_ref().map(|pending| &pending.ids),
+        Some(&vec![id("running")])
+    );
+    assert!(drain(&mut effects).is_empty());
+    store.confirm_pending_close();
+    assert!(drain(&mut effects).contains(&StoreEffect::Remove(id("running"))));
+}
+
+#[test]
+fn a_closing_row_leaves_at_once_and_ignores_further_clicks() {
+    let (mut store, mut effects) = hydrated(
+        vec![session("one", "p", 2.0), session("two", "p", 1.0)],
+        vec![project("p", "P")],
+        Prefs {
+            confirm_before_closing_session: false,
+            ..Prefs::default()
+        },
+    );
+    drain(&mut effects);
+
+    store.request_close(vec![id("one")]);
+    // The daemon still has to terminate the process tree, but the row is gone.
+    assert_eq!(
+        store
+            .ordered_sessions()
+            .iter()
+            .map(|s| s.id.clone())
+            .collect::<Vec<_>>(),
+        vec![id("two")]
+    );
+    assert!(drain(&mut effects).contains(&StoreEffect::Remove(id("one"))));
+
+    // A second ✕ on the same row is a no-op rather than a repeat request.
+    store.request_close(vec![id("one")]);
+    assert!(drain(&mut effects).is_empty());
+
+    // A resync that still lists the session means the close never landed.
+    store.hydrate(SessionListResult {
+        sessions: vec![session("one", "p", 2.0), session("two", "p", 1.0)],
+        projects: vec![project("p", "P")],
+    });
+    assert_eq!(store.ordered_sessions().len(), 2);
+}
+
+#[test]
+fn a_pending_confirmation_hides_the_row_only_once_confirmed() {
+    let (mut store, mut effects) = hydrated(
+        vec![session("one", "p", 2.0)],
+        vec![project("p", "P")],
+        Prefs::default(),
+    );
+    drain(&mut effects);
+
+    store.request_close(vec![id("one")]);
+    assert_eq!(store.ordered_sessions().len(), 1);
+    store.confirm_pending_close();
+    assert!(store.ordered_sessions().is_empty());
+}
+
+#[test]
+fn prefs_round_trip_and_zoom_clamp() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("nested/prefs.json");
+    let prefs = Prefs {
+        default_agent: DefaultAgent::Gemini,
+        last_spawn_host: Some("forge".to_owned()),
+        terminal_font_size: 19.5,
+        window_placement: Some(WindowPlacement {
+            display_uuid: Some("display-one".to_owned()),
+            mode: WindowMode::Fullscreen,
+            x: 120.0,
+            y: 80.0,
+            width: 1440.0,
+            height: 900.0,
+        }),
+        sidebar_visible: false,
+        sidebar_width: 284.0,
+        inspector_width: 516.0,
+        inspector_tab: InspectorTab::Artifacts,
+        last_selected_session: Some(id("s")),
+        quick_open_roots: "~/fun\n~/src".to_owned(),
+        sidebar_project_order: vec![pid("p")],
+        sidebar_pinned_sessions: vec![id("s")],
+        ..Prefs::default()
+    };
+    prefs.save(&path).unwrap();
+    assert_eq!(Prefs::load(&path).unwrap(), prefs);
+
+    let (mut store, _) = SessionStore::load(&path).unwrap();
+    store.zoom_terminal(100.0).unwrap();
+    assert_eq!(store.prefs.terminal_font_size, 20.0);
+    store.zoom_terminal(-100.0).unwrap();
+    assert_eq!(store.prefs.terminal_font_size, 10.0);
+    store.reset_terminal_zoom().unwrap();
+    assert_eq!(Prefs::load(&path).unwrap().terminal_font_size, 13.0);
+}
+
+#[test]
+fn selected_session_persists_across_store_reloads() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("prefs.json");
+    Prefs::default().save(&path).unwrap();
+
+    let (mut store, _) = SessionStore::load(&path).unwrap();
+    store.hydrate(SessionListResult {
+        sessions: vec![session("one", "a", 2.0), session("two", "a", 1.0)],
+        projects: vec![project("a", "A")],
+    });
+    store.select(id("two"));
+    drop(store);
+
+    let (mut restored, _) = SessionStore::load(&path).unwrap();
+    restored.hydrate(SessionListResult {
+        sessions: vec![session("one", "a", 2.0), session("two", "a", 1.0)],
+        projects: vec![project("a", "A")],
+    });
+    assert_eq!(restored.selected_session_id(), Some(&id("two")));
+}
+
+#[test]
+fn synthetic_events_upsert_project_and_remove_with_neighbor_focus() {
+    let (mut store, _) = hydrated(
+        vec![session("one", "p", 2.0), session("two", "p", 1.0)],
+        vec![],
+        Prefs::default(),
+    );
+    store.select(id("one"));
+    store.handle_event(EventEnvelope {
+        name: diri_proto::EventName::SESSION_UPDATED.to_owned(),
+        seq: 1,
+        params: serde_json::to_value(session("three", "p", 0.0)).unwrap(),
+    });
+    assert!(store.sessions.contains_key(&id("three")));
+
+    let updated_project = project("p", "Renamed");
+    store.handle_event(EventEnvelope {
+        name: diri_proto::EventName::PROJECT_UPDATED.to_owned(),
+        seq: 2,
+        params: serde_json::to_value(updated_project).unwrap(),
+    });
+    assert_eq!(
+        store.sidebar_projection().projects[0].project.name,
+        "Renamed"
+    );
+
+    store.handle_event(EventEnvelope {
+        name: diri_proto::EventName::SESSION_REMOVED.to_owned(),
+        seq: 3,
+        params: serde_json::json!({"id": "one"}),
+    });
+    assert_eq!(store.selected_session_id, Some(id("two")));
+    assert!(!store.sessions.contains_key(&id("one")));
+}
+
+#[test]
+fn identical_or_unrelated_daemon_events_do_not_publish_ui_changes() {
+    let existing = session("one", "p", 1.0);
+    let (mut store, _) = hydrated(
+        vec![existing.clone()],
+        vec![project("p", "Project")],
+        Prefs::default(),
+    );
+
+    assert!(!store.handle_event(EventEnvelope {
+        name: diri_proto::EventName::SESSION_UPDATED.to_owned(),
+        seq: 1,
+        params: serde_json::to_value(existing.clone()).unwrap(),
+    }));
+    assert!(!store.handle_event(EventEnvelope {
+        name: "terminal.grid".to_owned(),
+        seq: 2,
+        params: serde_json::json!({}),
+    }));
+
+    let mut changed = existing;
+    changed.title = "Renamed".to_owned();
+    assert!(store.handle_event(EventEnvelope {
+        name: diri_proto::EventName::SESSION_UPDATED.to_owned(),
+        seq: 3,
+        params: serde_json::to_value(changed).unwrap(),
+    }));
+}
+
+#[test]
+fn compact_resource_events_patch_only_resource_fields() {
+    let existing = session("one", "p", 1.0);
+    let original_title = existing.title.clone();
+    let (mut store, _) = hydrated(
+        vec![existing],
+        vec![project("p", "Project")],
+        Prefs::default(),
+    );
+
+    assert!(store.handle_event(EventEnvelope {
+        name: diri_proto::EventName::SESSION_RESOURCES.to_owned(),
+        seq: 1,
+        params: serde_json::json!({"id":"one","memoryBytes":42000000}),
+    }));
+
+    let patched = store.sessions().get(&id("one")).unwrap();
+    assert_eq!(patched.memory_bytes, Some(42_000_000));
+    assert_eq!(patched.title, original_title);
+}
+
+#[test]
+fn background_resource_samples_do_not_wake_views() {
+    assert_eq!(
+        event_publication_policy(StoreEventChange::Resources, false),
+        (false, false)
+    );
+    assert_eq!(
+        event_publication_policy(StoreEventChange::Model, false),
+        (true, false),
+        "model changes still keep the menu snapshot current"
+    );
+    assert_eq!(
+        event_publication_policy(StoreEventChange::Resources, true),
+        (true, true)
+    );
+}
+
+#[test]
+fn auxiliary_terminal_inherits_context_without_becoming_sidebar_selection() {
+    let mut primary = session("one", "p", 2.0);
+    primary.cwd = "/work/p/subdir".to_owned();
+    primary.host = Some("forge".to_owned());
+    let (mut store, mut effects) = hydrated(
+        vec![primary],
+        vec![project("p", "Project")],
+        Prefs::default(),
+    );
+    store.select(id("one"));
+    drain(&mut effects);
+
+    assert!(store.spawn_auxiliary_terminal(id("one")));
+    let effects = drain(&mut effects);
+    let Some(StoreEffect::SpawnAuxiliary(params)) = effects.first() else {
+        panic!("expected auxiliary spawn, got {effects:?}");
+    };
+    assert_eq!(params.kind, AgentKind::SHELL);
+    assert_eq!(params.cwd, "/work/p/subdir");
+    assert_eq!(params.host.as_deref(), Some("forge"));
+    assert_eq!(params.parent, Some(id("one")));
+    assert_eq!(store.selected_session_id(), Some(&id("one")));
+}
+
+#[test]
+fn auxiliary_terminal_is_hidden_and_removed_with_its_parent() {
+    let primary = session("one", "p", 2.0);
+    let mut terminal = session("terminal", "p", 1.0);
+    terminal.kind = AgentKind::SHELL;
+    terminal.parent = Some(id("one"));
+    terminal.title = super::AUXILIARY_TERMINAL_TITLE.to_owned();
+    let (mut store, mut effects) = hydrated(
+        vec![primary, terminal],
+        vec![project("p", "Project")],
+        Prefs::default(),
+    );
+    drain(&mut effects);
+
+    assert_eq!(
+        store
+            .ordered_sessions()
+            .into_iter()
+            .map(|session| session.id)
+            .collect::<Vec<_>>(),
+        vec![id("one")]
+    );
+    assert_eq!(
+        store
+            .auxiliary_terminal_for(&id("one"))
+            .map(|s| s.id.clone()),
+        Some(id("terminal"))
+    );
+
+    store.remove_sessions(vec![id("one")]);
+    let removed: HashSet<_> = drain(&mut effects)
+        .into_iter()
+        .filter_map(|effect| match effect {
+            StoreEffect::Remove(id) => Some(id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(removed, HashSet::from([id("one"), id("terminal")]));
+}
+
+#[test]
+fn remote_spawn_uses_host_default_cwd_and_drops_worktree() {
+    let (mut store, mut effects) = hydrated(
+        vec![session("one", "p", 1.0)],
+        vec![project("p", "Project")],
+        Prefs::default(),
+    );
+    store.set_hosts(vec![diri_proto::HostEntry {
+        id: "forge".into(),
+        name: Some("Forge".into()),
+        ssh: "cristi@forge".into(),
+        default_cwd: Some("~/code".into()),
+        node: None,
+    }]);
+    store.select(id("one"));
+    drain(&mut effects);
+
+    fn spawn_params(
+        effects: &mut mpsc::UnboundedReceiver<StoreEffect>,
+    ) -> diri_proto::SessionSpawnParams {
+        let spawned = drain(effects);
+        match spawned.first() {
+            Some(StoreEffect::Spawn(params)) => params.clone(),
+            other => panic!("expected spawn effect, got {other:?}"),
+        }
+    }
+
+    // Host set + no explicit cwd: the host's defaultCwd wins over the selected
+    // session's LOCAL directory, and worktree options are dropped entirely.
+    store.spawn_kind(
+        AgentKind::CLAUDE_CODE,
+        super::SpawnOptions {
+            host: Some("forge".into()),
+            worktree: Some(super::WorktreeSpawn {
+                create: true,
+                branch: None,
+            }),
+            ..super::SpawnOptions::default()
+        },
+    );
+    let params = spawn_params(&mut effects);
+    assert_eq!(params.host.as_deref(), Some("forge"));
+    assert_eq!(params.cwd, "~/code");
+    assert_eq!(params.new_worktree, None);
+
+    // Explicit remote override beats the default cwd.
+    store.spawn_kind(
+        AgentKind::SHELL,
+        super::SpawnOptions {
+            host: Some("forge".into()),
+            cwd: Some("~/deploys".into()),
+            ..super::SpawnOptions::default()
+        },
+    );
+    assert_eq!(spawn_params(&mut effects).cwd, "~/deploys");
+
+    // Unknown host id (stale picker) still spawns, in the remote home.
+    store.spawn_kind(
+        AgentKind::SHELL,
+        super::SpawnOptions {
+            host: Some("gone".into()),
+            ..super::SpawnOptions::default()
+        },
+    );
+    assert_eq!(spawn_params(&mut effects).cwd, "~");
+
+    // Local spawns are untouched: selected session's directory, no host.
+    store.spawn_kind(AgentKind::SHELL, super::SpawnOptions::default());
+    let params = spawn_params(&mut effects);
+    assert_eq!(params.host, None);
+    assert_eq!(params.cwd, "/work/p");
+
+    // Host badge lookup falls back to the raw id when the entry is gone.
+    assert_eq!(store.host_display_name("forge"), "Forge");
+    assert_eq!(store.host_display_name("gone"), "gone");
+}
+
+#[test]
+fn new_agent_target_remembers_the_last_spawn_instead_of_the_selected_session() {
+    let (mut store, mut effects) = hydrated(
+        vec![session("local", "p", 1.0)],
+        vec![project("p", "P")],
+        Prefs::default(),
+    );
+    store.set_hosts(vec![diri_proto::HostEntry {
+        id: "forge".into(),
+        name: Some("Forge".into()),
+        ssh: "cristi@forge".into(),
+        default_cwd: Some("~/code".into()),
+        node: None,
+    }]);
+    store.select(id("local"));
+    drain(&mut effects);
+
+    store.spawn_kind(
+        AgentKind::CLAUDE_CODE,
+        super::SpawnOptions {
+            host: Some("forge".into()),
+            ..super::SpawnOptions::default()
+        },
+    );
+    drain(&mut effects);
+
+    assert_eq!(
+        store.begin_repo_targeting().as_deref(),
+        Some("forge"),
+        "the + picker should remember where the last agent was opened"
+    );
+}
+
+#[test]
+fn spawning_persists_the_last_target_across_store_reloads() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("prefs.json");
+    Prefs::default().save(&path).unwrap();
+    let (mut store, _effects) = SessionStore::load(&path).unwrap();
+    store.set_hosts(vec![diri_proto::HostEntry {
+        id: "forge".into(),
+        name: Some("Forge".into()),
+        ssh: "cristi@forge".into(),
+        default_cwd: Some("~/code".into()),
+        node: None,
+    }]);
+
+    store.spawn_kind(
+        AgentKind::CLAUDE_CODE,
+        super::SpawnOptions {
+            host: Some("forge".into()),
+            ..super::SpawnOptions::default()
+        },
+    );
+
+    assert_eq!(
+        Prefs::load(&path).unwrap().last_spawn_host.as_deref(),
+        Some("forge")
+    );
+}
+
+#[test]
+fn migrate_session_guards_kind_target_and_reentry() {
+    let mut remote = session("two", "p", 2.0);
+    remote.host = Some("forge".into());
+    let mut shell = session("three", "p", 1.0);
+    shell.kind = AgentKind::SHELL;
+    let (mut store, mut effects) = hydrated(
+        vec![session("one", "p", 3.0), remote, shell],
+        vec![project("p", "P")],
+        Prefs::default(),
+    );
+    drain(&mut effects);
+
+    // Local Claude → forge emits exactly one migrate effect; a second click
+    // while in flight is swallowed.
+    store.migrate_session(id("one"), Some("forge".into()));
+    store.migrate_session(id("one"), Some("forge".into()));
+    let emitted = drain(&mut effects);
+    assert_eq!(
+        emitted,
+        vec![StoreEffect::Migrate {
+            id: id("one"),
+            target_host: Some("forge".into()),
+        }]
+    );
+    assert!(store.migrating().contains(&id("one")));
+    store.finish_migration(&id("one"));
+    assert!(!store.migrating().contains(&id("one")));
+
+    // No-op moves (already there), non-Claude kinds, and unknown sessions
+    // never emit.
+    store.migrate_session(id("two"), Some("forge".into()));
+    store.migrate_session(id("three"), None);
+    store.migrate_session(id("missing"), None);
+    assert!(drain(&mut effects).is_empty());
+
+    // Remote Claude → local is eligible.
+    store.migrate_session(id("two"), None);
+    assert_eq!(
+        drain(&mut effects),
+        vec![StoreEffect::Migrate {
+            id: id("two"),
+            target_host: None,
+        }]
+    );
+}
+
+#[test]
+fn sync_prefs_emits_once_per_host_until_finished() {
+    let (mut store, mut effects) = hydrated(vec![], vec![], Prefs::default());
+    store.set_hosts(vec![diri_proto::HostEntry {
+        id: "forge".into(),
+        name: Some("Forge".into()),
+        ssh: "cristi@forge".into(),
+        default_cwd: None,
+        node: None,
+    }]);
+    drain(&mut effects);
+
+    store.sync_prefs("forge".into());
+    store.sync_prefs("forge".into());
+    assert_eq!(
+        drain(&mut effects),
+        vec![StoreEffect::SyncPrefs {
+            host: "forge".into(),
+            host_name: "Forge".into(),
+        }]
+    );
+    assert!(store.syncing_prefs().contains("forge"));
+    store.finish_prefs_sync("forge");
+    store.sync_prefs("forge".into());
+    assert_eq!(drain(&mut effects).len(), 1);
+}
+
+#[test]
+fn repo_targeting_tracks_the_selected_session_and_dedupes_requests() {
+    let mut remote = session("one", "p", 2.0);
+    remote.host = Some("forge".into());
+    let (mut store, mut effects) = hydrated(
+        vec![remote, session("two", "p", 1.0)],
+        vec![project("p", "P")],
+        Prefs {
+            last_spawn_host: Some("forge".into()),
+            ..Prefs::default()
+        },
+    );
+    store.set_hosts(vec![diri_proto::HostEntry {
+        id: "forge".into(),
+        name: Some("Forge".into()),
+        ssh: "cristi@forge".into(),
+        default_cwd: None,
+        node: None,
+    }]);
+    store.select(id("one"));
+    drain(&mut effects);
+
+    // Opening the picker restarts repo targeting against the selected session
+    // and returns the remembered spawn destination.
+    assert_eq!(store.begin_repo_targeting().as_deref(), Some("forge"));
+    store.request_repo_target(None);
+    store.request_repo_target(None); // deduped while pending
+    assert_eq!(
+        drain(&mut effects),
+        vec![StoreEffect::LocateRepo {
+            key: "local".into(),
+            host: None,
+            session_id: id("one"),
+        }]
+    );
+    assert_eq!(store.repo_target(None), Some(&super::RepoTarget::Pending));
+
+    // The async answer lands under the same key.
+    store.set_repo_target(
+        "local".into(),
+        super::RepoTarget::Resolved("/work/p".into()),
+    );
+    assert_eq!(
+        store.repo_target(None),
+        Some(&super::RepoTarget::Resolved("/work/p".into()))
+    );
+
+    // Selection changes the repo reference, not the remembered destination.
+    store.select(id("two"));
+    assert_eq!(store.begin_repo_targeting().as_deref(), Some("forge"));
+    assert_eq!(store.repo_target(None), None);
+}
+
+#[test]
+fn inert_runtime_has_no_background_tasks_or_live_sessions() {
+    let runtime = super::StoreRuntime::inert();
+    assert!(
+        runtime
+            .tasks
+            .lock()
+            .expect("runtime task lock poisoned")
+            .is_empty()
+    );
+    assert!(runtime.snapshots().borrow().sessions.is_empty());
+}

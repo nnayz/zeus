@@ -1,0 +1,99 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  engine:
+    name: Swift engine (daemon + CLI)
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate shell scripts
+        run: bash -n scripts/*.sh diri/scripts/*.sh
+      - name: Install and audit browser sidecar
+        working-directory: sidecar
+        run: |
+          npm ci
+          npm audit --omit=dev
+      - name: Test
+        run: swift test
+      - name: Release build
+        run: swift build -c release
+
+  app:
+    name: Rust app (diri)
+    runs-on: macos-15
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: diri
+    steps:
+      - uses: actions/checkout@v4
+      # rust-toolchain.toml pins 1.95.0 with clippy + rustfmt.
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            diri/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('diri/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --workspace
+      - name: Release build
+        run: cargo build --workspace --release
+
+  bundle:
+    name: Package diri.app (unsigned)
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            diri/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('diri/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+      - name: Install cargo-packager
+        run: cargo install cargo-packager --locked
+      - name: Package
+        env:
+          DIRI_DIST_DIR: ${{ runner.temp }}/diri-dist
+        run: diri/scripts/package.sh
+      - name: Verify bundle structure and signature
+        run: |
+          app="${RUNNER_TEMP}/diri-dist/diri.app"
+          plutil -lint "${app}/Contents/Info.plist"
+          test -x "${app}/Contents/Resources/bin/dirijord"
+          test -x "${app}/Contents/Resources/bin/dirijord-holder"
+          test -x "${app}/Contents/Resources/bin/dirijor"
+          codesign --verify --deep --strict "${app}"
+
+  browser-sidecar:
+    name: Browser sidecar integration
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install sidecar and browser engines
+        working-directory: sidecar
+        run: |
+          npm ci
+          npx playwright install chromium webkit firefox
+      - name: Run browser integration tests
+        env:
+          DIRIJOR_RUN_BROWSER_TESTS: "1"
+        run: swift test --filter BrowserPoolTests

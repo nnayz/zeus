@@ -1,0 +1,40 @@
+Dirijor — third-party attributions
+==================================
+
+herdr (https://github.com/herdrdev/herdr)
+-----------------------------------------
+Licensed under the Apache License, Version 2.0.
+A copy of the license is available at http://www.apache.org/licenses/LICENSE-2.0
+
+The screen-detection predicates in the following files are ADAPTED from
+herdr's TOML screen manifests (`src/detect/manifests/*.toml`):
+
+    Sources/DirijorCore/Resources/manifests/amp.json
+    Sources/DirijorCore/Resources/manifests/antigravity.json
+    Sources/DirijorCore/Resources/manifests/copilot.json
+    Sources/DirijorCore/Resources/manifests/devin.json
+    Sources/DirijorCore/Resources/manifests/droid.json
+    Sources/DirijorCore/Resources/manifests/grok.json
+    Sources/DirijorCore/Resources/manifests/hermes.json
+    Sources/DirijorCore/Resources/manifests/kilo.json
+    Sources/DirijorCore/Resources/manifests/kimi.json
+    Sources/DirijorCore/Resources/manifests/kiro.json
+    Sources/DirijorCore/Resources/manifests/opencode.json
+    Sources/DirijorCore/Resources/manifests/pi.json
+    Sources/DirijorCore/Resources/manifests/qoder.json
+
+Changes made: the rules were translated from herdr's TOML rule schema into
+Dirijor's JSON predicate schema, re-prioritised for Dirijor's evaluator (which
+stops at the first matching rule by descending priority), restricted to the
+screen regions Dirijor implements, and paired with capture regions. Rules that
+depend on herdr-only regions (`top_non_empty_lines`, `after_last_horizontal_rule`,
+`after_last_prompt_marker`) were dropped rather than approximated.
+
+The `"agent"` capability blocks in those files — binaries, resume specs,
+session-id flags, approve/deny keystrokes, env hygiene, injection wiring — are
+Dirijor's own; herdr does not model most of them. Binary names and resume
+argv were cross-checked against herdr's `src/detect/mod.rs` and
+`src/agent_resume.rs`.
+
+The manifests for claude-code, codex, cursor, gemini, generic, and shell are
+Dirijor's own and predate this attribution.

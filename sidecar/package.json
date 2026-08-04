@@ -1,0 +1,12 @@
+{
+  "name": "dirijor-test-sidecar",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Playwright browser pool driven by the Dirijor daemon over a unix socket.",
+  "type": "commonjs",
+  "main": "server.js",
+  "engines": { "node": ">=18" },
+  "dependencies": {
+    "playwright": "^1.48.0"
+  }
+}

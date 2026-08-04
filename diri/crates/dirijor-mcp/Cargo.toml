@@ -1,0 +1,13 @@
+[package]
+name = "dirijor-mcp"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "dirijor-mcp"
+path = "src/main.rs"
+
+[dependencies]
+serde_json.workspace = true

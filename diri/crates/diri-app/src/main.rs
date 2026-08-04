@@ -1,0 +1,454 @@
+mod clipboard_transfer;
+#[cfg(unix)]
+mod daemon_launch;
+mod diff;
+pub mod fonts;
+pub mod fuzzy;
+pub mod history;
+mod inspector;
+pub mod navigation;
+pub mod notifications;
+pub mod palette;
+pub mod query_editor;
+pub mod quick_open;
+mod remote_access;
+pub mod root;
+pub mod seam;
+mod session_surfaces;
+pub mod settings;
+pub mod sidebar;
+pub mod sounds;
+mod surface_shell;
+pub mod switcher;
+pub mod terminal_pane;
+pub mod updates;
+pub mod usage;
+mod workbench;
+pub mod worktrees;
+
+#[cfg(target_os = "macos")]
+mod macos;
+
+use std::collections::HashSet;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+
+use diri_client::DaemonClient;
+use gpui::{
+    App, AppContext as _, Bounds, KeyBinding, Menu, MenuItem, OsAction, SystemMenuType,
+    TitlebarOptions, Window, WindowBackgroundAppearance, WindowBounds, WindowOptions, actions,
+    point, px, size,
+};
+use gpui_platform::application;
+use root::RootView;
+use sidebar::PreviewScenario;
+use terminal_pane::bind_terminal_keys;
+use tokio::runtime::{Builder as RuntimeBuilder, Runtime};
+
+use crate::store::{StoreRuntime, WindowMode, WindowPlacement};
+use crate::updates::UpdateHandle;
+use crate::usage::{
+    TranscriptInvalidation, TranscriptWatcher, UsageSnapshot, UsageStore, merge_fleet_usage,
+};
+
+pub mod store;
+
+const MIN_WINDOW_WIDTH: f32 = 900.0;
+const MIN_WINDOW_HEIGHT: f32 = 560.0;
+const USAGE_REFRESH_DEBOUNCE: Duration = Duration::from_secs(2);
+const USAGE_RECONCILE_INTERVAL: Duration = Duration::from_secs(30 * 60);
+
+actions!(diri_app, [Quit, HideApp, CloseWindow]);
+
+/// Standard macOS app behaviors route through the application menu: without
+/// one, cmd-Q / cmd-H / cmd-W and the Edit menu simply do not exist.
+fn install_app_menus(cx: &mut App) {
+    cx.on_action(|_: &Quit, cx| cx.quit());
+    cx.on_action(|_: &HideApp, cx| cx.hide());
+    cx.on_action(|_: &CloseWindow, cx| {
+        if let Some(window) = cx.active_window() {
+            let _ = window.update(cx, |_, window, _| window.remove_window());
+        }
+    });
+    // Cmd+W routes through CloseSession: RootView closes the selected
+    // session and only propagates here — closing the window — when no
+    // session is selected.
+    cx.on_action(|_: &root::CloseSession, cx| {
+        if let Some(window) = cx.active_window() {
+            let _ = window.update(cx, |_, window, _| window.remove_window());
+        }
+    });
+    cx.bind_keys([
+        KeyBinding::new("cmd-q", Quit, None),
+        KeyBinding::new("cmd-h", HideApp, None),
+        KeyBinding::new("cmd-w", root::CloseSession, None),
+        KeyBinding::new("cmd-shift-t", root::ReopenSession, None),
+    ]);
+    cx.set_menus([
+        Menu::new("diri").items([
+            MenuItem::os_submenu("Services", SystemMenuType::Services),
+            MenuItem::separator(),
+            MenuItem::action("Hide diri", HideApp),
+            MenuItem::separator(),
+            MenuItem::action("Quit diri", Quit),
+        ]),
+        Menu::new("Edit").items([
+            MenuItem::os_action("Copy", terminal_pane::CopySelection, OsAction::Copy),
+            MenuItem::os_action("Paste", terminal_pane::Paste, OsAction::Paste),
+        ]),
+        Menu::new("Window").items([
+            MenuItem::action("Close Session", root::CloseSession),
+            MenuItem::action("Reopen Closed Session", root::ReopenSession),
+            MenuItem::action("Close Window", CloseWindow),
+        ]),
+    ]);
+}
+
+pub(crate) struct AppServices {
+    // StoreRuntime drops/aborts its client tasks before the executor is dropped.
+    pub(crate) store: Arc<StoreRuntime>,
+    pub(crate) usage_tx: tokio::sync::watch::Sender<UsageSnapshot>,
+    pub(crate) updates: UpdateHandle,
+    pub(crate) tokio: Arc<Runtime>,
+}
+
+fn main() {
+    #[cfg(target_os = "macos")]
+    if std::env::var_os("DIRI_PROBE_SYMBOLS").is_some() {
+        macos::sf_symbols::probe();
+        return;
+    }
+
+    let preview_value = std::env::var("DIRIJOR_SIDEBAR_PREVIEW").ok();
+    let preview = preview_value.as_deref().is_some_and(|value| value != "0");
+    let scenario_value = std::env::var("DIRIJOR_SIDEBAR_SCENARIO")
+        .ok()
+        .or_else(|| preview_value.filter(|value| value != "1"));
+    let scenario = PreviewScenario::from_env(scenario_value.as_deref());
+
+    // The client runtime multiplexes one daemon socket plus a handful of
+    // event-driven housekeeping tasks. The default Tokio constructor creates
+    // one worker per CPU core (14 on current Apple Silicon), which is needless
+    // scheduler/thread-stack overhead for this I/O-bound desktop client.
+    let tokio = Arc::new(
+        RuntimeBuilder::new_multi_thread()
+            .worker_threads(2)
+            .thread_name("diri-async")
+            .enable_all()
+            .build()
+            .expect("failed to start diri async runtime"),
+    );
+
+    // diri is self-contained: if no daemon socket is live, launch the daemon
+    // bundled in Contents/Resources/bin, then let DaemonClient's reconnect loop
+    // pick it up. Never shuts a daemon down or restarts on hash mismatch
+    // (PLAN.md §3.1 — avoids ping-pong with any still-installed Dirijor.app).
+    #[cfg(unix)]
+    if !preview {
+        let home = std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("/nonexistent"));
+        let socket_path = diri_proto::paths::DirijorPaths::socket(home);
+        daemon_launch::ensure_daemon_running(&socket_path);
+    }
+
+    let client = Arc::new(DaemonClient::new());
+    let store_runtime = {
+        let _guard = tokio.enter();
+        Arc::new(if preview {
+            StoreRuntime::inert()
+        } else {
+            StoreRuntime::start_default(Arc::clone(&client)).expect("failed to load diri state")
+        })
+    };
+    let (usage_tx, _) = tokio::sync::watch::channel(UsageSnapshot::default());
+    if !preview {
+        let usage_tx = usage_tx.clone();
+        let usage_home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/nonexistent"));
+        tokio.spawn(async move {
+            let mut store = UsageStore::new();
+            let roots = store.watch_roots();
+            let Some(returned_store) =
+                publish_usage_refresh(store, &usage_tx, None, &usage_home).await
+            else {
+                return;
+            };
+            store = returned_store;
+            let mut watcher = TranscriptWatcher::new(&roots).ok();
+            let mut invalidated = HashSet::<PathBuf>::new();
+            let mut reconcile = false;
+            let mut refresh_due: Option<tokio::time::Instant> = None;
+            let mut reconciliation = tokio::time::interval(USAGE_RECONCILE_INTERVAL);
+            reconciliation.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            reconciliation.tick().await; // initial full refresh already completed above
+            loop {
+                tokio::select! {
+                    event = async {
+                        match watcher.as_mut() {
+                            Some(watcher) => watcher.recv().await,
+                            None => std::future::pending().await,
+                        }
+                    } => {
+                        match event {
+                            Some(TranscriptInvalidation::Paths(paths)) => {
+                                invalidated.extend(paths);
+                            }
+                            Some(TranscriptInvalidation::Reconcile) | None => {
+                                reconcile = true;
+                            }
+                        }
+                        refresh_due = Some(tokio::time::Instant::now() + USAGE_REFRESH_DEBOUNCE);
+                    }
+                    _ = async {
+                        if let Some(deadline) = refresh_due {
+                            tokio::time::sleep_until(deadline).await;
+                        } else {
+                            std::future::pending().await
+                        }
+                    } => {
+                        refresh_due = None;
+                        let paths = (!reconcile).then(|| invalidated.drain().collect::<Vec<_>>());
+                        invalidated.clear();
+                        reconcile = false;
+                        let Some(returned_store) =
+                            publish_usage_refresh(store, &usage_tx, paths, &usage_home).await
+                        else {
+                            return;
+                        };
+                        store = returned_store;
+                    }
+                    _ = reconciliation.tick() => {
+                        // FSEvents can coalesce/drop events. A rare reconciliation
+                        // preserves correctness without tying a recursive walk to
+                        // every session status/resource update.
+                        let Some(returned_store) =
+                            publish_usage_refresh(store, &usage_tx, None, &usage_home).await
+                        else {
+                            return;
+                        };
+                        store = returned_store;
+                        invalidated.clear();
+                        reconcile = false;
+                        refresh_due = None;
+                    }
+                }
+            }
+        });
+    }
+    let updates = if preview {
+        updates::inert()
+    } else {
+        let (automatic_updates, skipped_update) = {
+            let store = store_runtime
+                .store
+                .read()
+                .expect("session store lock poisoned");
+            let prefs = store.preferences();
+            (
+                prefs.automatic_updates,
+                Some(prefs.skipped_update_version.clone()),
+            )
+        };
+        updates::spawn(&tokio, automatic_updates, skipped_update)
+    };
+    let services = Arc::new(AppServices {
+        store: store_runtime,
+        usage_tx,
+        updates,
+        tokio,
+    });
+
+    let app = application().with_assets(diri_ui::IconAssets);
+    // Clicking the Dock icon with no windows must bring the app back
+    // (AppKit reopen). Without this a closed window strands a live process
+    // that "opens" to nothing.
+    let reopen_services = Arc::clone(&services);
+    app.on_reopen(move |cx| {
+        if cx.windows().is_empty() {
+            open_main_window(cx, Arc::clone(&reopen_services), preview, scenario);
+        }
+        cx.activate(true);
+    });
+    app.run(move |cx: &mut App| {
+        load_system_fonts(cx);
+        #[cfg(target_os = "macos")]
+        diri_ui::set_mark_rasterizer(macos::brand_raster::raster_mark);
+        bind_terminal_keys(cx);
+        install_app_menus(cx);
+        let quit_store = Arc::clone(&services.store);
+        cx.on_app_quit(move |_| {
+            let quit_store = Arc::clone(&quit_store);
+            async move {
+                if let Err(error) = quit_store
+                    .store
+                    .write()
+                    .expect("session store lock poisoned")
+                    .persist_preferences()
+                {
+                    eprintln!("diri: could not flush preferences while quitting: {error}");
+                }
+            }
+        })
+        .detach();
+        open_main_window(cx, services, preview, scenario);
+        cx.activate(true);
+    });
+}
+
+async fn publish_usage_refresh(
+    mut store: UsageStore,
+    usage_tx: &tokio::sync::watch::Sender<UsageSnapshot>,
+    invalidated: Option<Vec<PathBuf>>,
+    home: &std::path::Path,
+) -> Option<UsageStore> {
+    let (store, snapshot) = tokio::task::spawn_blocking(move || {
+        let snapshot = match invalidated {
+            Some(paths) => store.refresh_paths(&paths),
+            None => store.refresh(),
+        };
+        (store, snapshot)
+    })
+    .await
+    .ok()?;
+    let snapshot = merge_fleet_usage(snapshot, home).await;
+    usage_tx.send_replace(snapshot);
+    Some(store)
+}
+
+fn open_main_window(
+    cx: &mut App,
+    services: Arc<AppServices>,
+    preview: bool,
+    scenario: PreviewScenario,
+) {
+    let perf_large_window = std::env::var_os("DIRI_PERF_LARGE_WINDOW").is_some();
+    let initial_size = if perf_large_window {
+        size(px(1800.0), px(1100.0))
+    } else {
+        size(px(1100.0), px(700.0))
+    };
+    let saved_placement = (!preview && !perf_large_window)
+        .then(|| {
+            services
+                .store
+                .store
+                .read()
+                .expect("session store lock poisoned")
+                .preferences()
+                .window_placement
+                .clone()
+        })
+        .flatten();
+    let (window_bounds, display_id) = saved_placement
+        .map(|placement| restore_window_bounds(placement, cx))
+        .unwrap_or_else(|| {
+            (
+                WindowBounds::Windowed(Bounds::centered(None, initial_size, cx)),
+                None,
+            )
+        });
+    cx.open_window(
+        WindowOptions {
+            window_bounds: Some(window_bounds),
+            display_id,
+            window_min_size: Some(size(px(MIN_WINDOW_WIDTH), px(MIN_WINDOW_HEIGHT))),
+            // The terminal is an opaque work surface. Marking the whole window
+            // blurred forces WindowServer/Metal to retain full-size backdrop
+            // surfaces even though only the sidebar used that material.
+            window_background: WindowBackgroundAppearance::Opaque,
+            app_id: Some("com.dirijor.diri".to_owned()),
+            titlebar: Some(TitlebarOptions {
+                title: None,
+                appears_transparent: true,
+                // GPUI uses top/left insets here: AppKit's native 8 pt origin plus the
+                // spec's +12 x / -6 frame-origin nudge maps to 20 pt left and 14 pt top.
+                traffic_light_position: Some(point(px(20.0), px(14.0))),
+            }),
+            ..Default::default()
+        },
+        move |window, cx| cx.new(|cx| RootView::new(services, preview, scenario, window, cx)),
+    )
+    .expect("failed to open the diri window");
+}
+
+/// Convert GPUI's runtime window state into the JSON-friendly preference
+/// representation. This is shared by the bounds observer in `RootView`.
+pub(crate) fn current_window_placement(window: &Window, cx: &App) -> WindowPlacement {
+    let window_bounds = window.window_bounds();
+    let bounds = window_bounds.get_bounds();
+    let mode = if window.is_fullscreen() {
+        WindowMode::Fullscreen
+    } else if window.is_maximized() {
+        WindowMode::Maximized
+    } else {
+        match window_bounds {
+            WindowBounds::Windowed(_) => WindowMode::Windowed,
+            WindowBounds::Maximized(_) => WindowMode::Maximized,
+            WindowBounds::Fullscreen(_) => WindowMode::Fullscreen,
+        }
+    };
+    WindowPlacement {
+        display_uuid: window
+            .display(cx)
+            .and_then(|display| display.uuid().ok())
+            .map(|uuid| uuid.to_string()),
+        mode,
+        x: f32::from(bounds.origin.x),
+        y: f32::from(bounds.origin.y),
+        width: f32::from(bounds.size.width),
+        height: f32::from(bounds.size.height),
+    }
+}
+
+fn restore_window_bounds(
+    placement: WindowPlacement,
+    cx: &App,
+) -> (WindowBounds, Option<gpui::DisplayId>) {
+    let display = placement.display_uuid.as_deref().and_then(|uuid| {
+        cx.displays().into_iter().find(|display| {
+            display
+                .uuid()
+                .is_ok_and(|candidate| candidate.to_string() == uuid)
+        })
+    });
+    let display_id = display.as_ref().map(|display| display.id());
+    let size = size(px(placement.width), px(placement.height));
+    let saved = Bounds::new(point(px(placement.x), px(placement.y)), size);
+    // Display arrangements change. Preserve the saved size, but center it on
+    // the current primary display if the old origin is now wholly off-screen.
+    let visible = display.as_ref().map_or_else(
+        || {
+            cx.displays()
+                .iter()
+                .any(|display| saved.intersects(&display.visible_bounds()))
+        },
+        |display| saved.intersects(&display.visible_bounds()),
+    );
+    let bounds = if visible {
+        saved
+    } else {
+        Bounds::centered(display_id, size, cx)
+    };
+    let bounds = match placement.mode {
+        WindowMode::Windowed => WindowBounds::Windowed(bounds),
+        WindowMode::Maximized => WindowBounds::Maximized(bounds),
+        WindowMode::Fullscreen => WindowBounds::Fullscreen(bounds),
+    };
+    (bounds, display_id)
+}
+
+#[cfg(target_os = "macos")]
+fn load_system_fonts(cx: &mut App) {
+    // GPUI resolves its virtual system family through CoreText. Registering
+    // system font file bytes in its in-memory source duplicates tens of
+    // megabytes for the process lifetime.
+    fonts::init(cx);
+}
+
+#[cfg(not(target_os = "macos"))]
+fn load_system_fonts(cx: &mut App) {
+    fonts::init(cx);
+}

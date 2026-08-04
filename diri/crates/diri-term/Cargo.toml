@@ -1,0 +1,13 @@
+[package]
+name = "diri-term"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+diri-proto.workspace = true
+gpui.workspace = true
+
+[dev-dependencies]
+gpui_platform.workspace = true

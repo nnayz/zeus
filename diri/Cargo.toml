@@ -1,0 +1,49 @@
+[workspace]
+members = [
+    "crates/diri-app",
+    "crates/diri-client",
+    "crates/diri-node",
+    "crates/dirijor-mcp",
+    "crates/diri-proto",
+    "crates/diri-term",
+    "crates/diri-ui",
+    "crates/diri-usage",
+    "crates/diri-updater",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.95"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+diri-client = { path = "crates/diri-client" }
+diri-node = { path = "crates/diri-node" }
+diri-proto = { path = "crates/diri-proto" }
+diri-term = { path = "crates/diri-term" }
+diri-ui = { path = "crates/diri-ui" }
+diri-usage = { path = "crates/diri-usage" }
+diri-updater = { path = "crates/diri-updater" }
+gpui = { git = "https://github.com/zed-industries/zed.git", rev = "dc2a339d5d043da448a3f7ddc7c0a85c63864aad" }
+gpui_platform = { git = "https://github.com/zed-industries/zed.git", rev = "dc2a339d5d043da448a3f7ddc7c0a85c63864aad", features = ["font-kit"] }
+image = { version = "0.25.1", default-features = false }
+nucleo-matcher = "0.3"
+notify = "8.2"
+smallvec = { version = "1.6", features = ["union", "const_new"] }
+futures-core = "0.3"
+getrandom = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.40.1", features = ["bundled"] }
+sha2 = "0.10"
+tempfile = "3"
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+unicode-segmentation = "1"
+
+[patch."https://github.com/zed-industries/zed.git"]
+# Diri does not use GPUI vector paths during normal rendering: brand marks are
+# rasterized through CoreGraphics. Upstream nevertheless allocates full-window
+# path/MSAA targets on every resize. Keep our renderer patch local and pinned to
+# the exact Zed revision used by `gpui`.
+gpui_macos = { path = "vendor/gpui_macos" }

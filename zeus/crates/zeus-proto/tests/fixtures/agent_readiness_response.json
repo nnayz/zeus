@@ -1,0 +1,1 @@
+{"id":4,"ok":{"agents":[{"binary":"claude","kind":{"claudeCode":{}},"path":"/redacted/.local/bin/claude"},{"binary":"codex","kind":{"codex":{}},"path":"/redacted/.local/share/nvm/v24.9.0/bin/codex"},{"binary":"cursor-agent","kind":{"cursor":{}},"path":"/redacted/.local/bin/cursor-agent"},{"binary":"gemini","kind":{"gemini":{}}}]}}

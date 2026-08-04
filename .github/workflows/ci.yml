@@ -19,16 +19,25 @@ jobs:
         run: |
           npm ci
           npm audit --omit=dev
-      # SwiftPM block-buffers when stdout is a pipe, so a killed test process
-      # loses most of its console output. The xunit file is written
-      # incrementally and survives that.
+      # --no-parallel is load-bearing on CI. Run in parallel, every test starts
+      # at once, and the suite then stalls indefinitely on a 3-core runner: the
+      # PTY and holder tests block inside async contexts, and with that few
+      # cores the cooperative pool has no thread left to make progress on.
+      # A developer Mac has enough cores to hide it. Serial costs ~30s.
+      #
+      # SwiftPM also block-buffers when stdout is a pipe, so a test process that
+      # dies takes most of its console output with it — hence the xunit file.
       - name: Test
-        run: swift test --xunit-output "${RUNNER_TEMP}/tests.xml"
+        run: swift test --no-parallel --xunit-output "${RUNNER_TEMP}/tests.xml"
       - name: Failing tests
         if: failure()
         run: |
+          if [ ! -f "${RUNNER_TEMP}/tests.xml" ]; then
+            echo "no xunit report — the test process died before writing one"
+            exit 0
+          fi
           xmllint --xpath '//testcase[failure]/@name' "${RUNNER_TEMP}/tests.xml" 2>/dev/null \
-            || echo "no per-test failure recorded — the test process died before finishing"
+            || echo "xunit report lists no failing test; the run died mid-flight"
       - name: Release build
         run: swift build -c release
 
@@ -75,12 +84,16 @@ jobs:
             diri/target
           key: ${{ runner.os }}-cargo-${{ hashFiles('diri/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
-      # package.sh lipos two slices into a universal binary; both targets have
-      # to be installed or the x86_64 pass fails with "can't find crate for std".
-      - name: Install universal targets and cargo-packager
-        run: |
-          rustup target add aarch64-apple-darwin x86_64-apple-darwin
-          cargo install cargo-packager --locked
+      # package.sh lipos two slices into a universal binary, so both targets
+      # have to be installed — and installed for the toolchain diri/ pins in
+      # rust-toolchain.toml, not the runner default. Adding them from the repo
+      # root silently equips the wrong toolchain and the x86_64 pass then fails
+      # with "can't find crate for std".
+      - name: Install universal targets
+        working-directory: diri
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - name: Install cargo-packager
+        run: cargo install cargo-packager --locked
       - name: Package
         env:
           DIRI_DIST_DIR: ${{ runner.temp }}/diri-dist

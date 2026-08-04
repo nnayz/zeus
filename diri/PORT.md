@@ -37,7 +37,8 @@ This is the record of replacing it with `crates/diri-engine`.
 | Control socket | **core done** | Handshake, list, send_text, resize, read_screen, kill over NDJSON on an owner-only socket. Unported methods answer `not_found` rather than dropping the connection |
 | Agent descriptors | **done** | argv, env scrubbing, colour assertion, resume flags — all read from the manifest |
 | Spawn over the wire | not started | `session.spawn` still needs hook/MCP injection wiring |
-| Hooks / MCP / git / worktrees | not started | |
+| Hook + notify parsing | **done** | Claude hooks and Codex notify → signals, with identity, titles and needs-input detail |
+| MCP / git / worktrees / holder | not started | |
 | Swift daemon retirement | not started | Only after the above ships and is proven |
 
 ## What the risky parts turned out to be

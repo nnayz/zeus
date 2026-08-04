@@ -52,7 +52,7 @@ impl PtySpec {
 #[cfg(unix)]
 mod unix;
 #[cfg(unix)]
-pub use unix::Pty;
+pub use unix::{Pty, PtyStream};
 
 #[cfg(not(unix))]
 mod unsupported;

@@ -2,6 +2,7 @@
 members = [
     "crates/diri-app",
     "crates/diri-client",
+    "crates/diri-engine",
     "crates/diri-node",
     "crates/dirijor-mcp",
     "crates/diri-proto",
@@ -19,6 +20,7 @@ license = "Apache-2.0"
 
 [workspace.dependencies]
 diri-client = { path = "crates/diri-client" }
+diri-engine = { path = "crates/diri-engine" }
 diri-node = { path = "crates/diri-node" }
 diri-proto = { path = "crates/diri-proto" }
 diri-term = { path = "crates/diri-term" }

@@ -1327,6 +1327,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "diri-engine"
+version = "0.1.0"
+dependencies = [
+ "diri-proto",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "diri-node"
 version = "0.1.0"
 dependencies = [

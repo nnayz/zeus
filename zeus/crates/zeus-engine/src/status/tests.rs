@@ -82,12 +82,18 @@ fn idle_needs_three_screen_confirmations_without_a_strong_signal() {
     let mut reducer = StatusReducer::new(Authority::ScreenPrimary, t0());
     let mut now = settled(&mut reducer, t0());
 
-    reducer.reduce(StatusSignal::Screen(observation(ManifestState::Working, 1)), now);
+    reducer.reduce(
+        StatusSignal::Screen(observation(ManifestState::Working, 1)),
+        now,
+    );
     assert_eq!(*reducer.status(), SessionStatus::Working);
 
     for seq in 2..=3 {
         now += Duration::from_millis(100);
-        reducer.reduce(StatusSignal::Screen(observation(ManifestState::Idle, seq)), now);
+        reducer.reduce(
+            StatusSignal::Screen(observation(ManifestState::Idle, seq)),
+            now,
+        );
         assert_eq!(
             *reducer.status(),
             SessionStatus::Working,
@@ -97,7 +103,10 @@ fn idle_needs_three_screen_confirmations_without_a_strong_signal() {
     }
 
     now += Duration::from_millis(100);
-    let outcome = reducer.reduce(StatusSignal::Screen(observation(ManifestState::Idle, 4)), now);
+    let outcome = reducer.reduce(
+        StatusSignal::Screen(observation(ManifestState::Idle, 4)),
+        now,
+    );
     assert_eq!(outcome.status_change, Some(SessionStatus::Idle));
 }
 
@@ -106,15 +115,27 @@ fn a_work_signal_cancels_a_pending_idle_candidacy() {
     let mut reducer = StatusReducer::new(Authority::ScreenPrimary, t0());
     let mut now = settled(&mut reducer, t0());
 
-    reducer.reduce(StatusSignal::Screen(observation(ManifestState::Working, 1)), now);
+    reducer.reduce(
+        StatusSignal::Screen(observation(ManifestState::Working, 1)),
+        now,
+    );
     now += Duration::from_millis(100);
-    reducer.reduce(StatusSignal::Screen(observation(ManifestState::Idle, 2)), now);
+    reducer.reduce(
+        StatusSignal::Screen(observation(ManifestState::Idle, 2)),
+        now,
+    );
 
     // Work resumes: the two idle confirmations so far must be discarded.
     now += Duration::from_millis(100);
-    reducer.reduce(StatusSignal::Screen(observation(ManifestState::Working, 3)), now);
+    reducer.reduce(
+        StatusSignal::Screen(observation(ManifestState::Working, 3)),
+        now,
+    );
     now += Duration::from_millis(100);
-    reducer.reduce(StatusSignal::Screen(observation(ManifestState::Idle, 4)), now);
+    reducer.reduce(
+        StatusSignal::Screen(observation(ManifestState::Idle, 4)),
+        now,
+    );
 
     assert_eq!(
         *reducer.status(),
@@ -140,7 +161,10 @@ fn a_visible_blocker_outranks_a_working_hook() {
     );
     let detail = outcome.needs_input.expect("a detail for the prompt");
     assert_eq!(detail.summary, "Do you want to proceed?");
-    assert_eq!(detail.options.as_deref(), Some(&["Yes".to_string(), "No".to_string()][..]));
+    assert_eq!(
+        detail.options.as_deref(),
+        Some(&["Yes".to_string(), "No".to_string()][..])
+    );
 }
 
 #[test]
@@ -154,14 +178,20 @@ fn a_blocker_survives_one_stray_non_blocker_frame() {
     assert!(matches!(*reducer.status(), SessionStatus::NeedsInput(_)));
 
     now += Duration::from_millis(100);
-    reducer.reduce(StatusSignal::Screen(observation(ManifestState::Idle, 2)), now);
+    reducer.reduce(
+        StatusSignal::Screen(observation(ManifestState::Idle, 2)),
+        now,
+    );
     assert!(
         matches!(*reducer.status(), SessionStatus::NeedsInput(_)),
         "one miss is not enough to clear the prompt"
     );
 
     now += Duration::from_millis(100);
-    let outcome = reducer.reduce(StatusSignal::Screen(observation(ManifestState::Idle, 3)), now);
+    let outcome = reducer.reduce(
+        StatusSignal::Screen(observation(ManifestState::Idle, 3)),
+        now,
+    );
     assert_eq!(
         outcome.status_change,
         Some(SessionStatus::Idle),
@@ -198,7 +228,10 @@ fn startup_grace_holds_starting_until_something_definitive() {
     assert_eq!(*reducer.status(), SessionStatus::Starting);
 
     // SessionStart is definitive.
-    let outcome = reducer.reduce(hook(ClaudeHook::SessionStart), t0() + Duration::from_secs(1));
+    let outcome = reducer.reduce(
+        hook(ClaudeHook::SessionStart),
+        t0() + Duration::from_secs(1),
+    );
     assert_eq!(outcome.status_change, Some(SessionStatus::Idle));
 }
 
@@ -244,7 +277,11 @@ fn subagent_lifecycle_is_counted_but_not_canonical() {
 
     reducer.reduce(hook(ClaudeHook::SubagentStop("a".into())), now);
     assert_eq!(reducer.active_subagents(), 1);
-    assert_eq!(*reducer.status(), SessionStatus::Starting, "state untouched");
+    assert_eq!(
+        *reducer.status(),
+        SessionStatus::Starting,
+        "state untouched"
+    );
 }
 
 #[test]
@@ -290,7 +327,10 @@ fn codex_turn_complete_then_a_tick_settles_to_idle() {
     let mut reducer = StatusReducer::new(Authority::ScreenPrimary, t0());
     let mut now = settled(&mut reducer, t0());
 
-    reducer.reduce(StatusSignal::Screen(observation(ManifestState::Working, 1)), now);
+    reducer.reduce(
+        StatusSignal::Screen(observation(ManifestState::Working, 1)),
+        now,
+    );
     now += Duration::from_millis(100);
 
     // Turn-complete alone is a strong signal but the screen has not confirmed.
@@ -364,8 +404,14 @@ fn exited_is_absorbing() {
         t0(),
     );
 
-    let outcome = reducer.reduce(hook(ClaudeHook::UserPromptSubmit), t0() + Duration::from_secs(1));
-    assert_eq!(outcome.status_change, None, "nothing revives a dead session");
+    let outcome = reducer.reduce(
+        hook(ClaudeHook::UserPromptSubmit),
+        t0() + Duration::from_secs(1),
+    );
+    assert_eq!(
+        outcome.status_change, None,
+        "nothing revives a dead session"
+    );
     assert!(matches!(*reducer.status(), SessionStatus::Exited(_)));
 }
 
@@ -401,7 +447,10 @@ fn a_repeated_screen_sequence_is_not_reprocessed() {
     let mut reducer = StatusReducer::new(Authority::ScreenPrimary, t0());
     let now = settled(&mut reducer, t0());
 
-    reducer.reduce(StatusSignal::Screen(observation(ManifestState::Working, 7)), now);
+    reducer.reduce(
+        StatusSignal::Screen(observation(ManifestState::Working, 7)),
+        now,
+    );
     // Same content_seq: the frame is unchanged, so it must not count as another
     // observation.
     let outcome = reducer.reduce(

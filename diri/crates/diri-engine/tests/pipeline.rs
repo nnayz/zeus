@@ -28,7 +28,7 @@ fn manifest_dir() -> PathBuf {
 
 /// Pumps the PTY into the screen (and the log) until `predicate` holds.
 fn pump_until(
-    reader: &mut impl Read,
+    reader: &mut diri_engine::pty::PtyStream,
     screen: &mut HeadlessScreen,
     log: &mut OutputLog,
     within: Duration,
@@ -37,6 +37,12 @@ fn pump_until(
     let deadline = Instant::now() + within;
     let mut buffer = [0u8; 8192];
     while Instant::now() < deadline {
+        // Never block in read: a child that goes quiet must not wedge the test.
+        match reader.wait_readable(Duration::from_millis(100)) {
+            Ok(false) => continue,
+            Ok(true) => {}
+            Err(_) => break,
+        }
         match reader.read(&mut buffer) {
             Ok(0) => break,
             Ok(n) => {

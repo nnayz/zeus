@@ -32,7 +32,8 @@ This is the record of replacing it with `crates/diri-engine`.
 | Status reducer | **done** | Anti-flicker, blocker arbitration, startup grace, subagent isolation, staleness |
 | Headless emulation | **done** | `alacritty_terminal`; OSC 9;4 progress scanned by hand |
 | End-to-end pipeline | **done** | Real process → PTY → emulator → manifest → reducer → needs-input |
-| Session + registry | in progress | Spawn, persist, list, resume |
+| Session | **done** | Self-driving: polled pump, ticks while quiet, kills its child on drop |
+| Registry + persistence | **done** | Reads and round-trips the real `state.json` — 30 sessions, 84 projects preserved |
 | Control socket | not started | NDJSON protocol, must match the Swift wire format |
 | Hooks / MCP / git / worktrees | not started | |
 | Swift daemon retirement | not started | Only after the above ships and is proven |

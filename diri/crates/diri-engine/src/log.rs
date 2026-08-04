@@ -612,8 +612,11 @@ mod tests {
     #[test]
     #[ignore = "needs DIRI_INTEROP_LOG pointing at a copy of a Swift-written log"]
     fn reads_a_log_written_by_the_swift_holder() {
+        // Skip rather than fail when unconfigured, so `cargo test -- --ignored`
+        // runs whichever interop probes this machine can actually do.
         let Ok(raw) = std::env::var("DIRI_INTEROP_LOG") else {
-            panic!("set DIRI_INTEROP_LOG");
+            eprintln!("skipped: DIRI_INTEROP_LOG is not set");
+            return;
         };
         let path = PathBuf::from(raw);
         let size = fs::metadata(&path).expect("stat").len();

@@ -222,6 +222,25 @@ impl PtyStream {
         self.0.as_raw_fd()
     }
 
+    /// Waits until the terminal has output, or `timeout` elapses.
+    ///
+    /// Everything that reads a PTY should go through this rather than blocking
+    /// in `read`: a child that never speaks again would otherwise wedge the
+    /// caller forever, with no way to interrupt it.
+    pub fn wait_readable(&self, timeout: std::time::Duration) -> io::Result<bool> {
+        let mut poll_fd = libc::pollfd {
+            fd: self.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: one initialized pollfd with a millisecond timeout.
+        let ready = unsafe { libc::poll(&mut poll_fd, 1, timeout.as_millis() as libc::c_int) };
+        if ready < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(poll_fd.revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0)
+    }
+
     pub fn into_raw_fd(self) -> RawFd {
         self.0.into_raw_fd()
     }

@@ -5,6 +5,33 @@ import Testing
 
 @testable import DirijorDaemonKit
 
+/// Runs a blocking server body on a dedicated thread, reported as a `Task`.
+///
+/// `HolderServer.run()` and `HolderManagerServer.run()` sit in `accept()` for
+/// their whole lifetime. Launched with `Task.detached` they each occupy one
+/// cooperative-pool thread — and the pool is only as wide as the machine has
+/// cores. On a 3-core CI runner a handful of live holders exhausts it, after
+/// which a newly spawned server never gets scheduled at all: its socket never
+/// appears and whatever waits on it times out. A developer Mac has enough
+/// cores to mask this entirely. A real thread costs nothing here and cannot
+/// starve the pool.
+func runBlockingServer(_ body: @escaping @Sendable () throws -> Void) -> Task<Void, Error> {
+    Task {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            let thread = Thread {
+                do {
+                    try body()
+                    continuation.resume()
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+            thread.stackSize = 1 << 20
+            thread.start()
+        }
+    }
+}
+
 @Test func holderWritesExitMarkerAndCleansControlFiles() async throws {
     let fixture = try HolderFixture(
         name: "exit",
@@ -130,7 +157,7 @@ import Testing
 
     let managerPaths = HolderManagerPaths(directory: directory)
     let manager = HolderManagerServer(directory: directory, idleTimeout: 0.1)
-    let managerTask = Task.detached { try manager.run() }
+    let managerTask = runBlockingServer { try manager.run() }
     let managerClient = HolderManagerClient(socketPath: managerPaths.socket.path)
     try await waitUntil(timeout: .seconds(5)) { managerClient.isAlive() }
 
@@ -210,7 +237,7 @@ private final class HolderFixture: @unchecked Sendable {
 
     func run(argv: [String]? = nil) -> Task<Void, Error> {
         let server = HolderServer(spec: argv.map(makeSpec) ?? spec)
-        return Task.detached { try server.run() }
+        return runBlockingServer { try server.run() }
     }
 
     func cleanup() {

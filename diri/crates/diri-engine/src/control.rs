@@ -29,14 +29,28 @@ pub const BUILD: &str = concat!("diri-engine-", env!("CARGO_PKG_VERSION"));
 pub struct ControlServer {
     registry: Arc<Mutex<Registry>>,
     socket_path: PathBuf,
+    logs_dir: PathBuf,
 }
 
 impl ControlServer {
     pub fn new(registry: Arc<Mutex<Registry>>, socket_path: impl Into<PathBuf>) -> Self {
+        let socket_path = socket_path.into();
+        let logs_dir = socket_path
+            .parent()
+            .map(|parent| parent.join("logs"))
+            .unwrap_or_else(|| PathBuf::from("logs"));
         Self {
             registry,
-            socket_path: socket_path.into(),
+            socket_path,
+            logs_dir,
         }
+    }
+
+    /// Where session output logs are written. Defaults to `logs/` beside the
+    /// socket, matching the Swift daemon's layout.
+    pub fn with_logs_dir(mut self, logs_dir: impl Into<PathBuf>) -> Self {
+        self.logs_dir = logs_dir.into();
+        self
     }
 
     /// Binds the socket, owner-only.
@@ -127,6 +141,7 @@ impl ControlServer {
     fn dispatch(&self, method: &str, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
         match method {
             Method::HELLO => self.hello(params),
+            Method::SESSION_SPAWN => self.session_spawn(params),
             Method::SESSION_LIST => self.session_list(),
             Method::SESSION_SEND_TEXT => self.session_send_text(params),
             Method::SESSION_RESIZE => self.session_resize(params),
@@ -154,6 +169,84 @@ impl ControlServer {
             "build": BUILD,
             "pid": std::process::id() as i32,
         }))
+    }
+
+    /// Starts an agent and begins watching it.
+    ///
+    /// The command line comes from the manifest's agent descriptor, so this
+    /// works for any agent that has one without code changes. Two limits worth
+    /// stating: hook and MCP injection are not ported yet, so a Claude session
+    /// started here is screen-detected rather than hook-driven; and `shell` and
+    /// `generic` need an explicit `argv`, since their manifests declare no
+    /// binary.
+    fn session_spawn(&self, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
+        let params = params.ok_or_else(|| ControlError::bad_request("params are required"))?;
+        let kind = string_field(&params, "kind")?;
+        let cwd = string_field(&params, "cwd")?;
+        let cwd_path = PathBuf::from(&cwd);
+        if !cwd_path.is_dir() {
+            return Err(ControlError::bad_request(format!(
+                "cwd {cwd:?} is not a directory"
+            )));
+        }
+        let argv: Vec<String> = params
+            .get("argv")
+            .and_then(Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let mut registry = self.registry.lock().map_err(poisoned)?;
+        let engine = registry.engine();
+        let manifest = engine
+            .manifest(&kind)
+            .ok_or_else(|| ControlError::not_found(format!("no manifest for agent {kind:?}")))?;
+        let descriptor = manifest.agent.clone().unwrap_or_default();
+        let authority = descriptor.authority();
+
+        let inherited: Vec<(String, String)> = std::env::vars().collect();
+        let pty = match descriptor.spawn_spec(&cwd_path, inherited.clone(), &argv) {
+            Some(spec) => spec,
+            // No binary in the manifest: the caller has to say what to run.
+            None if !argv.is_empty() => {
+                let mut spec = crate::pty::PtySpec::new(argv.clone(), &cwd_path);
+                spec.env = inherited;
+                spec.env.retain(|(key, _)| key != "NO_COLOR");
+                spec
+            }
+            None => {
+                return Err(ControlError::bad_request(format!(
+                    "agent {kind:?} declares no binary, so argv is required"
+                )));
+            }
+        };
+
+        let id = next_session_id();
+        let record = new_record(&id, &kind, &cwd);
+        let spec = crate::session::SessionSpec {
+            id: id.clone(),
+            pty,
+            manifest_id: kind,
+            authority,
+            logs_dir: self.logs_dir.clone(),
+        };
+        registry
+            .spawn(spec, record)
+            .map_err(|error| ControlError::internal(error.to_string()))?;
+        let _ = registry.persist();
+
+        let record = registry
+            .records()
+            .into_iter()
+            .find(|record| record.id.0 == id)
+            .ok_or_else(|| ControlError::internal("the new session vanished"))?;
+        serde_json::to_value(json!({ "session": record }))
+            .map_err(|error| ControlError::internal(error.to_string()))
     }
 
     fn session_list(&self) -> Result<JsonValue, ControlError> {
@@ -229,6 +322,49 @@ impl Drop for ControlServer {
         // Leaving the socket file behind would make the next start think a
         // daemon is already running.
         let _ = std::fs::remove_file(&self.socket_path);
+    }
+}
+
+/// A session id in the daemon's format: `s_` plus twelve hex digits.
+fn next_session_id() -> String {
+    let mut bytes = [0u8; 6];
+    getrandom::fill(&mut bytes).expect("the OS random source");
+    let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+    format!("s_{hex}")
+}
+
+fn new_record(id: &str, kind: &str, cwd: &str) -> diri_proto::SessionRecord {
+    use diri_proto::{AgentKind, DateMillis, ProjectId, Resumability, SessionId, TitleSource};
+    let now: DateMillis = std::time::SystemTime::now().into();
+    diri_proto::SessionRecord {
+        id: SessionId(id.to_string()),
+        kind: AgentKind::new(kind),
+        cwd: cwd.to_string(),
+        project_id: ProjectId(cwd.to_string()),
+        worktree_path: None,
+        git_branch: None,
+        title: kind.to_string(),
+        title_source: TitleSource::Placeholder,
+        agent_session_id: None,
+        transcript_path: None,
+        status: diri_proto::SessionStatus::Starting,
+        needs_input: None,
+        resumability: Resumability::Live,
+        parent: None,
+        created_at: now,
+        updated_at: now,
+        last_turn_completed_at: None,
+        last_seen_at: None,
+        pinned: false,
+        archived_at: None,
+        remote_active: false,
+        host: None,
+        hibernation: None,
+        memory_bytes: None,
+        artifacts: None,
+        pull_requests: None,
+        listening_ports: None,
+        foreground_agent: None,
     }
 }
 

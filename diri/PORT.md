@@ -34,9 +34,9 @@ This is the record of replacing it with `crates/diri-engine`.
 | End-to-end pipeline | **done** | Real process → PTY → emulator → manifest → reducer → needs-input |
 | Session | **done** | Self-driving: polled pump, ticks while quiet, kills its child on drop |
 | Registry + persistence | **done** | Reads and round-trips the real `state.json` — 30 sessions, 84 projects preserved |
-| Control socket | **core done** | Handshake, list, send_text, resize, read_screen, kill over NDJSON on an owner-only socket. Unported methods answer `not_found` rather than dropping the connection |
+| Control socket | **core done** | Handshake, spawn, list, send_text, resize, read_screen, kill over NDJSON on an owner-only socket. Unported methods answer `not_found` rather than dropping the connection |
 | Agent descriptors | **done** | argv, env scrubbing, colour assertion, resume flags — all read from the manifest |
-| Spawn over the wire | not started | `session.spawn` still needs hook/MCP injection wiring |
+| Spawn over the wire | **works** | `session.spawn` builds argv from the manifest; hook/MCP injection still missing, so a Claude session started this way is screen-detected rather than hook-driven |
 | Hook + notify parsing | **done** | Claude hooks and Codex notify → signals, with identity, titles and needs-input detail |
 | MCP / git / worktrees / holder | not started | |
 | Swift daemon retirement | not started | Only after the above ships and is proven |

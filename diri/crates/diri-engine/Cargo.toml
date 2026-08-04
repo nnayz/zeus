@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 alacritty_terminal.workspace = true
 diri-proto.workspace = true
+getrandom.workspace = true
 regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true

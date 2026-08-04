@@ -114,6 +114,11 @@ impl Registry {
         Ok(id)
     }
 
+    /// The manifest engine these sessions were started with.
+    pub fn engine(&self) -> Arc<ManifestEngine> {
+        Arc::clone(&self.engine)
+    }
+
     pub fn get(&self, id: &str) -> Option<&Session> {
         self.sessions.get(id)
     }

@@ -38,7 +38,8 @@ This is the record of replacing it with `crates/diri-engine`.
 | Agent descriptors | **done** | argv, env scrubbing, colour assertion, resume flags — all read from the manifest |
 | Spawn over the wire | **works** | `session.spawn` builds argv from the manifest; hook/MCP injection still missing, so a Claude session started this way is screen-detected rather than hook-driven |
 | Hook + notify parsing | **done** | Claude hooks and Codex notify → signals, with identity, titles and needs-input detail |
-| MCP / git / worktrees / holder | not started | |
+| Git facts | **done** | Branch and linked-worktree detection by reading `.git` directly; porcelain parsing |
+| MCP / worktree ops / holder | not started | |
 | Swift daemon retirement | not started | Only after the above ships and is proven |
 
 ## What the risky parts turned out to be

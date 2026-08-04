@@ -21,6 +21,7 @@
 pub mod agent;
 pub mod control;
 pub mod detect;
+pub mod git;
 pub mod hooks;
 pub mod log;
 pub mod pty;

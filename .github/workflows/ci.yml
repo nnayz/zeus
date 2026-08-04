@@ -11,7 +11,7 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Validate shell scripts
         run: bash -n scripts/*.sh diri/scripts/*.sh
       - name: Install and audit browser sidecar
@@ -19,8 +19,16 @@ jobs:
         run: |
           npm ci
           npm audit --omit=dev
+      # SwiftPM block-buffers when stdout is a pipe, so a killed test process
+      # loses most of its console output. The xunit file is written
+      # incrementally and survives that.
       - name: Test
-        run: swift test
+        run: swift test --xunit-output "${RUNNER_TEMP}/tests.xml"
+      - name: Failing tests
+        if: failure()
+        run: |
+          xmllint --xpath '//testcase[failure]/@name' "${RUNNER_TEMP}/tests.xml" 2>/dev/null \
+            || echo "no per-test failure recorded — the test process died before finishing"
       - name: Release build
         run: swift build -c release
 
@@ -32,7 +40,7 @@ jobs:
       run:
         working-directory: diri
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       # rust-toolchain.toml pins 1.95.0 with clippy + rustfmt.
       - name: Cache cargo registry and target
         uses: actions/cache@v4
@@ -57,7 +65,7 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Cache cargo registry and target
         uses: actions/cache@v4
         with:
@@ -67,8 +75,12 @@ jobs:
             diri/target
           key: ${{ runner.os }}-cargo-${{ hashFiles('diri/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
-      - name: Install cargo-packager
-        run: cargo install cargo-packager --locked
+      # package.sh lipos two slices into a universal binary; both targets have
+      # to be installed or the x86_64 pass fails with "can't find crate for std".
+      - name: Install universal targets and cargo-packager
+        run: |
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          cargo install cargo-packager --locked
       - name: Package
         env:
           DIRI_DIST_DIR: ${{ runner.temp }}/diri-dist
@@ -87,7 +99,7 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install sidecar and browser engines
         working-directory: sidecar
         run: |

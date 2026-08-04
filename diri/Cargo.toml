@@ -19,6 +19,7 @@ rust-version = "1.95"
 license = "Apache-2.0"
 
 [workspace.dependencies]
+alacritty_terminal = { version = "0.26", default-features = false }
 diri-client = { path = "crates/diri-client" }
 diri-engine = { path = "crates/diri-engine" }
 diri-node = { path = "crates/diri-node" }

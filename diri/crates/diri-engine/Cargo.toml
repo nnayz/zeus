@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+alacritty_terminal.workspace = true
 diri-proto.workspace = true
 regex.workspace = true
 serde.workspace = true

@@ -21,7 +21,9 @@
 pub mod detect;
 pub mod log;
 pub mod pty;
+pub mod status;
 
 pub use detect::{ManifestEngine, ManifestState, ScreenObservation, ScreenSnapshot};
 pub use log::OutputLog;
 pub use pty::{Exit, Pty, PtySpec};
+pub use status::{Authority, ReducerOutcome, StatusReducer, StatusSignal};

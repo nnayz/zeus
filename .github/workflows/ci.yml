@@ -28,6 +28,10 @@ jobs:
       # SwiftPM also block-buffers when stdout is a pipe, so a test process that
       # dies takes most of its console output with it — hence the xunit file.
       - name: Test
+        env:
+          # Runner spawns and socket binds are far slower than on a dev Mac; the
+          # 5s liveness waits time out there. See waitUntil in the test helpers.
+          DIRIJOR_TEST_TIMEOUT_SCALE: "6"
         run: swift test --no-parallel --xunit-output "${RUNNER_TEMP}/tests.xml"
       - name: Failing tests
         if: failure()

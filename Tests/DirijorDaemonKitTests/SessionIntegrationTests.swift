@@ -623,11 +623,21 @@ final class RemoteActiveRecorder: @unchecked Sendable {
 
 struct TimeoutError: Error {}
 
+/// Multiplier applied to every `waitUntil` deadline.
+///
+/// These waits are wall-clock liveness checks — "has the socket come up", "has
+/// the child spawned" — not performance assertions. Five seconds is lavish on a
+/// developer Mac and tight on a shared CI runner, where a process spawn or a
+/// socket bind can take seconds under load. Scale them all from one place
+/// instead of tuning 47 call sites; CI sets `DIRIJOR_TEST_TIMEOUT_SCALE`.
+let testTimeoutScale = ProcessInfo.processInfo.environment["DIRIJOR_TEST_TIMEOUT_SCALE"]
+    .flatMap(Double.init) ?? 1
+
 func waitUntil(
     timeout: Duration, interval: Duration = .milliseconds(50),
     _ condition: @escaping @Sendable () async -> Bool
 ) async throws {
-    let deadline = ContinuousClock.now + timeout
+    let deadline = ContinuousClock.now + timeout * testTimeoutScale
     while ContinuousClock.now < deadline {
         if await condition() { return }
         try await Task.sleep(for: interval)

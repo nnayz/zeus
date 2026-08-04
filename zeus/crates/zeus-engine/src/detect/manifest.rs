@@ -189,6 +189,10 @@ pub struct Manifest {
     pub id: String,
     pub version: String,
     pub status_model: StatusModel,
+    /// How to launch this agent. Absent only in hand-written test fixtures;
+    /// every shipped manifest carries one.
+    #[serde(default)]
+    pub agent: Option<crate::agent::AgentDescriptor>,
     /// Sorted by descending priority at load, ties keeping file order, so the
     /// evaluator can stop at the first match instead of scoring every rule on a
     /// path that runs several times a second per session.

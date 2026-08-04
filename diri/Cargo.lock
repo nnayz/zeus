@@ -1332,6 +1332,7 @@ version = "0.1.0"
 dependencies = [
  "diri-proto",
  "libc",
+ "regex",
  "serde",
  "serde_json",
  "tempfile",

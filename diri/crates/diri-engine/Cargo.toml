@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 diri-proto.workspace = true
+regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 

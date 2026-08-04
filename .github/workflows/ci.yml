@@ -27,21 +27,23 @@ jobs:
       #
       # SwiftPM also block-buffers when stdout is a pipe, so a test process that
       # dies takes most of its console output with it — hence the xunit file.
+      # `script` gives the run a pty, which makes SwiftPM line-buffer. Piped, it
+      # block-buffers, and a test process that dies takes the tail of its output
+      # with it — so the log's last line is wherever the buffer happened to
+      # flush, not where the run actually stopped. That cost real debugging
+      # time. The xunit file is no help either: it is only written at the end.
       - name: Test
         env:
           # Runner spawns and socket binds are far slower than on a dev Mac; the
           # 5s liveness waits time out there. See waitUntil in the test helpers.
           DIRIJOR_TEST_TIMEOUT_SCALE: "6"
-        run: swift test --no-parallel --xunit-output "${RUNNER_TEMP}/tests.xml"
-      - name: Failing tests
-        if: failure()
         run: |
-          if [ ! -f "${RUNNER_TEMP}/tests.xml" ]; then
-            echo "no xunit report — the test process died before writing one"
-            exit 0
-          fi
-          xmllint --xpath '//testcase[failure]/@name' "${RUNNER_TEMP}/tests.xml" 2>/dev/null \
-            || echo "xunit report lists no failing test; the run died mid-flight"
+          set -o pipefail
+          script -q /dev/null swift test --no-parallel | tee "${RUNNER_TEMP}/test.log"
+          grep -q "Test run with .* passed" "${RUNNER_TEMP}/test.log"
+      - name: Where it stopped
+        if: failure()
+        run: tail -40 "${RUNNER_TEMP}/test.log" || true
       - name: Release build
         run: swift build -c release
 

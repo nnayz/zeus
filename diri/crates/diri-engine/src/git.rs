@@ -103,48 +103,52 @@ pub fn list_worktrees(repo: &Path) -> std::io::Result<Vec<WorktreeInfo>> {
 /// Blocks are separated by blank lines, but a `worktree` line also starts a new
 /// block — trailing output without a final blank line still has to flush.
 pub fn parse_porcelain(porcelain: &str) -> Vec<WorktreeInfo> {
-    let mut results = Vec::new();
-    let mut path: Option<String> = None;
-    let mut branch: Option<String> = None;
-    let mut is_bare = false;
-    let mut is_detached = false;
-    let mut is_prunable = false;
-
-    macro_rules! flush {
-        () => {
-            if let Some(taken) = path.take() {
-                results.push(WorktreeInfo {
-                    path: taken,
-                    branch: branch.take(),
-                    is_bare,
-                    is_detached,
-                    is_prunable,
-                });
-                is_bare = false;
-                is_detached = false;
-                is_prunable = false;
-            }
-        };
+    /// One block being accumulated. Replaced wholesale on flush, so flags
+    /// cannot leak from one worktree into the next.
+    #[derive(Default)]
+    struct Block {
+        path: Option<String>,
+        branch: Option<String>,
+        is_bare: bool,
+        is_detached: bool,
+        is_prunable: bool,
     }
+
+    fn flush(block: &mut Block, results: &mut Vec<WorktreeInfo>) {
+        let Some(path) = block.path.take() else {
+            return;
+        };
+        let finished = std::mem::take(block);
+        results.push(WorktreeInfo {
+            path,
+            branch: finished.branch,
+            is_bare: finished.is_bare,
+            is_detached: finished.is_detached,
+            is_prunable: finished.is_prunable,
+        });
+    }
+
+    let mut results = Vec::new();
+    let mut block = Block::default();
 
     for line in porcelain.split('\n') {
         if line.is_empty() {
-            flush!();
+            flush(&mut block, &mut results);
         } else if let Some(rest) = line.strip_prefix("worktree ") {
-            flush!();
-            path = Some(rest.to_string());
+            flush(&mut block, &mut results);
+            block.path = Some(rest.to_string());
         } else if let Some(rest) = line.strip_prefix("branch ") {
-            branch = Some(rest.strip_prefix("refs/heads/").unwrap_or(rest).to_string());
+            block.branch = Some(rest.strip_prefix("refs/heads/").unwrap_or(rest).to_string());
         } else if line == "bare" {
-            is_bare = true;
+            block.is_bare = true;
         } else if line == "detached" {
-            is_detached = true;
+            block.is_detached = true;
         } else if line == "prunable" || line.starts_with("prunable ") {
-            is_prunable = true;
+            block.is_prunable = true;
         }
         // `HEAD <sha>` and other keys carry nothing this type models.
     }
-    flush!();
+    flush(&mut block, &mut results);
     results
 }
 

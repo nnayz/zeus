@@ -65,7 +65,20 @@ import Testing
     #expect(plan.agentSessionID == nil)
 }
 
-@Test func codexWrapperReentersShellAndResolvesFreshInteractivePath() throws {
+/// Skipped on CI, deliberately.
+///
+/// This is the one test here that needs a *real* interactive login shell:
+/// `exec zsh -i -l` is the whole thing under test, since re-resolving PATH is
+/// what an interactive shell does and a non-interactive one does not. On a
+/// GitHub runner that shell does not reliably reach EOF and exit — it took 32
+/// seconds on one run and hung the entire suite past the job timeout on the
+/// next, with 93 tests never getting to run behind it.
+///
+/// Rather than weaken the assertion into something a headless shell can pass,
+/// run it where a developer shell exists and skip it where one does not. Set
+/// `CI=` (empty) to force it on locally.
+@Test(.enabled(if: ProcessInfo.processInfo.environment["CI"] == nil))
+func codexWrapperReentersShellAndResolvesFreshInteractivePath() throws {
     let root = FileManager.default.temporaryDirectory
         .appendingPathComponent("dirijor-codex-wrapper-\(UUID().uuidString)")
     let bin = root.appendingPathComponent("fresh-bin")
@@ -98,11 +111,20 @@ import Testing
     process.standardOutput = output
     process.standardError = output
     try process.run()
+    // A shell that never reaches EOF would otherwise wedge the whole run here:
+    // readDataToEndOfFile() waits for the write end to close, and nothing else
+    // is going to close it. Kill it instead and let the expectations report.
+    let watchdog = Thread {
+        Thread.sleep(forTimeInterval: 60)
+        if process.isRunning { process.terminate() }
+    }
+    watchdog.start()
     input.fileHandleForWriting.write(Data("printf 'normal-shell-ready\\n'\nexit\n".utf8))
     input.fileHandleForWriting.closeFile()
     let rendered = String(
         decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
     process.waitUntilExit()
+    watchdog.cancel()
 
     #expect(rendered.contains("fresh-codex-ran"))
     #expect(rendered.contains("normal-shell-ready"))

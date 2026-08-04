@@ -9,6 +9,19 @@ use std::collections::BTreeMap;
 #[serde(transparent)]
 pub struct DateMillis(pub f64);
 
+impl From<std::time::SystemTime> for DateMillis {
+    /// Times before the epoch cannot happen for anything the daemon stamps and
+    /// would only arise from a badly wrong clock; they clamp to zero rather
+    /// than panicking somewhere far from the cause.
+    fn from(time: std::time::SystemTime) -> Self {
+        let millis = time
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|since| since.as_secs_f64() * 1000.0)
+            .unwrap_or(0.0);
+        Self(millis)
+    }
+}
+
 macro_rules! string_enum {
     ($(#[$meta:meta])* pub enum $name:ident { $($variant:ident => $wire:literal,)+ }) => {
         $(#[$meta])*

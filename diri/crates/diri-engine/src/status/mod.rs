@@ -23,7 +23,7 @@ use diri_proto::{
     ExitInfo, ExitReason, NeedsInputDetail, NeedsInputKind, NeedsInputSource, SessionStatus,
 };
 
-use crate::detect::{redact, ManifestState, ScreenObservation};
+use crate::detect::{ManifestState, ScreenObservation, redact};
 
 /// Which source of truth leads for an agent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -291,7 +291,12 @@ impl StatusReducer {
 
     /// Enter or refresh `working` from a positive work signal. For
     /// hooks-primary agents a work hook also clears a stale on-screen blocker.
-    fn go_working(&mut self, now: SystemTime, clear_screen_blocker: bool, outcome: &mut ReducerOutcome) {
+    fn go_working(
+        &mut self,
+        now: SystemTime,
+        clear_screen_blocker: bool,
+        outcome: &mut ReducerOutcome,
+    ) {
         self.cancel_idle_candidacy();
         if clear_screen_blocker {
             self.state.screen_blocker_active = false;
@@ -411,7 +416,10 @@ impl StatusReducer {
                 self.state.pending_needs_input = Some(detail.clone());
                 outcome.needs_input = Some(detail);
                 self.cancel_idle_candidacy();
-                self.set_status(SessionStatus::NeedsInput(NeedsInputKind::Permission), outcome);
+                self.set_status(
+                    SessionStatus::NeedsInput(NeedsInputKind::Permission),
+                    outcome,
+                );
             }
             ClaudeHook::Notification {
                 notification_type,
@@ -447,7 +455,10 @@ impl StatusReducer {
                 self.state.pending_needs_input = Some(detail.clone());
                 outcome.needs_input = Some(detail);
                 self.cancel_idle_candidacy();
-                self.set_status(SessionStatus::NeedsInput(NeedsInputKind::Permission), outcome);
+                self.set_status(
+                    SessionStatus::NeedsInput(NeedsInputKind::Permission),
+                    outcome,
+                );
             }
             Some("idle_prompt") | Some("agent_needs_input") | Some("elicitation_dialog") => {
                 let text = message.unwrap_or_else(|| "Waiting for input".into());
@@ -606,7 +617,10 @@ fn permission_detail(
 ) -> NeedsInputDetail {
     let tool = tool_name.clone().unwrap_or_default();
     let summary = match tool.as_str() {
-        "Bash" => format!("wants to run `{}`", input_summary.clone().unwrap_or_default()),
+        "Bash" => format!(
+            "wants to run `{}`",
+            input_summary.clone().unwrap_or_default()
+        ),
         "Edit" | "Write" | "MultiEdit" | "NotebookEdit" => format!(
             "wants to edit {}",
             input_summary.clone().unwrap_or_else(|| "a file".into())

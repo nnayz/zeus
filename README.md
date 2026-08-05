@@ -11,9 +11,17 @@ and a daemon restart brings conversations back.
 
 ## Install
 
-Download the latest DMG from [Releases](https://github.com/cristicretu/diri/releases/latest),
-open it, and drag diri to Applications. Universal (Apple silicon and Intel), signed and
-notarized. diri updates itself from there.
+```sh
+brew install --cask cristicretu/diri/diri
+```
+
+Or download the latest DMG from [Releases](https://github.com/cristicretu/diri/releases/latest),
+open it, and drag diri to Applications. Either way it is the same universal build (Apple
+silicon and Intel), signed and notarized. diri updates itself from there.
+
+The tap has to be named in full — a bare `diri` resolves only against Homebrew's default
+taps. The cask lives in [cristicretu/homebrew-diri](https://github.com/cristicretu/homebrew-diri)
+rather than `homebrew-cask`, which requires a notability threshold diri does not meet yet.
 
 macOS 15 or newer.
 

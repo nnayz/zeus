@@ -39,7 +39,10 @@ This is the record of replacing it with `crates/diri-engine`.
 | Spawn over the wire | **works** | `session.spawn` builds argv from the manifest; hook/MCP injection still missing, so a Claude session started this way is screen-detected rather than hook-driven |
 | Hook + notify parsing | **done** | Claude hooks and Codex notify → signals, with identity, titles and needs-input detail |
 | Git facts | **done** | Branch and linked-worktree detection by reading `.git` directly; porcelain parsing |
-| MCP / worktree ops / holder | not started | |
+| Worktree operations | **done** | Create, list, remove against real git; paths canonicalized so they match what git reports |
+| MCP server | **done** | JSON-RPC stdio protocol + 13 tools executing against the registry |
+| Holder (session survival) | not started | The reason the Rust engine cannot replace the Swift one yet |
+| History / resume / migration / hosts | not started | |
 | Swift daemon retirement | not started | Only after the above ships and is proven |
 
 ## What the risky parts turned out to be

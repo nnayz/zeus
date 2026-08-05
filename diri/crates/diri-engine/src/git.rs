@@ -179,9 +179,213 @@ fn run(args: &[&str], cwd: &Path) -> std::io::Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+/// Adjective/noun pairs for generated branch names. Memorable beats unique:
+/// these names end up in branch lists and sidebar rows that people read.
+const ADJECTIVES: &[&str] = &[
+    "brisk", "calm", "deft", "eager", "fleet", "gentle", "hardy", "keen", "lively", "merry",
+    "nimble", "plucky", "quiet", "rapid", "steady", "swift", "tidy", "vivid", "witty", "zesty",
+];
+
+const NOUNS: &[&str] = &[
+    "otter", "heron", "maple", "cedar", "falcon", "willow", "badger", "sparrow", "cypress",
+    "marten", "juniper", "raven", "birch", "lynx", "hazel", "osprey", "aspen", "finch", "poplar",
+    "wren",
+];
+
+/// `dirijor/<adjective>-<noun>-<4hex>`.
+pub fn generated_branch_name() -> String {
+    let mut bytes = [0u8; 4];
+    getrandom::fill(&mut bytes).expect("the OS random source");
+    let adjective = ADJECTIVES[bytes[0] as usize % ADJECTIVES.len()];
+    let noun = NOUNS[bytes[1] as usize % NOUNS.len()];
+    let hex = u16::from_be_bytes([bytes[2], bytes[3]]);
+    format!("dirijor/{adjective}-{noun}-{hex:04x}")
+}
+
+/// Lowercases a branch name and collapses every run of characters outside
+/// `[a-z0-9]` into a single dash, so it can be a directory name.
+pub fn branch_to_path_slug(branch: &str) -> String {
+    let mut slug = String::with_capacity(branch.len());
+    let mut last_was_dash = false;
+    for character in branch.to_lowercase().chars() {
+        if character.is_ascii_lowercase() || character.is_ascii_digit() {
+            slug.push(character);
+            last_was_dash = false;
+        } else if !last_was_dash {
+            slug.push('-');
+            last_was_dash = true;
+        }
+    }
+    slug.trim_matches('-').to_string()
+}
+
+/// Creates a worktree beside the repository, on a new branch.
+///
+/// The path is `<parent>/<repo-name>-<branch-slug>`, which keeps sibling
+/// worktrees visibly related to their repository in a file browser and in
+/// shell completion.
+pub fn create_worktree(
+    repo: &Path,
+    branch: Option<&str>,
+    base: Option<&str>,
+) -> std::io::Result<WorktreeInfo> {
+    let branch_name = branch
+        .map(str::to_string)
+        .unwrap_or_else(generated_branch_name);
+    let slug = branch_to_path_slug(&branch_name);
+    let parent = repo.parent().unwrap_or(Path::new("."));
+    let repo_name = repo
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| "repo".into());
+    let worktree_path = parent.join(format!("{repo_name}-{slug}"));
+    let worktree_str = worktree_path.to_string_lossy().to_string();
+
+    let mut args = vec!["worktree", "add", "-b", &branch_name, &worktree_str];
+    if let Some(base) = base {
+        args.push(base);
+    }
+    run(&args, repo)?;
+
+    // Report the path git will report. It records the *resolved* path, and on
+    // macOS the common roots are symlinks — `/tmp` is `/private/tmp`, and a
+    // repo can easily sit under one too. Handing back the unresolved path means
+    // a caller that stores it cannot later match it against `list_worktrees` or
+    // remove it by path.
+    let resolved = std::fs::canonicalize(&worktree_path)
+        .map(|path| path.to_string_lossy().to_string())
+        .unwrap_or(worktree_str);
+
+    Ok(WorktreeInfo {
+        path: resolved,
+        branch: Some(branch_name),
+        is_bare: false,
+        is_detached: false,
+        is_prunable: false,
+    })
+}
+
+pub fn remove_worktree(repo: &Path, worktree: &str, force: bool) -> std::io::Result<()> {
+    let mut args = vec!["worktree", "remove"];
+    if force {
+        args.push("--force");
+    }
+    args.push(worktree);
+    run(&args, repo)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_generated_branch_name_is_readable_and_namespaced() {
+        let name = generated_branch_name();
+        assert!(name.starts_with("dirijor/"), "got {name}");
+        let tail = &name["dirijor/".len()..];
+        let parts: Vec<&str> = tail.split('-').collect();
+        assert_eq!(parts.len(), 3, "adjective-noun-hex: {name}");
+        assert_eq!(parts[2].len(), 4, "four hex digits: {name}");
+        assert!(ADJECTIVES.contains(&parts[0]));
+        assert!(NOUNS.contains(&parts[1]));
+    }
+
+    #[test]
+    fn generated_names_differ() {
+        // Not a uniqueness guarantee, just a check that randomness is wired up.
+        let names: std::collections::HashSet<String> =
+            (0..16).map(|_| generated_branch_name()).collect();
+        assert!(names.len() > 1, "every generated name was identical");
+    }
+
+    #[test]
+    fn a_branch_becomes_a_usable_directory_slug() {
+        assert_eq!(
+            branch_to_path_slug("dirijor/swift-wren-1a2b"),
+            "dirijor-swift-wren-1a2b"
+        );
+        assert_eq!(
+            branch_to_path_slug("feature/JIRA-123_fix"),
+            "feature-jira-123-fix"
+        );
+        assert_eq!(
+            branch_to_path_slug("--weird//name--"),
+            "weird-name",
+            "leading and trailing dashes are trimmed and runs collapse"
+        );
+    }
+
+    /// Exercises create/list/remove against real git in a temp repo.
+    #[test]
+    fn worktrees_can_be_created_listed_and_removed() {
+        let temp = tempfile::tempdir().expect("temp");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("mkdir");
+
+        // A minimal repo with one commit, identity passed per-command so no
+        // global config is needed.
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("/usr/bin/git")
+                .args(args)
+                .current_dir(&repo)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("HOME", temp.path())
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .status()
+                .expect("run git");
+            assert!(status.success(), "git {args:?} failed");
+        };
+        git(&["init", "--quiet", "--initial-branch=main"]);
+        std::fs::write(repo.join("f.txt"), b"x").expect("write");
+        git(&["add", "."]);
+        git(&[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "init",
+        ]);
+
+        let created = create_worktree(&repo, None, None).expect("create");
+        assert!(
+            created.path.contains("repo-dirijor-"),
+            "the worktree sits beside its repo: {}",
+            created.path
+        );
+        assert_eq!(
+            created.path,
+            std::fs::canonicalize(&created.path)
+                .expect("exists")
+                .to_string_lossy(),
+            "the reported path is the resolved one git also reports"
+        );
+        assert!(Path::new(&created.path).is_dir());
+        assert!(
+            is_linked_worktree(Path::new(&created.path)),
+            "a created worktree is a linked one"
+        );
+        assert_eq!(
+            branch(Path::new(&created.path)).as_deref(),
+            created.branch.as_deref(),
+            "it is on the branch it reported"
+        );
+
+        let listed = list_worktrees(&repo).expect("list");
+        assert_eq!(listed.len(), 2, "the main checkout plus the new worktree");
+        assert!(listed.iter().any(|entry| entry.path == created.path));
+
+        remove_worktree(&repo, &created.path, true).expect("remove");
+        assert_eq!(list_worktrees(&repo).expect("list").len(), 1);
+    }
 
     #[test]
     fn porcelain_parsing_handles_a_main_checkout_and_a_linked_worktree() {

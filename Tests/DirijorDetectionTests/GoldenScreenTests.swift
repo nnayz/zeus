@@ -185,6 +185,118 @@ import Testing
         #expect(obs?.state == .idle)
     }
 
+    // MARK: Aider
+    // Screens below are verbatim from live aider 0.86.2 PTY captures.
+
+    @Test func aiderCreateFileConfirm() {
+        let s = snap([
+            "hello",
+            "tokens: 601 sent, 8 received.",
+            "hello.txt",
+            "Create new file? (Y)es/(N)o [Yes]:",
+        ])
+        let obs = try! #require(engine.evaluate(s, manifestID: "aider"))
+        #expect(obs.state == .blockedPermission)
+        #expect(obs.matchedRuleID == "confirm-prompt")
+        #expect(obs.promptExcerpt?.contains("Create new file") == true)
+    }
+
+    @Test func aiderStartupWarningConfirm() {
+        let s = snap([
+            "You can skip this check with --no-show-model-warnings",
+            "https://aider.chat/docs/llms/warnings.html",
+            "Open documentation url for more info? (Y)es/(N)o/(D)on't ask again [Yes]:",
+        ])
+        let obs = engine.evaluate(s, manifestID: "aider")
+        #expect(obs?.state == .blockedPermission)
+    }
+
+    @Test func aiderRequestSpinner() {
+        let s = snap([
+            "> Create a file hello.txt containing exactly the word hi",
+            "        ░█ Waiting for openai/deepseek-v4-flash",
+        ])
+        let obs = engine.evaluate(s, manifestID: "aider")
+        #expect(obs?.state == .working)
+        #expect(obs?.matchedRuleID == "working-spinner")
+    }
+
+    @Test func aiderCommitSpinner() {
+        let s = snap([
+            "Applied edit to hello.txt",
+            "        █░ Generating commit message with openai/deepseek-v4-flash",
+        ])
+        let obs = engine.evaluate(s, manifestID: "aider")
+        #expect(obs?.state == .working)
+    }
+
+    @Test func aiderIdleBarePrompt() {
+        let s = snap([
+            "Commit 5e7632a feat: add hello.txt with 'hi' content",
+            "hello.txt",
+            ">  ",
+        ])
+        let obs = engine.evaluate(s, manifestID: "aider")
+        #expect(obs?.state == .idle)
+        #expect(obs?.matchedRuleID == "idle-prompt")
+    }
+
+    @Test func aiderChatModePrompt() {
+        let s = snap([
+            "Aider v0.86.2",
+            "ask>  ",
+        ])
+        let obs = engine.evaluate(s, manifestID: "aider")
+        #expect(obs?.state == .idle)
+    }
+
+    @Test func aiderStreamingMatchesNothingSoStateHolds() {
+        // Mid-stream there is no spinner and no prompt; the engine returns nil
+        // and the reducer holds the previous (working) state — by design.
+        let s = snap([
+            "hello.txt",
+            "hi",
+        ])
+        #expect(engine.evaluate(s, manifestID: "aider") == nil)
+    }
+
+    // MARK: Aider — constructed regression screens
+    // Unlike the captures above these are assembled by hand, each pinning a
+    // false reading the rules used to produce.
+
+    @Test func aiderAnsweredConfirmReleasesTheBlocker() {
+        // The answered line stays on screen and the spinner only repaints its
+        // own row: a substring match over the bottom lines kept reporting
+        // "needs input" for the whole model wait, right after the user answered.
+        let s = snap([
+            "hello.txt",
+            "Create new file? (Y)es/(N)o [Yes]: y",
+            "        ░█ Waiting for openai/deepseek-v4-flash",
+        ])
+        let obs = engine.evaluate(s, manifestID: "aider")
+        #expect(obs?.state == .working)
+        #expect(obs?.matchedRuleID == "working-spinner")
+    }
+
+    @Test func aiderWrappedConfirmStillBlocks() {
+        // A long path wraps the (A)ll/(S)kip-all variant: "(Y)es/(N)o" lands on
+        // one row and the colon on the next, so the rule cannot be per-line.
+        let s = snap([
+            "Add src/components/dashboard/widgets/RevenueChart.tsx to the chat? (Y)es/(N)o/(A)ll/(S)k",
+            "ip all/(D)on't ask again [Yes]: ",
+        ])
+        let obs = try! #require(engine.evaluate(s, manifestID: "aider"))
+        #expect(obs.state == .blockedPermission)
+        #expect(obs.matchedRuleID == "confirm-prompt")
+    }
+
+    @Test func aiderStreamedArrowIsNotThePrompt() {
+        // '-->' and '->' matched the prompt pattern while [a-z-] allowed the
+        // hyphen, flipping a streaming turn to idle.
+        #expect(engine.evaluate(snap(["<!-- primary nav", "-->"]), manifestID: "aider") == nil)
+        #expect(engine.evaluate(snap(["fn parse(s: &str)", "->"]), manifestID: "aider") == nil)
+    }
+
     @Test func unknownManifestReturnsNil() {
         #expect(engine.evaluate(snap(["x"]), manifestID: "nope") == nil)
     }

@@ -1,0 +1,62 @@
+name: Bug report
+description: Something in diri behaves wrong
+labels: [bug]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what you got instead.
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: diri version
+      description: The version row in the account popover, or `diri --version`.
+      placeholder: "0.4.1"
+    validations:
+      required: true
+
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version and chip
+      placeholder: "15.3, Apple silicon"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: agent
+    attributes:
+      label: Which agent
+      description: Status detection differs per agent, so this usually matters.
+      options:
+        - Claude Code
+        - Codex
+        - Cursor
+        - Gemini
+        - A shell
+        - Something else
+        - Not agent-specific
+    validations:
+      required: true
+
+  - type: textarea
+    id: daemon
+    attributes:
+      label: Daemon state
+      description: >
+        Output of `dirijor doctor` if the CLI is on your PATH. Skip if the app
+        will not start.
+      render: shell
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log lines
+      description: >
+        From `~/Library/Application Support/Dirijor/dirijord.log`. Please skim
+        for paths or prompt text you would rather not post.
+      render: shell

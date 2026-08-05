@@ -1,0 +1,55 @@
+name: Support another agent
+description: Ask for a coding agent diri does not know yet, or report one that detects wrong
+labels: [agent-manifest]
+body:
+  - type: markdown
+    attributes:
+      value: >
+        Agent support is a single JSON file in
+        `Sources/DirijorCore/Resources/manifests/` — no Swift or Rust. If you
+        want to write it yourself, copy the closest existing manifest; the
+        fields are documented in CONTRIBUTING.md. Otherwise this issue is
+        enough for someone else to pick up.
+
+  - type: input
+    id: agent
+    attributes:
+      label: Which agent
+      placeholder: "opencode, amp, something new…"
+    validations:
+      required: true
+
+  - type: input
+    id: command
+    attributes:
+      label: How you launch it
+      description: The command you type today.
+      placeholder: "opencode"
+    validations:
+      required: true
+
+  - type: textarea
+    id: working
+    attributes:
+      label: What it looks like while working
+      description: >
+        Paste the terminal output, or describe the spinner or status line. This
+        is what a rule matches on.
+      render: shell
+
+  - type: textarea
+    id: waiting
+    attributes:
+      label: What it looks like when it needs you
+      description: >
+        A permission prompt or question, as it appears on screen — including
+        the box drawing and the option list if there is one. This is the most
+        useful part.
+      render: shell
+
+  - type: input
+    id: resume
+    attributes:
+      label: How it resumes a past conversation
+      description: The flag, if it has one.
+      placeholder: "--resume <id>, --continue, no support"

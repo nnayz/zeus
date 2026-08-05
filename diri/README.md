@@ -5,6 +5,23 @@ and transactional local↔cloud handoff, see [NODE.md](NODE.md).
 
 `diri` is the Rust + GPUI desktop app. The workspace holds the protocol/client core, terminal renderer, shared design system, session store, usage accounting, and window/sidebar shell. [`PLAN.md`](PLAN.md) is the historical record of the port from the retired Swift client, kept for its architecture and coexistence notes.
 
+## Install
+
+```sh
+brew install --cask cristicretu/diri/diri
+```
+
+Or download the DMG from [the latest release](https://github.com/cristicretu/diri/releases/latest).
+Either way you get the same universal build, signed and notarized, so it opens
+without a Gatekeeper prompt.
+
+The cask lives in [cristicretu/homebrew-diri](https://github.com/cristicretu/homebrew-diri)
+rather than `homebrew-cask`, which requires a notability threshold the project
+does not meet yet. It declares `auto_updates true`, so Homebrew installs diri
+once and then leaves it alone — diri updates itself after that, and
+`brew upgrade` will not clobber a build the app moved itself to. See
+[UPDATING.md](UPDATING.md) for how that works.
+
 ## Toolchain and GPUI pin
 
 - Rust: `1.95.0` (stable, pinned by `rust-toolchain.toml`)

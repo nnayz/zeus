@@ -7,6 +7,8 @@
 #   DIRI_SIGN_IDENTITY  "Developer ID Application: ..." (default: auto-detected)
 #   NOTARY_PROFILE      notarytool keychain profile (default: dirijor-notary)
 #   GH_REPO             GitHub repo to publish to (default: cristicretu/diri)
+#   TAP_DIR             Homebrew tap checkout (default: ../../homebrew-diri)
+#   SKIP_CASK=1         don't bump the Homebrew cask
 #   SKIP_GATES=1        skip cargo test/clippy (for re-running a failed publish)
 #   SKIP_PERF_GATE=1   skip packaged app memory/idle-CPU probe
 #
@@ -40,6 +42,8 @@ MANIFEST="$WORKSPACE/crates/diri-app/Cargo.toml"
 
 NOTARY_PROFILE="${NOTARY_PROFILE:-dirijor-notary}"
 GH_REPO="${GH_REPO:-cristicretu/diri}"
+# Homebrew tap checkout, bumped in lockstep with each release (step 6).
+TAP_DIR="${TAP_DIR:-$ROOT/../homebrew-diri}"
 TAG="v$VERSION"
 FEED="$DIST/appcast.json"
 MINIMUM_SYSTEM="15.0"
@@ -253,6 +257,42 @@ else
         --repo "$GH_REPO" \
         --title "diri $VERSION" \
         --notes-file "$NOTES_FILE"
+fi
+
+# ----------------------------------------------------------------------------
+# 6. Bump the Homebrew cask
+# ----------------------------------------------------------------------------
+# The cask pins the DMG's sha256, so it is wrong the moment a release ships and
+# has to move in lockstep. Skipped silently when the tap is not checked out —
+# a missing tap must not fail a release that already published.
+CASK_FILE="$TAP_DIR/Casks/diri.rb"
+if [ "${SKIP_CASK:-0}" = "1" ]; then
+    echo "==> Skipping the Homebrew cask (SKIP_CASK=1)"
+elif [ ! -f "$CASK_FILE" ]; then
+    echo "    (no cask at $CASK_FILE — skipping the Homebrew bump)"
+else
+    # The cask downloads the DMG; the feed's SHA256 is the zip's.
+    DMG_SHA256="$(shasum -a 256 "$DMG" | awk '{print $1}')"
+    echo "==> Bumping the Homebrew cask to $VERSION"
+    /usr/bin/sed -i '' -E \
+        -e "s|^  version \".*\"$|  version \"$VERSION\"|" \
+        -e "s|^  sha256 \".*\"$|  sha256 \"$DMG_SHA256\"|" \
+        "$CASK_FILE"
+
+    # Prove the edit produced what we intended rather than trusting sed.
+    if ! grep -q "^  version \"$VERSION\"$" "$CASK_FILE" \
+        || ! grep -q "^  sha256 \"$DMG_SHA256\"$" "$CASK_FILE"; then
+        echo "error: the cask bump did not apply cleanly; fix $CASK_FILE by hand" >&2
+        exit 1
+    fi
+
+    if git -C "$TAP_DIR" diff --quiet -- Casks/diri.rb; then
+        echo "    cask already at $VERSION"
+    else
+        git -C "$TAP_DIR" add Casks/diri.rb
+        git -C "$TAP_DIR" commit -q -m "diri $VERSION"
+        echo "    committed (push with: git -C \"$TAP_DIR\" push)"
+    fi
 fi
 
 cat <<EOF

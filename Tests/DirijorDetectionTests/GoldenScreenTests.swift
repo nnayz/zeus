@@ -260,6 +260,43 @@ import Testing
         #expect(engine.evaluate(s, manifestID: "aider") == nil)
     }
 
+    // MARK: Aider — constructed regression screens
+    // Unlike the captures above these are assembled by hand, each pinning a
+    // false reading the rules used to produce.
+
+    @Test func aiderAnsweredConfirmReleasesTheBlocker() {
+        // The answered line stays on screen and the spinner only repaints its
+        // own row: a substring match over the bottom lines kept reporting
+        // "needs input" for the whole model wait, right after the user answered.
+        let s = snap([
+            "hello.txt",
+            "Create new file? (Y)es/(N)o [Yes]: y",
+            "        ░█ Waiting for openai/deepseek-v4-flash",
+        ])
+        let obs = engine.evaluate(s, manifestID: "aider")
+        #expect(obs?.state == .working)
+        #expect(obs?.matchedRuleID == "working-spinner")
+    }
+
+    @Test func aiderWrappedConfirmStillBlocks() {
+        // A long path wraps the (A)ll/(S)kip-all variant: "(Y)es/(N)o" lands on
+        // one row and the colon on the next, so the rule cannot be per-line.
+        let s = snap([
+            "Add src/components/dashboard/widgets/RevenueChart.tsx to the chat? (Y)es/(N)o/(A)ll/(S)k",
+            "ip all/(D)on't ask again [Yes]: ",
+        ])
+        let obs = try! #require(engine.evaluate(s, manifestID: "aider"))
+        #expect(obs.state == .blockedPermission)
+        #expect(obs.matchedRuleID == "confirm-prompt")
+    }
+
+    @Test func aiderStreamedArrowIsNotThePrompt() {
+        // '-->' and '->' matched the prompt pattern while [a-z-] allowed the
+        // hyphen, flipping a streaming turn to idle.
+        #expect(engine.evaluate(snap(["<!-- primary nav", "-->"]), manifestID: "aider") == nil)
+        #expect(engine.evaluate(snap(["fn parse(s: &str)", "->"]), manifestID: "aider") == nil)
+    }
+
     @Test func unknownManifestReturnsNil() {
         #expect(engine.evaluate(snap(["x"]), manifestID: "nope") == nil)
     }

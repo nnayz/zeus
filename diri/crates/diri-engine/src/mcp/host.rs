@@ -273,12 +273,7 @@ impl ToolHost for RegistryHost {
             }
 
             // spawn_agent is served by the control layer, which owns log paths
-            // and record creation; routing it here would duplicate that.
-            "spawn_agent" => Err(
-                "spawn_agent is not wired into this host yet; use the control socket's \
-                 session.spawn"
-                    .to_string(),
-            ),
+            "spawn_agent" => self.spawn_agent(arguments),
 
             other => Err(format!("unknown tool {other:?}")),
         }
@@ -286,6 +281,94 @@ impl ToolHost for RegistryHost {
 }
 
 impl RegistryHost {
+    /// Starts a session on behalf of the calling agent.
+    ///
+    /// The new session records its caller as `parent`, which is what makes the
+    /// lineage tools — `list_children`, `wait_for_children` — mean anything.
+    ///
+    /// An initial prompt is *not* written here. The agent has not drawn its
+    /// input box yet, and typing into a terminal that is still starting loses
+    /// the text; delivery waits for readiness, which the caller drives with
+    /// `wait_for_agent` then `send_prompt`. The pending prompt is returned so
+    /// the caller knows it still owes it.
+    fn spawn_agent(&self, arguments: &Value) -> Result<Value, String> {
+        let kind = required_str(arguments, "kind")?;
+        let cwd = required_str(arguments, "cwd")?;
+        let cwd_path = PathBuf::from(&cwd);
+        if !cwd_path.is_dir() {
+            return Err(format!("cwd {cwd:?} is not a directory"));
+        }
+        let wants_worktree = arguments
+            .get("worktree")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let prompt = arguments
+            .get("prompt")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let title = arguments
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+
+        // A worktree is created before the session so the agent starts inside
+        // it, rather than in the repo and moving later.
+        let (working_dir, worktree_path, branch) = if wants_worktree {
+            let info = git::create_worktree(&cwd_path, None, None)
+                .map_err(|error| format!("could not create a worktree: {error}"))?;
+            let path = PathBuf::from(&info.path);
+            (path, Some(info.path), info.branch)
+        } else {
+            (cwd_path, None, git::branch(Path::new(&cwd)))
+        };
+
+        let mut registry = self.registry()?;
+        let engine = registry.engine();
+        let manifest = engine
+            .manifest(&kind)
+            .ok_or_else(|| format!("no manifest for agent {kind:?}"))?;
+        let descriptor = manifest.agent.clone().unwrap_or_default();
+        let authority = descriptor.authority();
+
+        let inherited: Vec<(String, String)> = std::env::vars().collect();
+        let pty = descriptor
+            .spawn_spec(&working_dir, inherited, &[])
+            .ok_or_else(|| {
+                format!("agent {kind:?} declares no binary, so it cannot be spawned by name")
+            })?;
+
+        let id = crate::control::next_session_id();
+        let mut record = crate::control::new_record(&id, &kind, &working_dir.to_string_lossy());
+        record.parent = self.caller.clone().map(SessionId);
+        record.worktree_path = worktree_path.clone();
+        record.git_branch = branch.clone();
+        if let Some(title) = title {
+            record.title = title;
+        }
+
+        let spec = crate::session::SessionSpec {
+            id: id.clone(),
+            pty,
+            manifest_id: kind.clone(),
+            authority,
+            logs_dir: self.logs_dir.clone(),
+        };
+        registry
+            .spawn(spec, record)
+            .map_err(|error| format!("could not start {kind}: {error}"))?;
+        let _ = registry.persist();
+
+        Ok(json!({
+            "id": id,
+            "kind": kind,
+            "cwd": working_dir.to_string_lossy(),
+            "worktree": worktree_path,
+            "branch": branch,
+            "parent": self.caller,
+            "pendingPrompt": prompt,
+        }))
+    }
+
     fn wait_for(&self, id: &str, until: &str, timeout_seconds: f64) -> Result<Value, String> {
         let deadline = Instant::now() + Duration::from_secs_f64(timeout_seconds.max(0.0));
         // "done" means a turn finished: idle *after* having worked. Treating a

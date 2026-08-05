@@ -36,13 +36,14 @@ This is the record of replacing it with `crates/diri-engine`.
 | Registry + persistence | **done** | Reads and round-trips the real `state.json` — 30 sessions, 84 projects preserved |
 | Control socket | **core done** | Handshake, spawn, list, send_text, resize, read_screen, kill over NDJSON on an owner-only socket. Unported methods answer `not_found` rather than dropping the connection |
 | Agent descriptors | **done** | argv, env scrubbing, colour assertion, resume flags — all read from the manifest |
-| Spawn over the wire | **works** | `session.spawn` builds argv from the manifest; hook/MCP injection still missing, so a Claude session started this way is screen-detected rather than hook-driven |
+| Spawn (control + MCP) | **works** | `session.spawn` builds argv from the manifest; hook/MCP injection still missing, so a Claude session started this way is screen-detected rather than hook-driven |
 | Hook + notify parsing | **done** | Claude hooks and Codex notify → signals, with identity, titles and needs-input detail |
 | Git facts | **done** | Branch and linked-worktree detection by reading `.git` directly; porcelain parsing |
 | Worktree operations | **done** | Create, list, remove against real git; paths canonicalized so they match what git reports |
 | MCP server | **done** | JSON-RPC stdio protocol + 13 tools executing against the registry |
 | Holder (session survival) | not started | The reason the Rust engine cannot replace the Swift one yet |
-| History / resume / migration / hosts | not started | |
+| History / resume | **done** | Claude and Codex transcript stores; verified against the real ones — 500 conversations in 0.9s |
+| Remote hosts (ssh + tmux) | **done** | argv, reattach naming, shell quoting verified through a real shell, scp handoff |
 | Swift daemon retirement | not started | Only after the above ships and is proven |
 
 ## What the risky parts turned out to be

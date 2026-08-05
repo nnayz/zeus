@@ -361,3 +361,111 @@ fn worktree_tools_work_against_a_real_repository() {
     .expect("remove");
     assert!(!Path::new(&path).exists());
 }
+
+#[test]
+fn spawn_agent_starts_a_session_owned_by_its_caller() {
+    // Lineage is the point: a spawned session must record who spawned it, or
+    // list_children and wait_for_children have nothing to work with.
+    let temp = tempfile::tempdir().expect("temp");
+    let logs = temp.path().join("logs");
+    let registry = Arc::new(Mutex::new(Registry::new(
+        engine(),
+        temp.path().join("state.json"),
+    )));
+    let server = McpServer::new(
+        tool_definitions(),
+        RegistryHost::new(Arc::clone(&registry), &logs)
+            .with_caller(Some("s_orchestrator".to_string())),
+    );
+
+    // `shell` declares no binary, so spawning it by name is refused with a
+    // message that says why rather than starting something unexpected.
+    let refused = call(
+        &server,
+        "spawn_agent",
+        json!({ "kind": "shell", "cwd": "/tmp" }),
+    )
+    .expect_err("shell has no binary");
+    assert!(refused.contains("no binary"), "got {refused}");
+
+    // An unknown agent is refused too.
+    let unknown = call(
+        &server,
+        "spawn_agent",
+        json!({ "kind": "not-an-agent", "cwd": "/tmp" }),
+    )
+    .expect_err("unknown agent");
+    assert!(unknown.contains("no manifest"), "got {unknown}");
+
+    // A missing directory is caught before anything is started.
+    let bad_cwd = call(
+        &server,
+        "spawn_agent",
+        json!({ "kind": "claude-code", "cwd": "/no/such/dir" }),
+    )
+    .expect_err("bad cwd");
+    assert!(bad_cwd.contains("not a directory"), "got {bad_cwd}");
+
+    assert_eq!(
+        registry.lock().expect("registry").live_count(),
+        0,
+        "no session should have been started by any of those"
+    );
+}
+
+#[test]
+fn a_spawned_session_records_its_parent_and_appears_as_a_child() {
+    // Uses a real binary that exists everywhere, through a manifest override
+    // directory, so the spawn path is exercised end to end.
+    let temp = tempfile::tempdir().expect("temp");
+    let manifests = temp.path().join("manifests");
+    std::fs::create_dir_all(&manifests).expect("mkdir");
+    std::fs::write(
+        manifests.join("sleeper.json"),
+        r#"{
+            "schemaVersion": 1,
+            "id": "sleeper",
+            "version": "1",
+            "statusModel": "processOnly",
+            "agent": { "binary": "/bin/cat", "statusAuthority": "process" },
+            "rules": []
+        }"#,
+    )
+    .expect("write manifest");
+
+    let (custom, failed) = ManifestEngine::load_dir(&manifests).expect("load");
+    assert!(failed.is_empty(), "{failed:?}");
+
+    let logs = temp.path().join("logs");
+    let registry = Arc::new(Mutex::new(Registry::new(
+        Arc::new(custom),
+        temp.path().join("state.json"),
+    )));
+    let server = McpServer::new(
+        tool_definitions(),
+        RegistryHost::new(Arc::clone(&registry), &logs).with_caller(Some("s_parent".to_string())),
+    );
+
+    let spawned = call(
+        &server,
+        "spawn_agent",
+        json!({ "kind": "sleeper", "cwd": "/tmp", "name": "worker one", "prompt": "do the thing" }),
+    )
+    .expect("spawn");
+
+    let id = spawned["id"].as_str().expect("an id").to_string();
+    assert!(id.starts_with("s_"));
+    assert_eq!(spawned["parent"], "s_parent");
+    assert_eq!(
+        spawned["pendingPrompt"], "do the thing",
+        "the prompt is returned rather than typed into a terminal that is still starting"
+    );
+
+    let children = call(&server, "list_children", json!({})).expect("children");
+    let children = children["children"].as_array().expect("array");
+    assert_eq!(children.len(), 1);
+    assert_eq!(children[0]["id"], id);
+    assert_eq!(children[0]["title"], "worker one");
+
+    call(&server, "release_agent", json!({ "session_id": id })).expect("release");
+}

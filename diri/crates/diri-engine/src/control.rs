@@ -326,14 +326,14 @@ impl Drop for ControlServer {
 }
 
 /// A session id in the daemon's format: `s_` plus twelve hex digits.
-fn next_session_id() -> String {
+pub(crate) fn next_session_id() -> String {
     let mut bytes = [0u8; 6];
     getrandom::fill(&mut bytes).expect("the OS random source");
     let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
     format!("s_{hex}")
 }
 
-fn new_record(id: &str, kind: &str, cwd: &str) -> diri_proto::SessionRecord {
+pub(crate) fn new_record(id: &str, kind: &str, cwd: &str) -> diri_proto::SessionRecord {
     use diri_proto::{AgentKind, DateMillis, ProjectId, Resumability, SessionId, TitleSource};
     let now: DateMillis = std::time::SystemTime::now().into();
     diri_proto::SessionRecord {

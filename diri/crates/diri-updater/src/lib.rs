@@ -36,16 +36,14 @@ use net::Http;
 pub(crate) const AGENT: &str = env!("CARGO_PKG_VERSION");
 
 /// Host serving both the feed and the archives. Downloads are pinned to it.
-pub const RELEASES_HOST: &str = "dirijor-releases.crisemcr.workers.dev";
-pub const DEFAULT_FEED_URL: &str =
-    "https://dirijor-releases.crisemcr.workers.dev/diri/appcast.json";
-
-/// Basic-auth credentials for the releases gate.
 ///
-/// Not a secret. They ship inside every copy of the app and exist only to keep
-/// the builds off casual and search-engine access. Rotating the password
-/// strands old installs until they redownload by hand.
-pub const DEFAULT_BASIC_AUTH: &str = "dirijor:conduct-crimson-otter-42";
+/// Only the URL the feed names is checked against this; curl still follows the
+/// redirect GitHub issues to its asset CDN, which is what release downloads do.
+pub const RELEASES_HOST: &str = "github.com";
+/// The feed is published as an asset on every release, so `latest` is a stable
+/// URL that always resolves to the newest one.
+pub const DEFAULT_FEED_URL: &str =
+    "https://github.com/cristicretu/diri/releases/latest/download/appcast.json";
 
 /// Set to `1` to let an unsigned local build run the whole flow. Only useful
 /// for exercising the updater against a test feed; the signature check still
@@ -57,7 +55,6 @@ pub const FEED_URL_ENV: &str = "DIRI_UPDATE_FEED";
 #[derive(Clone, Debug)]
 pub struct UpdaterConfig {
     pub feed_url: String,
-    pub basic_auth: Option<String>,
     pub current_version: Version,
     /// The `.app` that will be replaced.
     pub bundle: PathBuf,
@@ -95,7 +92,6 @@ impl UpdaterConfig {
             .ok_or_else(|| UpdateError::NotUpdatable("HOME is unset".to_owned()))?;
         Ok(Self {
             feed_url: std::env::var(FEED_URL_ENV).unwrap_or_else(|_| DEFAULT_FEED_URL.to_owned()),
-            basic_auth: Some(DEFAULT_BASIC_AUTH.to_owned()),
             current_version: current,
             bundle,
             cache_dir: home.join("Library/Caches/diri/updates"),
@@ -120,7 +116,7 @@ pub struct Updater {
 
 impl Updater {
     pub fn new(config: UpdaterConfig) -> Self {
-        let http = Http::new(config.basic_auth.clone());
+        let http = Http::new();
         Self { config, http }
     }
 
@@ -250,7 +246,6 @@ mod tests {
     fn config() -> UpdaterConfig {
         UpdaterConfig {
             feed_url: DEFAULT_FEED_URL.to_owned(),
-            basic_auth: None,
             current_version: Version::new(0, 4, 2),
             bundle: PathBuf::from("/Applications/diri.app"),
             cache_dir: PathBuf::from("/tmp/diri-updates"),
@@ -268,14 +263,14 @@ mod tests {
         assert_eq!(error.user_facing(), "Updates are off for this build");
     }
 
-    /// Live check against the real releases host: proves the curl config, the
-    /// Basic-auth gate, and the feed's shape all still line up. Ignored by
-    /// default so offline runs and CI stay green; run it after publishing with
-    /// `cargo test -p diri-updater -- --ignored`.
+    /// Live check against the published feed: proves the curl config, the
+    /// GitHub `latest` redirect, and the feed's shape all still line up.
+    /// Ignored by default so offline runs and CI stay green; run it after
+    /// publishing with `cargo test -p diri-updater -- --ignored`.
     #[test]
     #[ignore = "requires network access to the releases host"]
     fn the_published_feed_is_reachable_and_parses() {
-        let http = Http::new(Some(DEFAULT_BASIC_AUTH.to_owned()));
+        let http = Http::new();
         let body = http
             .fetch_text(DEFAULT_FEED_URL)
             .expect("the releases host serves the feed");

@@ -71,7 +71,7 @@ The daemon is built for multiple concurrent clients (per-connection control chan
 | JSON | `serde` + `serde_json` | Dates are **milliseconds since 1970** (`JSONEncoder.dirijor`); sorted keys not required for a client. |
 | Vibrancy | `WindowBackgroundAppearance::Blurred` + translucent sidebar paint over an opaque content pane | See §7. |
 | macOS glue | `objc2` + `objc2-app-kit` (NSStatusItem, NSSound, traffic lights), `objc2-user-notifications` | GPUI runs a real NSApplication loop; main-thread AppKit calls are fine. |
-| Packaging | `cargo-packager` (universal binary, .app assembly, entitlements) + existing Apple ID / notarytool creds from Dirijor's release flow | Updater: a minimal self-updater (`crates/diri-updater`) on the same Cloudflare-worker host under `/diri/`; Sparkle's appcast was not reusable, and neither was its keypair model. |
+| Packaging | `cargo-packager` (universal binary, .app assembly, entitlements) + existing Apple ID / notarytool creds from Dirijor's release flow | Updater: a minimal self-updater (`crates/diri-updater`) reading a JSON feed published with each GitHub Release; Sparkle's appcast was not reusable, and neither was its keypair model. |
 | Repo location | `diri/` — a Rust workspace **inside this repo** | Keeps the Swift protocol files adjacent as the porting reference; the Swift build ignores it; agents can worktree it. |
 
 Community prior art worth skimming (not depending on): **tty7** (GPU terminal client for a daemon — architecturally closest to diri), **Loungy** (status item, panel windows, packaging), **Arbor / Rabbitty / hunk** (GPUI agent orchestrators).

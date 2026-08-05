@@ -6,15 +6,16 @@
 # Env overrides:
 #   DIRI_SIGN_IDENTITY  "Developer ID Application: ..." (default: auto-detected)
 #   NOTARY_PROFILE      notarytool keychain profile (default: dirijor-notary)
-#   RELEASES_DIR        path to the dirijor-releases repo (default: ../../dirijor-releases)
+#   GH_REPO             GitHub repo to publish to (default: cristicretu/diri)
 #   SKIP_GATES=1        skip cargo test/clippy (for re-running a failed publish)
 #   SKIP_PERF_GATE=1   skip packaged app memory/idle-CPU probe
 #
 # This publishes TWO artifacts per release, both notarized and stapled:
 #   diri-<version>-universal.dmg  what people download by hand
 #   diri-<version>-universal.zip  what the in-app updater fetches
-# and rewrites diri/appcast.json, the feed the updater reads. See
-# diri/UPDATING.md for the trust model and one-time setup.
+# plus appcast.json, the feed the updater reads. All three are attached to a
+# GitHub Release, so `releases/latest/download/appcast.json` is a stable feed
+# URL. See diri/UPDATING.md for the trust model and one-time setup.
 set -euo pipefail
 
 if [ $# -lt 1 ]; then
@@ -38,12 +39,9 @@ ZIP="$DIST/diri-$VERSION-universal.zip"
 MANIFEST="$WORKSPACE/crates/diri-app/Cargo.toml"
 
 NOTARY_PROFILE="${NOTARY_PROFILE:-dirijor-notary}"
-RELEASES_DIR="${RELEASES_DIR:-$ROOT/../dirijor-releases}"
-RELEASES_HOST="https://dirijor-releases.crisemcr.workers.dev"
-# Everything diri publishes lives under /diri/ so it never collides with the
-# Swift app's DMGs and appcast.xml in the same bucket.
-PUBLIC_DIR="$RELEASES_DIR/public/diri"
-FEED="$PUBLIC_DIR/appcast.json"
+GH_REPO="${GH_REPO:-cristicretu/diri}"
+TAG="v$VERSION"
+FEED="$DIST/appcast.json"
 MINIMUM_SYSTEM="15.0"
 # Old builds stay downloadable but the repo should not grow without bound.
 KEEP_RELEASES=5
@@ -81,10 +79,10 @@ fi
 echo "==> Releasing diri $VERSION"
 echo "    Sign identity : $DIRI_SIGN_IDENTITY"
 echo "    Notary profile: $NOTARY_PROFILE"
-echo "    Releases dir  : $PUBLIC_DIR"
+echo "    Publishing to : $GH_REPO"
 
-if [ ! -d "$RELEASES_DIR" ]; then
-    echo "error: releases repo not found at $RELEASES_DIR (set RELEASES_DIR)" >&2
+if ! command -v gh >/dev/null 2>&1; then
+    echo "error: the GitHub CLI (gh) is required to publish" >&2
     exit 1
 fi
 
@@ -163,53 +161,40 @@ if [ "${SKIP_PERF_GATE:-0}" != "1" ]; then
 fi
 
 # ----------------------------------------------------------------------------
-# 4. Publish the artifacts
+# 4. Build the update feed
 # ----------------------------------------------------------------------------
-mkdir -p "$PUBLIC_DIR"
-cp "$DMG" "$ZIP" "$PUBLIC_DIR/"
-
-# Point the site's download button at this release. diri bundles the daemon and
-# is meant to replace Dirijor.app, so a diri release takes over the button that
-# the Swift release.sh used to claim for its own DMG. SKIP_INDEX=1 leaves it on
-# whatever it currently serves.
-INDEX="$RELEASES_DIR/public/index.html"
-if [ "${SKIP_INDEX:-0}" != "1" ] && [ -f "$INDEX" ]; then
-    if grep -q 'id="download"' "$INDEX"; then
-        sed -i '' -E \
-            "s|(id=\"download\"[^>]*href=\")[^\"]*(\")|\1diri/diri-$VERSION-universal.dmg\2|" \
-            "$INDEX"
-        echo "==> Download button now serves diri-$VERSION-universal.dmg"
-        echo "    (the page still reads \"Dirijor\" — rename it there when you're ready)"
-    else
-        echo "warning: no id=\"download\" anchor in $INDEX; left the button alone" >&2
-    fi
-fi
-
-NOTES_FILE="$PUBLIC_DIR/diri-$VERSION.html"
-NOTES_URL=""
-if [ -f "$NOTES_FILE" ]; then
-    NOTES_URL="$RELEASES_HOST/diri/diri-$VERSION.html"
-else
-    echo "    (no release notes at $NOTES_FILE — the update UI will show just the version)"
-fi
-
+# Download URLs are the release's own assets. The feed is attached to every
+# release, so the `latest` alias always resolves to the newest one — that is
+# what gives a stable feed URL with no server to run.
+BASE_URL="https://github.com/$GH_REPO/releases/download/$TAG"
 SIZE="$(stat -f%z "$ZIP")"
 SHA256="$(shasum -a 256 "$ZIP" | awk '{print $1}')"
 PUBLISHED="$(date -u +%Y-%m-%d)"
 
-echo "==> Updating $FEED"
+# Start from the published feed so releases people skipped stay offerable.
+echo "==> Fetching the current feed"
+if ! curl -fsSL "https://github.com/$GH_REPO/releases/latest/download/appcast.json" -o "$FEED" 2>/dev/null; then
+    echo "    (no published feed yet — starting a new one)"
+    rm -f "$FEED"
+fi
+
+echo "==> Writing $FEED"
 VERSION="$VERSION" \
-URL="$RELEASES_HOST/diri/diri-$VERSION-universal.zip" \
+URL="$BASE_URL/diri-$VERSION-universal.zip" \
 SIZE="$SIZE" SHA256="$SHA256" PUBLISHED="$PUBLISHED" \
-NOTES_URL="$NOTES_URL" MINIMUM_SYSTEM="$MINIMUM_SYSTEM" \
+MINIMUM_SYSTEM="$MINIMUM_SYSTEM" \
 FEED="$FEED" KEEP_RELEASES="$KEEP_RELEASES" \
-python3 - <<'PY'
+python3 - <<'PYFEED'
 import json, os, pathlib
 
 feed_path = pathlib.Path(os.environ["FEED"])
 feed = {"feed_version": 1, "releases": []}
 if feed_path.exists():
-    feed = json.loads(feed_path.read_text())
+    try:
+        feed = json.loads(feed_path.read_text())
+    except json.JSONDecodeError:
+        print("    (published feed did not parse — starting a new one)")
+        feed = {"feed_version": 1, "releases": []}
     feed.setdefault("feed_version", 1)
     feed.setdefault("releases", [])
 
@@ -222,8 +207,6 @@ entry = {
     "minimum_system_version": os.environ["MINIMUM_SYSTEM"],
     "published": os.environ["PUBLISHED"],
 }
-if os.environ.get("NOTES_URL"):
-    entry["notes_url"] = os.environ["NOTES_URL"]
 
 # Re-releasing a version replaces its row rather than adding a second one the
 # client would have to disambiguate.
@@ -240,44 +223,52 @@ releases.sort(key=sort_key, reverse=True)
 feed["releases"] = releases[: int(os.environ["KEEP_RELEASES"])]
 feed_path.write_text(json.dumps(feed, indent=2) + "\n")
 print(f"    {len(feed['releases'])} release(s) in the feed, newest {feed['releases'][0]['version']}")
-PY
-
-# Drop artifacts that fell off the end of the feed.
-python3 - "$PUBLIC_DIR" "$FEED" <<'PY'
-import json, pathlib, sys
-
-public = pathlib.Path(sys.argv[1])
-kept = {r["version"] for r in json.loads(pathlib.Path(sys.argv[2]).read_text())["releases"]}
-for artifact in list(public.glob("diri-*-universal.dmg")) + list(public.glob("diri-*-universal.zip")):
-    version = artifact.name.removeprefix("diri-").removesuffix("-universal.dmg").removesuffix("-universal.zip")
-    if version not in kept:
-        artifact.unlink()
-        print(f"    pruned {artifact.name}")
-PY
+PYFEED
 
 # ----------------------------------------------------------------------------
-# 5. Commit + deploy
+# 5. Publish the GitHub Release
 # ----------------------------------------------------------------------------
-echo "==> Committing release in $RELEASES_DIR"
-git -C "$RELEASES_DIR" add -A
-git -C "$RELEASES_DIR" commit -m "diri release $VERSION" || echo "    (nothing to commit)"
+NOTES_FILE="$DIST/notes-$VERSION.md"
+if [ ! -f "$NOTES_FILE" ]; then
+    cat > "$NOTES_FILE" <<NOTES
+## diri $VERSION
 
-echo "==> Deploying to Cloudflare (wrangler)"
-( cd "$RELEASES_DIR" && pnpm dlx wrangler deploy 2>&1 | tail -3 )
+Native macOS orchestrator for coding agents.
+
+**Install:** download the DMG below, open it, drag diri to Applications.
+Universal (Apple silicon and Intel), signed and notarized, so it opens without
+a Gatekeeper prompt.
+
+diri updates itself from here — \`appcast.json\` is the feed it reads.
+NOTES
+    echo "==> Wrote default notes to $NOTES_FILE (edit and re-run to customize)"
+fi
+
+echo "==> Publishing $TAG to $GH_REPO"
+if gh release view "$TAG" --repo "$GH_REPO" >/dev/null 2>&1; then
+    echo "    release exists — replacing its assets"
+    gh release upload "$TAG" "$DMG" "$ZIP" "$FEED" --repo "$GH_REPO" --clobber
+else
+    gh release create "$TAG" "$DMG" "$ZIP" "$FEED" \
+        --repo "$GH_REPO" \
+        --title "diri $VERSION" \
+        --notes-file "$NOTES_FILE"
+fi
 
 cat <<EOF
 
 ============================================================
   diri $VERSION released
 ============================================================
-  DMG        : $PUBLIC_DIR/diri-$VERSION-universal.dmg
-  Update zip : $PUBLIC_DIR/diri-$VERSION-universal.zip
+  DMG        : $DMG
+  Update zip : $ZIP
   sha256     : $SHA256
-  Feed       : $RELEASES_HOST/diri/appcast.json
+  Release    : https://github.com/$GH_REPO/releases/tag/$TAG
+  Feed       : https://github.com/$GH_REPO/releases/latest/download/appcast.json
 
   Next steps:
-    1. Push the releases repo: git -C "$RELEASES_DIR" push
-    2. Push + tag the source:  git -C "$ROOT" push && git tag diri-v$VERSION && git push origin diri-v$VERSION
-    3. Confirm an old build updates itself (diri/UPDATING.md → "Verifying a release")
+    1. Push the source and tag it:
+         git -C "$ROOT" push && git tag diri-v$VERSION && git push origin diri-v$VERSION
+    2. Confirm an old build updates itself (diri/UPDATING.md → "Verifying a release")
 ============================================================
 EOF

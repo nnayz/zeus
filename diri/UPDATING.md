@@ -3,15 +3,15 @@
 diri updates itself. It does **not** use Sparkle — that framework is Swift-side
 and the Swift app's appcast carries EdDSA signatures tied to a keypair a Rust
 binary has no way to use. diri ships its own updater in `crates/diri-updater`,
-sharing only the releases host with the Swift app.
+reading a JSON feed published with each GitHub Release.
 
 | | Dirijor (Swift) | diri (Rust) |
 |---|---|---|
 | Client | Sparkle | `diri-updater` |
-| Feed | `/appcast.xml` | `/diri/appcast.json` |
+| Feed | `/appcast.xml` | `appcast.json`, a release asset |
 | Update artifact | DMG | zip of the stapled `.app` |
 | Trust anchor | project EdDSA keypair | Developer ID + notarization |
-| Host | `dirijor-releases.crisemcr.workers.dev` | same, same Basic-auth gate |
+| Host | password-gated worker (retired) | GitHub Releases, public |
 
 ## Trust model
 
@@ -35,10 +35,12 @@ and every install is stranded until people redownload by hand. This design has
 no such key. The Developer ID certificate is already load-bearing for shipping
 at all, so it is the one secret that cannot be lost without noticing.
 
-The Basic-auth credentials in `crates/diri-updater/src/lib.rs` are **not a
-secret**: they ship in every copy of the app. They gate the releases host
-against casual and search-engine access, nothing more. Rotating the site
-password strands old installs.
+There are no credentials. Releases are public GitHub assets, so nothing has
+to ship a password inside the app to fetch them.
+
+The feed lives at `releases/latest/download/appcast.json`. GitHub's `latest`
+alias always resolves to the newest release, and every release carries the
+feed as an asset, so one stable URL works with no server to run.
 
 ## What the user sees
 
@@ -76,32 +78,20 @@ If the app sits somewhere the user cannot write, the writability check fails
 One-time setup is the Developer ID cert and notary profile described in
 [PACKAGING.md](PACKAGING.md). No Sparkle keys.
 
-Optionally write release notes into the releases repo first — the feed links
-them and the update UI shows the version alone without one:
-
 ```sh
-$EDITOR ../dirijor-releases/public/diri/diri-0.2.0.html
-```
-
-Then:
-
-```sh
-diri/scripts/release.sh 0.2.0
+diri/scripts/release.sh 0.4.1
 ```
 
 Which bumps `crates/diri-app/Cargo.toml` (and commits the bump), runs clippy +
 tests, builds a universal binary, bundles the Swift daemon, signs it,
 **notarizes and staples the .app first**, then builds and notarizes the DMG
-from that stapled bundle, produces the update zip, points the releases site's
-download button at the new DMG, rewrites `diri/appcast.json`, prunes artifacts
-that fell off the end of the feed, commits the releases repo, and deploys the
-Worker.
+from that stapled bundle, produces the update zip, rebuilds `appcast.json` from
+the currently published feed, and creates the GitHub Release with all three
+attached.
 
-The download button is the one the Swift `scripts/release.sh` used to claim for
-`Dirijor-<version>.dmg`; a diri release takes it over, since diri bundles the
-daemon and replaces `Dirijor.app`. `SKIP_INDEX=1` leaves it pointing wherever it
-already does. The page's own copy still says "Dirijor" — that is a rename to
-make deliberately, not a side effect of a release.
+Release notes come from `dist/notes-<version>.md`. The script writes a default
+one if it is missing, so writing that file first — and re-running — is how you
+customize them.
 
 ### The bundled daemon does not update with the app
 
@@ -113,11 +103,10 @@ running from the replaced bundle, so a release that changes `dirijord` does not
 take effect until that daemon is restarted by other means. The app half updates
 immediately; the daemon half waits.
 
-It does not push. Finish with:
+It does not push the source. Finish with:
 
 ```sh
-git -C ../dirijor-releases push
-git push && git tag diri-v0.2.0 && git push origin diri-v0.2.0
+git push && git tag diri-v0.4.1 && git push origin diri-v0.4.1
 ```
 
 ### Why the .app is notarized before the DMG
@@ -131,7 +120,7 @@ bundle itself, which then goes into both the DMG and the update zip.
 
 - `DIRI_SIGN_IDENTITY` — Developer ID identity (default: auto-detected).
 - `NOTARY_PROFILE` — notarytool profile (default `dirijor-notary`).
-- `RELEASES_DIR` — path to the releases repo (default `../dirijor-releases`).
+- `GH_REPO` — repository to publish to (default `cristicretu/diri`).
 - `SKIP_GATES=1` — skip clippy/tests when re-running a failed publish.
 
 ## Verifying a release
@@ -146,7 +135,7 @@ The acceptance test is that an old build updates itself:
 To rehearse against a staging feed before publishing, point the app at one:
 
 ```sh
-DIRI_UPDATE_FEED=https://.../diri/appcast-staging.json /Applications/diri.app/Contents/MacOS/diri
+DIRI_UPDATE_FEED=https://example.test/appcast-staging.json /Applications/diri.app/Contents/MacOS/diri
 ```
 
 `DIRI_UPDATER_ALLOW_UNSIGNED=1` lets an ad-hoc-signed local build run the flow.

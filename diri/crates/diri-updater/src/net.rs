@@ -19,16 +19,13 @@ const FEED_TIMEOUT_SECONDS: u32 = 20;
 const DOWNLOAD_TIMEOUT_SECONDS: u32 = 900;
 const PROGRESS_POLL: Duration = Duration::from_millis(150);
 
-#[derive(Clone, Debug)]
-pub struct Http {
-    /// `user:password` for the Basic-auth gate on the releases host. Not a
-    /// secret — see `crate::DEFAULT_BASIC_AUTH`.
-    pub basic_auth: Option<String>,
-}
+/// Downloads over `curl`, with the hardening the installer depends on.
+#[derive(Clone, Debug, Default)]
+pub struct Http;
 
 impl Http {
-    pub fn new(basic_auth: Option<String>) -> Self {
-        Self { basic_auth }
+    pub fn new() -> Self {
+        Self
     }
 
     pub fn fetch_text(&self, url: &str) -> Result<String> {
@@ -143,9 +140,6 @@ impl Http {
         config.push_str("connect-timeout = 15\n");
         config.push_str("max-redirs = 5\n");
         config.push_str(&format!("user-agent = \"diri-updater/{}\"\n", crate::AGENT));
-        if let Some(auth) = &self.basic_auth {
-            config.push_str(&format!("user = \"{auth}\"\n"));
-        }
         if let Some(path) = output {
             config.push_str(&format!("output = \"{}\"\n", path.display()));
         }
@@ -225,13 +219,13 @@ fn curl_detail(stderr: &[u8]) -> String {
 mod tests {
     use super::*;
 
-    const HOST: &str = "dirijor-releases.crisemcr.workers.dev";
+    const HOST: &str = "github.com";
 
     #[test]
     fn accepts_a_release_url_on_the_pinned_host() {
         assert!(
             validated_download_url(
-                "https://dirijor-releases.crisemcr.workers.dev/diri/diri-0.2.0.zip",
+                "https://github.com/diri/diri-0.2.0.zip",
                 HOST
             )
             .is_ok()
@@ -243,7 +237,7 @@ mod tests {
         assert!(validated_download_url("https://evil.test/diri.zip", HOST).is_err());
         assert!(
             validated_download_url(
-                "http://dirijor-releases.crisemcr.workers.dev/diri.zip",
+                "http://github.com/diri.zip",
                 HOST
             )
             .is_err()
@@ -255,7 +249,7 @@ mod tests {
     fn rejects_userinfo_that_would_fake_the_host() {
         assert!(
             validated_download_url(
-                "https://dirijor-releases.crisemcr.workers.dev@evil.test/diri.zip",
+                "https://github.com@evil.test/diri.zip",
                 HOST
             )
             .is_err()
@@ -266,23 +260,28 @@ mod tests {
     fn rejects_urls_that_could_inject_curl_options() {
         assert!(
             validated_download_url(
-                "https://dirijor-releases.crisemcr.workers.dev/a\"\nupload-file = \"/etc/passwd",
+                "https://github.com/a\"\nupload-file = \"/etc/passwd",
                 HOST
             )
             .is_err()
         );
         assert!(
-            validated_download_url("https://dirijor-releases.crisemcr.workers.dev/a\\b", HOST)
+            validated_download_url("https://github.com/a\\b", HOST)
                 .is_err()
         );
     }
 
     #[test]
-    fn config_quotes_credentials_and_never_puts_them_in_argv() {
-        let http = Http::new(Some("dirijor:hunter2".to_owned()));
+    fn requests_carry_no_credentials_and_keep_the_url_out_of_argv() {
+        // Releases are public now: there is no gate to authenticate against,
+        // and a `user =` line would only be a credential to leak.
+        let http = Http::new();
         let config = http.config("https://example.test/a.json", None, 20);
-        assert!(config.contains("user = \"dirijor:hunter2\"\n"));
-        assert!(config.contains("proto = \"=https\"\n"));
+        assert!(!config.contains("user = "), "no credentials: {config}");
+        assert!(config.contains("proto = \"=https\"\n"), "https only");
+
+        // The URL still goes over stdin rather than argv, where any other user
+        // on the machine could read it.
         let command = http.curl();
         let args: Vec<_> = command.get_args().collect();
         assert_eq!(args, ["-K", "-"]);

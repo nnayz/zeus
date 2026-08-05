@@ -1,10 +1,36 @@
 # diri
 
-Native macOS orchestrator for coding agents. Run Claude Code, Codex, Cursor, Gemini, and
-plain shells in parallel — across git worktrees or on remote hosts — each with a live status
-(working / needs-you / done), tmux-like persistence (closing the app never kills a session; a
-daemon restart brings conversations back), a menu-bar rollup, and an MCP server so agents can
-spawn and orchestrate other agents.
+[![CI](https://github.com/cristicretu/diri/actions/workflows/ci.yml/badge.svg)](https://github.com/cristicretu/diri/actions/workflows/ci.yml)
+
+Native macOS orchestrator for coding agents. Run Claude Code, Codex, Cursor, Gemini and plain
+shells in parallel — across git worktrees or on remote hosts — each with a live status
+(working / needs-you / done) and tmux-like persistence: closing the app never kills a session,
+and a daemon restart brings conversations back.
+
+![diri](docs/images/diri.png)
+
+## Install
+
+Download the latest DMG from [Releases](https://github.com/cristicretu/diri/releases/latest),
+open it, and drag diri to Applications. Universal (Apple silicon and Intel), signed and
+notarized. diri updates itself from there.
+
+macOS 15 or newer.
+
+## What it does
+
+- **Many agents at once.** Each session is a real terminal with a real PTY. Group them by
+  project, split them across git worktrees, or run them on a remote host over ssh+tmux.
+- **Status you can trust.** diri reads what an agent actually painted on its screen and tells
+  you which ones are working, which are waiting on you, and which are done — so you can watch
+  ten sessions without reading ten terminals.
+- **Sessions outlive the app.** A background daemon owns the PTYs. Quit diri, reopen it, and
+  everything is still there.
+- **Agents can orchestrate agents.** An MCP server lets a running agent spawn another one,
+  watch it, read its output, and answer its prompts.
+
+First-class status detection and resume are Claude Code and Codex. Cursor and Gemini run with
+partial support, and anything else runs as a terminal with running/exited status.
 
 ## Architecture
 
@@ -13,57 +39,48 @@ Two processes, one wire protocol:
 - **`diri`** — the desktop app: Rust + [GPUI](https://github.com/zed-industries/zed). Owns the
   window, sidebar, terminal renderer, command palette, and usage accounting. Lives in
   [`diri/`](diri/).
-- **`dirijord`** — headless Swift daemon, launched by the app and outliving it. Owns PTYs and
-  child agent processes, an offset-addressed output log per session (for detach/replay), a
+- **`dirijord`** — a headless Swift daemon, launched by the app and outliving it. Owns PTYs and
+  child agent processes, an offset-addressed output log per session (for detach and replay), a
   headless terminal emulator for status detection, the session registry and persistence,
   worktrees, and the control socket.
-- **`dirijor`** — small CLI: `mcp-stdio` (the MCP shim injected into agents), `hook`/`notify`
-  (fail-open forwarders wired into Claude hooks and Codex notify), and `status`/`doctor`.
 
-`dirijord-holder` is a tiny helper that owns the PTY master so sessions survive a daemon
-crash or restart.
+`dirijor` is a small CLI: the MCP shim injected into agents, the hook and notify forwarders, and
+`status`/`doctor`. `dirijord-holder` owns the PTY master so sessions survive a daemon restart.
 
-### Swift packages
+> **A Rust port of the engine is in progress** in `diri/crates/diri-engine`, so that diri can run
+> on Linux and Windows. It is not shipped — the released app runs the Swift daemon above. See
+> [`diri/PORT.md`](diri/PORT.md) for what is done and what is left.
 
-| Target | Role |
-|---|---|
-| `DirijorCore` | Domain models (SessionRecord, status, attention, titles) and agent manifests |
-| `DirijorProtocol` | Control-channel NDJSON envelope + binary data-channel frame codec |
-| `DirijorClient` | `DaemonClient` + `SessionAttachment` actors |
-| `DirijorDetection` | JSON manifest engine + `StatusReducer` state machine |
-| `DirijorGit` / `DirijorMCP` / `DirijorDaemonKit` | Worktrees, MCP server, PTY/log/registry/IPC |
-| `DirijorHolderKit` / `CDirijorPTY` | PTY ownership that outlives the daemon |
+## Adding an agent
 
-## Build & run
+Agent support is data, not code. Each agent is one JSON file in
+`Sources/DirijorCore/Resources/manifests/` describing how to spawn it, how to resume, which keys
+approve or deny a prompt, and the screen rules that decide whether it is working, waiting, or
+done. Copy the closest existing manifest and adjust it — no Swift or Rust required. This is the
+easiest way to contribute.
 
-The app needs both toolchains: Rust 1.95 (pinned in `diri/rust-toolchain.toml`) and Swift 6
-with the Xcode command-line tools.
+## Building from source
+
+Needs both toolchains: Rust (pinned in `diri/rust-toolchain.toml`) and Swift 6 with the Xcode
+command-line tools. The first Rust build compiles GPUI from a pinned Zed revision and takes a
+while.
 
 ```sh
-# Engine
-swift build
-swift test
-
-# App
-cd diri
-cargo build
+swift build && swift test          # engine
+cd diri && cargo build             # app
 cargo run -p diri-app
 
-# Full bundle (builds the daemon, holder, and CLI into diri.app)
-diri/scripts/package.sh
+diri/scripts/package.sh            # full bundle
 diri/scripts/install-local.sh
 ```
 
-See [`diri/PACKAGING.md`](diri/PACKAGING.md) for signing and notarization,
-[`diri/NODE.md`](diri/NODE.md) for running agents on a remote VPS node, and
-[`diri/PERF.md`](diri/PERF.md) for the rendering performance gates.
+[`diri/PACKAGING.md`](diri/PACKAGING.md) covers signing and notarization,
+[`diri/UPDATING.md`](diri/UPDATING.md) the updater and release flow,
+[`diri/NODE.md`](diri/NODE.md) running agents on a remote VPS node.
 
-## Agent support
+## Contributing
 
-First-class status detection and resume: Claude Code and Codex. Cursor and Gemini run with
-partial support (see the manifests for what each one wires up); everything else runs as a
-generic terminal with running/exited status. Detection rules are data — they live in
-`Sources/DirijorCore/Resources/manifests/` and adding an agent is a JSON file, not code.
+See [CONTRIBUTING.md](CONTRIBUTING.md). Bug reports, fixes, and new agent manifests all welcome.
 
 ## License
 

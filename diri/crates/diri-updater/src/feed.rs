@@ -10,12 +10,12 @@
 //!   "releases": [
 //!     {
 //!       "version": "0.2.0",
-//!       "url": "https://dirijor-releases.crisemcr.workers.dev/diri/diri-0.2.0-universal.zip",
+//!       "url": "https://github.com/cristicretu/diri/releases/download/v0.2.0/diri-0.2.0-universal.zip",
 //!       "size": 48210944,
 //!       "sha256": "5f2e…",
 //!       "minimum_system_version": "15.0",
 //!       "published": "2026-07-26",
-//!       "notes_url": "https://dirijor-releases.crisemcr.workers.dev/diri/diri-0.2.0.html"
+//!       "notes_url": "https://github.com/cristicretu/diri/releases/download/v0.2.0/diri-0.2.0.html"
 //!     }
 //!   ]
 //! }
@@ -163,16 +163,16 @@ mod tests {
   "releases": [
     {
       "version": "0.2.0",
-      "url": "https://dirijor-releases.crisemcr.workers.dev/diri/diri-0.2.0-universal.zip",
+      "url": "https://github.com/cristicretu/diri/releases/download/v0.2.0/diri-0.2.0-universal.zip",
       "size": 48210944,
       "sha256": "3f786850e387550fdab836ed7e6dc881de23001b4f6d1f4e1a1e0c2a7b3c4d5e",
       "minimum_system_version": "15.0",
       "published": "2026-07-26",
-      "notes_url": "https://dirijor-releases.crisemcr.workers.dev/diri/diri-0.2.0.html"
+      "notes_url": "https://github.com/cristicretu/diri/releases/download/v0.2.0/diri-0.2.0.html"
     },
     {
       "version": "0.1.0",
-      "url": "https://dirijor-releases.crisemcr.workers.dev/diri/diri-0.1.0-universal.zip",
+      "url": "https://github.com/cristicretu/diri/releases/download/v0.2.0/diri-0.1.0-universal.zip",
       "size": 48102400,
       "sha256": "2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae",
       "minimum_system_version": "15.0",

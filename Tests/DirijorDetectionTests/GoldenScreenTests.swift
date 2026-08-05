@@ -185,6 +185,81 @@ import Testing
         #expect(obs?.state == .idle)
     }
 
+    // MARK: Aider
+    // Screens below are verbatim from live aider 0.86.2 PTY captures.
+
+    @Test func aiderCreateFileConfirm() {
+        let s = snap([
+            "hello",
+            "tokens: 601 sent, 8 received.",
+            "hello.txt",
+            "Create new file? (Y)es/(N)o [Yes]:",
+        ])
+        let obs = try! #require(engine.evaluate(s, manifestID: "aider"))
+        #expect(obs.state == .blockedPermission)
+        #expect(obs.matchedRuleID == "confirm-prompt")
+        #expect(obs.promptExcerpt?.contains("Create new file") == true)
+    }
+
+    @Test func aiderStartupWarningConfirm() {
+        let s = snap([
+            "You can skip this check with --no-show-model-warnings",
+            "https://aider.chat/docs/llms/warnings.html",
+            "Open documentation url for more info? (Y)es/(N)o/(D)on't ask again [Yes]:",
+        ])
+        let obs = engine.evaluate(s, manifestID: "aider")
+        #expect(obs?.state == .blockedPermission)
+    }
+
+    @Test func aiderRequestSpinner() {
+        let s = snap([
+            "> Create a file hello.txt containing exactly the word hi",
+            "        ░█ Waiting for openai/deepseek-v4-flash",
+        ])
+        let obs = engine.evaluate(s, manifestID: "aider")
+        #expect(obs?.state == .working)
+        #expect(obs?.matchedRuleID == "working-spinner")
+    }
+
+    @Test func aiderCommitSpinner() {
+        let s = snap([
+            "Applied edit to hello.txt",
+            "        █░ Generating commit message with openai/deepseek-v4-flash",
+        ])
+        let obs = engine.evaluate(s, manifestID: "aider")
+        #expect(obs?.state == .working)
+    }
+
+    @Test func aiderIdleBarePrompt() {
+        let s = snap([
+            "Commit 5e7632a feat: add hello.txt with 'hi' content",
+            "hello.txt",
+            ">  ",
+        ])
+        let obs = engine.evaluate(s, manifestID: "aider")
+        #expect(obs?.state == .idle)
+        #expect(obs?.matchedRuleID == "idle-prompt")
+    }
+
+    @Test func aiderChatModePrompt() {
+        let s = snap([
+            "Aider v0.86.2",
+            "ask>  ",
+        ])
+        let obs = engine.evaluate(s, manifestID: "aider")
+        #expect(obs?.state == .idle)
+    }
+
+    @Test func aiderStreamingMatchesNothingSoStateHolds() {
+        // Mid-stream there is no spinner and no prompt; the engine returns nil
+        // and the reducer holds the previous (working) state — by design.
+        let s = snap([
+            "hello.txt",
+            "hi",
+        ])
+        #expect(engine.evaluate(s, manifestID: "aider") == nil)
+    }
+
     @Test func unknownManifestReturnsNil() {
         #expect(engine.evaluate(snap(["x"]), manifestID: "nope") == nil)
     }

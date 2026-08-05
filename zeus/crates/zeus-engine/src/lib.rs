@@ -24,6 +24,7 @@ pub mod detect;
 pub mod git;
 pub mod hooks;
 pub mod log;
+pub mod mcp;
 pub mod pty;
 pub mod registry;
 pub mod screen;

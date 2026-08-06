@@ -7,7 +7,7 @@ use diri_ui::{FloatingSurface, Radius, SemanticColors, Typo};
 use gpui::{
     AnyElement, App, Context, CursorStyle, DragMoveEvent, Entity, FocusHandle, Focusable,
     FontWeight, KeyDownEvent, KeyUpEvent, Modifiers, ModifiersChangedEvent, MouseButton, Render,
-    Subscription, Task, Window, actions, deferred, div, prelude::*, px, rgba,
+    StyleRefinement, Subscription, Task, Window, actions, deferred, div, prelude::*, px, rgba,
 };
 
 use crate::AppServices;
@@ -1815,7 +1815,13 @@ impl Render for RootView {
                         .right(px(0.0))
                         .h_full()
                         .w(px(sidebar_width))
-                        .child(self.sidebar.clone()),
+                        // A reactive boundary: the sidebar re-renders on its
+                        // own notifies, not on the terminal's 60fps repaints.
+                        .child(
+                            self.sidebar
+                                .clone()
+                                .cached(StyleRefinement::default().size_full()),
+                        ),
                 )
             });
 
@@ -1882,7 +1888,11 @@ impl Render for RootView {
                                 .left(px(0.0))
                                 .h_full()
                                 .w(px(inspector_panel_width))
-                                .child(inspector.clone()),
+                                .child(
+                                    inspector
+                                        .clone()
+                                        .cached(StyleRefinement::default().size_full()),
+                                ),
                         ),
                 );
             }
@@ -1896,14 +1906,29 @@ impl Render for RootView {
         if let Some(confirmation) = self.close_confirmation(colors, cx) {
             root = root.child(confirmation);
         }
+        // Overlay views are cached reactive boundaries too: each subscribes to
+        // store changes itself, so the only thing these wrappers must do is
+        // stay out of the root flex row (absolute, zero-size at rest).
         if let Some(surfaces) = &self.session_surfaces {
-            root = root.child(surfaces.clone());
+            root = root.child(
+                surfaces
+                    .clone()
+                    .cached(StyleRefinement::default().absolute().inset_0()),
+            );
         }
         if let Some(surfaces) = &self.utility_surfaces {
-            root = root.child(surfaces.clone());
+            root = root.child(
+                surfaces
+                    .clone()
+                    .cached(StyleRefinement::default().absolute().inset_0()),
+            );
         }
         if let Some(navigation) = &self.navigation {
-            root = root.child(navigation.clone());
+            root = root.child(
+                navigation
+                    .clone()
+                    .cached(StyleRefinement::default().absolute().inset_0()),
+            );
         }
         if let Some(status) = self.status_banner(colors, cx) {
             root = root.child(status);

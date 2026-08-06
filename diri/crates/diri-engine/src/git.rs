@@ -275,6 +275,105 @@ pub fn remove_worktree(repo: &Path, worktree: &str, force: bool) -> std::io::Res
     Ok(())
 }
 
+/// The response stays below the NDJSON ceiling after base64 encoding.
+const MAX_PATCH_BYTES: usize = 2 * 1024 * 1024;
+
+/// The working tree's diff for a session cwd, against the repository's
+/// primary branch (merge-base) or plain HEAD.
+///
+/// One shell round trip, ported verbatim from `WorktreeDiffLoader`: validate
+/// the cwd, emit `root\0base_ref\0`, then stream tracked + staged + untracked
+/// changes through a hard byte cap. `xargs -0` keeps spaces and newlines in
+/// untracked filenames intact.
+pub fn working_diff(
+    cwd: &Path,
+    base: Option<&diri_proto::SessionDiffBase>,
+) -> std::io::Result<diri_proto::SessionReadDiffResult> {
+    let comparison = match base {
+        Some(diri_proto::SessionDiffBase::Head) => "head",
+        _ => "defaultBranch",
+    };
+    let quoted_cwd = crate::remote::shell_quote_path(&cwd.to_string_lossy());
+    let byte_limit = MAX_PATCH_BYTES + 1;
+    let script = format!(
+        r#"set -e
+cd {quoted_cwd}
+root=$(git rev-parse --show-toplevel)
+cd "$root"
+git status --porcelain=v1 -uno >/dev/null
+base_ref=HEAD
+base_commit=
+if git rev-parse --verify HEAD >/dev/null 2>&1; then
+  if [ "{comparison}" = head ]; then
+    base_commit=HEAD
+  else
+    origin_head=$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
+    base_ref=
+    for candidate in "$origin_head" origin/main main origin/master master; do
+      [ -n "$candidate" ] || continue
+      if git rev-parse --verify --quiet "${{candidate}}^{{commit}}" >/dev/null; then
+        base_ref="$candidate"
+        break
+      fi
+    done
+    if [ -n "$base_ref" ]; then
+      base_commit=$(git merge-base "$base_ref" HEAD 2>/dev/null || true)
+    fi
+    if [ -z "$base_commit" ]; then
+      base_ref=HEAD
+      base_commit=HEAD
+    fi
+  fi
+fi
+printf '%s\0%s\0' "$root" "$base_ref"
+(
+  if [ -n "$base_commit" ]; then
+    git diff --no-ext-diff --no-color --unified=3 "$base_commit" --
+  else
+    git diff --no-ext-diff --no-color --unified=3 --cached --
+    git diff --no-ext-diff --no-color --unified=3 --
+  fi
+  git ls-files --others --exclude-standard -z | \
+    xargs -0 -n 1 sh -c '
+      [ "$#" -eq 0 ] && exit 0
+      git diff --no-index --no-color --unified=3 -- /dev/null "$1"
+      code=$?
+      [ "$code" -eq 0 ] || [ "$code" -eq 1 ]
+    ' sh
+) | head -c {byte_limit}
+"#
+    );
+    let output = Command::new("sh").arg("-c").arg(&script).output()?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(std::io::Error::other(if detail.is_empty() {
+            "session cwd is not inside a Git repository".to_string()
+        } else {
+            format!("Git could not load changes: {detail}")
+        }));
+    }
+    let stdout = output.stdout;
+    let root_end = stdout
+        .iter()
+        .position(|&byte| byte == 0)
+        .ok_or_else(|| std::io::Error::other("git diff returned an invalid response"))?;
+    let base_end = stdout[root_end + 1..]
+        .iter()
+        .position(|&byte| byte == 0)
+        .map(|offset| root_end + 1 + offset)
+        .ok_or_else(|| std::io::Error::other("git diff returned an invalid response"))?;
+    let repo_root = String::from_utf8_lossy(&stdout[..root_end]).into_owned();
+    let base_ref = String::from_utf8_lossy(&stdout[root_end + 1..base_end]).into_owned();
+    let patch = &stdout[base_end + 1..];
+    let truncated = patch.len() > MAX_PATCH_BYTES;
+    Ok(diri_proto::SessionReadDiffResult {
+        patch: patch[..patch.len().min(MAX_PATCH_BYTES)].to_vec(),
+        repo_root,
+        truncated,
+        base_ref: Some(base_ref),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

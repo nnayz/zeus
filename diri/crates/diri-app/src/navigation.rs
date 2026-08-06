@@ -110,6 +110,10 @@ pub struct NavigationOverlay {
     cache_task: Option<Task<()>>,
     scan_task: Option<Task<()>>,
     rank_task: Option<Task<()>>,
+    /// This view is `.cached()` in RootView, so ambient window redraws no
+    /// longer reach it: store changes must notify it directly, or an open
+    /// palette's session rows go stale.
+    _store_changes: Option<Task<()>>,
 }
 
 impl EventEmitter<NavigationEvent> for NavigationOverlay {}
@@ -118,6 +122,19 @@ impl NavigationOverlay {
     pub fn new(runtime: Arc<StoreRuntime>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
         let _ = window;
+        let mut changes = runtime.changes();
+        let store_changes = cx.spawn(async move |this, cx| {
+            loop {
+                match changes.recv().await {
+                    Ok(()) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        if this.update(cx, |_, cx| cx.notify()).is_err() {
+                            return;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                }
+            }
+        });
         let mut overlay = Self {
             focus_handle,
             store: Arc::clone(&runtime.store),
@@ -135,6 +152,7 @@ impl NavigationOverlay {
             cache_task: None,
             scan_task: None,
             rank_task: None,
+            _store_changes: Some(store_changes),
         };
         // Warm at launch, the way Zed's worktree scan does: the cache makes the
         // index usable immediately and the scan refreshes it behind that, so the
@@ -163,6 +181,7 @@ impl NavigationOverlay {
             cache_task: None,
             scan_task: None,
             rank_task: None,
+            _store_changes: None,
         }
     }
 

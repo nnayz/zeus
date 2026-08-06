@@ -64,6 +64,9 @@ pub struct ScreenObservation {
 /// Immutable manifest storage, built once and shared across sessions.
 pub struct ManifestEngine {
     manifests: HashMap<String, Manifest>,
+    /// Each manifest's `agent` object verbatim, for wire surfaces that hand
+    /// the descriptor to clients (`agent.readiness` is the agent catalog).
+    raw_agents: HashMap<String, serde_json::Value>,
 }
 
 impl ManifestEngine {
@@ -73,7 +76,13 @@ impl ManifestEngine {
                 .into_iter()
                 .map(|manifest| (manifest.id.clone(), manifest))
                 .collect(),
+            raw_agents: HashMap::new(),
         }
+    }
+
+    /// The manifest's `agent` JSON exactly as shipped.
+    pub fn raw_agent(&self, id: &str) -> Option<&serde_json::Value> {
+        self.raw_agents.get(id)
     }
 
     /// Loads every `*.json` in `dir`, later ids replacing earlier ones.
@@ -91,20 +100,33 @@ impl ManifestEngine {
             .collect();
         entries.sort();
 
+        let mut raw_agents = HashMap::new();
         for path in entries {
             let name = path
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_default();
-            match std::fs::read(&path)
-                .ok()
-                .and_then(|bytes| serde_json::from_slice::<Manifest>(&bytes).ok())
+            let bytes = std::fs::read(&path).ok();
+            match bytes
+                .as_deref()
+                .and_then(|bytes| serde_json::from_slice::<Manifest>(bytes).ok())
             {
-                Some(manifest) => manifests.push(manifest),
+                Some(manifest) => {
+                    if let Some(raw) = bytes
+                        .as_deref()
+                        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(bytes).ok())
+                        .and_then(|mut value| value.get_mut("agent").map(serde_json::Value::take))
+                    {
+                        raw_agents.insert(manifest.id.clone(), raw);
+                    }
+                    manifests.push(manifest);
+                }
                 None => failed.push(name),
             }
         }
-        Ok((Self::new(manifests), failed))
+        let mut engine = Self::new(manifests);
+        engine.raw_agents = raw_agents;
+        Ok((engine, failed))
     }
 
     pub fn manifest(&self, id: &str) -> Option<&Manifest> {

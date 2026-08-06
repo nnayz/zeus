@@ -358,6 +358,23 @@ impl ControlServer {
             Method::WORKTREE_LIST => self.worktree_list(params),
             Method::WORKTREE_REMOVE => self.worktree_remove(params),
             Method::EVENTS_WAIT => self.events_wait(params),
+            Method::HOOK_REPORT => self.hook_report(params),
+            Method::SESSION_RESUME => self.session_resume(params),
+            Method::SESSION_RESUME_FROM_HISTORY => self.session_resume_from_history(params),
+            Method::SESSION_REOPEN_LAST => self.session_reopen_last(),
+            Method::AGENT_READINESS => self.agent_readiness(),
+            Method::PROJECT_ADD => self.project_add(params),
+            Method::SESSION_READ_DIFF => self.session_read_diff(params),
+            Method::SESSION_HIBERNATE => self.session_hibernate(params),
+            Method::SESSION_WAKE => self.session_wake(params),
+            Method::DAEMON_PREPARE_SHUTDOWN => self.daemon_prepare_shutdown(),
+            Method::DAEMON_SHUTDOWN => self.daemon_shutdown(),
+            // Ownership arbitration and the governor's active-client hinting
+            // are desktop/mobile features this engine does not model yet;
+            // accepting them keeps clients on their happy path.
+            Method::SESSION_SET_OWNER | Method::CLIENT_SET_ACTIVE | Method::GOVERNOR_CONFIGURE => {
+                Ok(json!({}))
+            }
             other => Err(ControlError::not_found(format!(
                 "method {other:?} is not implemented by this engine yet"
             ))),
@@ -651,6 +668,295 @@ impl ControlServer {
         Ok(json!({}))
     }
 
+    /// A hook or notify callback from inside an agent session: the signal
+    /// that makes hook-authority agents' status precise. Parsed by the same
+    /// rules the Swift daemon used, metadata folded into the record, signal
+    /// fed to the session's reducer.
+    fn hook_report(&self, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
+        let p: diri_proto::HookReportParams = decode(params)?;
+        let Some(session_id) = p.dirijor_session_id else {
+            return Ok(json!({}));
+        };
+        let parsed = match p.kind.as_str() {
+            "claude-hook" => p.event.as_deref().and_then(|event| {
+                crate::hooks::parse_claude_hook(event, &p.payload, std::time::SystemTime::now())
+            }),
+            "codex-notify" => crate::hooks::parse_codex_notify(&p.payload),
+            _ => None,
+        };
+        let Some((signal, meta)) = parsed else {
+            return Ok(json!({}));
+        };
+        let mut registry = self.registry.lock().map_err(poisoned)?;
+        let changed = registry.apply_hook_metadata(&session_id.0, &meta);
+        if let Some(session) = registry.get(&session_id.0) {
+            session.feed_signal(signal);
+        }
+        if changed {
+            let _ = registry.persist();
+        }
+        self.publish_updated(&registry, &session_id.0);
+        Ok(json!({}))
+    }
+
+    /// Revives an exited session's conversation under the SAME record id.
+    fn session_resume(&self, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
+        let p: diri_proto::SessionIdParams = decode(params)?;
+        let mut registry = self.registry.lock().map_err(poisoned)?;
+        let record = registry
+            .records()
+            .into_iter()
+            .find(|record| record.id.0 == p.session_id.0)
+            .ok_or_else(|| ControlError::not_found(p.session_id.0.clone()))?;
+        if registry.get(&p.session_id.0).is_some() {
+            // Already live: resuming is a no-op, not an error.
+            return serde_json::to_value(&record)
+                .map_err(|error| ControlError::internal(error.to_string()));
+        }
+        let spec = self.resume_spec(
+            &registry,
+            &record.id.0,
+            record.kind.id(),
+            &record.cwd,
+            record.agent_session_id.as_deref(),
+        )?;
+        registry
+            .respawn(spec)
+            .map_err(|error| ControlError::internal(error.to_string()))?;
+        let _ = registry.persist();
+        self.publish_updated(&registry, &p.session_id.0);
+        let record = registry
+            .records()
+            .into_iter()
+            .find(|record| record.id.0 == p.session_id.0)
+            .ok_or_else(|| ControlError::internal("the resumed session vanished"))?;
+        serde_json::to_value(&record).map_err(|error| ControlError::internal(error.to_string()))
+    }
+
+    /// Revives a conversation found in an agent's own history: a NEW record
+    /// whose agent-side id is the transcript's.
+    fn session_resume_from_history(
+        &self,
+        params: Option<JsonValue>,
+    ) -> Result<JsonValue, ControlError> {
+        let p: diri_proto::ResumeFromHistoryParams = decode(params)?;
+        let mut registry = self.registry.lock().map_err(poisoned)?;
+        let id = next_session_id();
+        let kind = p.entry.kind.id().to_string();
+        let mut record = new_record(&id, &kind, &p.entry.cwd);
+        record.agent_session_id = Some(p.entry.id.clone());
+        record.transcript_path = Some(p.entry.transcript_path.clone());
+        if let Some(title) = &p.entry.title {
+            record.title = title.clone();
+            record.title_source = diri_proto::TitleSource::FirstPrompt;
+        }
+        let spec = self.resume_spec(&registry, &id, &kind, &p.entry.cwd, Some(&p.entry.id))?;
+        registry
+            .spawn(spec, record)
+            .map_err(|error| ControlError::internal(error.to_string()))?;
+        let _ = registry.persist();
+        self.publish_updated(&registry, &id);
+        let record = registry
+            .records()
+            .into_iter()
+            .find(|record| record.id.0 == id)
+            .ok_or_else(|| ControlError::internal("the resumed session vanished"))?;
+        serde_json::to_value(&record).map_err(|error| ControlError::internal(error.to_string()))
+    }
+
+    /// The spawn spec that re-enters a conversation: the manifest's resume
+    /// argv plus the same hook/MCP wiring a fresh spawn gets — a resumed
+    /// Claude must not silently lose status detection or the dirijor tools.
+    fn resume_spec(
+        &self,
+        registry: &Registry,
+        id: &str,
+        kind: &str,
+        cwd: &str,
+        agent_session_id: Option<&str>,
+    ) -> Result<crate::session::SessionSpec, ControlError> {
+        let engine = registry.engine();
+        let manifest = engine
+            .manifest(kind)
+            .ok_or_else(|| ControlError::not_found(format!("no manifest for agent {kind}")))?;
+        let descriptor = manifest.agent.clone().unwrap_or_default();
+        let binary = descriptor.binary.clone().ok_or_else(|| {
+            ControlError::bad_request(format!("agent {kind} declares no binary"))
+        })?;
+        let tail = descriptor.resume_args(agent_session_id).ok_or_else(|| {
+            ControlError::bad_request(format!("agent {kind} does not support resume"))
+        })?;
+
+        let inherited: Vec<(String, String)> = std::env::vars().collect();
+        let mut pty = descriptor
+            .spawn_spec(Path::new(cwd), inherited, &[])
+            .ok_or_else(|| ControlError::internal("resume spec without a binary"))?;
+        pty.argv = vec![binary];
+        pty.argv.extend(descriptor.spawn_args.iter().cloned());
+        pty.argv.extend(tail);
+        if let Some(injection) = &self.injection {
+            pty.env
+                .push((crate::inject::SESSION_ID_ENV.into(), id.to_string()));
+            pty.env.push((
+                crate::inject::SOCKET_ENV.into(),
+                self.socket_path.to_string_lossy().into_owned(),
+            ));
+            pty.env.push((
+                crate::inject::CLI_ENV.into(),
+                injection.cli_path.to_string_lossy().into_owned(),
+            ));
+            // Only the appendable flag mechanisms replay on resume, exactly
+            // as in Swift: Codex's global `-c` overrides must precede the
+            // resume SUBCOMMAND and are deliberately not replayed.
+            let claude_only = crate::agent::InjectionSpec {
+                claude_hooks: descriptor.injection.claude_hooks,
+                claude_mcp: descriptor.injection.claude_mcp,
+                ..Default::default()
+            };
+            pty.argv.extend(crate::inject::injection_args(
+                &claude_only,
+                &injection.inject_dir,
+                &injection.cli_path,
+            ));
+        }
+        Ok(crate::session::SessionSpec {
+            id: id.to_string(),
+            pty,
+            manifest_id: kind.to_string(),
+            authority: descriptor.authority(),
+            logs_dir: self.logs_dir.clone(),
+            holder: self.holder.clone(),
+        })
+    }
+
+    /// Pops the most recently closed session whose folder still exists and
+    /// re-lists it (exited), ready for the resume path.
+    fn session_reopen_last(&self) -> Result<JsonValue, ControlError> {
+        let mut registry = self.registry.lock().map_err(poisoned)?;
+        let record = registry
+            .reopen_last_closed()
+            .ok_or_else(|| ControlError::bad_request("no recently closed session"))?;
+        let _ = registry.persist();
+        self.publish_updated(&registry, &record.id.0);
+        serde_json::to_value(&record).map_err(|error| ControlError::internal(error.to_string()))
+    }
+
+    /// Which agent binaries actually resolve, plus each manifest's descriptor
+    /// — this doubles as the agent catalog the client's picker renders.
+    fn agent_readiness(&self) -> Result<JsonValue, ControlError> {
+        let registry = self.registry.lock().map_err(poisoned)?;
+        let engine = registry.engine();
+        let mut agents = Vec::new();
+        for id in engine.ids() {
+            let Some(manifest) = engine.manifest(id) else {
+                continue;
+            };
+            let Some(descriptor) = &manifest.agent else {
+                continue;
+            };
+            let Some(binary) = &descriptor.binary else {
+                continue;
+            };
+            agents.push(json!({
+                "kind": id,
+                "binary": binary,
+                "path": resolve_on_path(binary),
+                "descriptor": engine.raw_agent(id),
+            }));
+        }
+        Ok(json!({ "agents": agents }))
+    }
+
+    fn project_add(&self, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
+        let p: diri_proto::ProjectAddParams = decode(params)?;
+        let mut registry = self.registry.lock().map_err(poisoned)?;
+        let project = registry.add_project(&p.root);
+        let _ = registry.persist();
+        Ok(project)
+    }
+
+    /// The working tree's diff against a base ref, for the app's diff pane.
+    fn session_read_diff(&self, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
+        let p: diri_proto::SessionReadDiffParams = decode(params)?;
+        let cwd = {
+            let registry = self.registry.lock().map_err(poisoned)?;
+            registry
+                .records()
+                .into_iter()
+                .find(|record| record.id.0 == p.session_id.0)
+                .map(|record| record.cwd)
+                .ok_or_else(|| ControlError::not_found(p.session_id.0.clone()))?
+        };
+        let result = crate::git::working_diff(Path::new(&cwd), p.base.as_ref())
+            .map_err(io_control_error)?;
+        encode(&result)
+    }
+
+    /// SIGSTOPs the session's whole tree and records it as hibernated. The
+    /// PTY and holder stay alive; wake is one SIGCONT away.
+    fn session_hibernate(&self, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
+        let p: diri_proto::SessionIdParams = decode(params)?;
+        let mut registry = self.registry.lock().map_err(poisoned)?;
+        let tree = {
+            let session = registry
+                .get(&p.session_id.0)
+                .ok_or_else(|| ControlError::not_found(p.session_id.0.clone()))?;
+            session
+                .signal_tree(libc::SIGSTOP)
+                .map_err(|error| ControlError::internal(error.to_string()))?
+        };
+        registry.set_hibernation(
+            &p.session_id.0,
+            Some(diri_proto::HibernationInfo {
+                since: std::time::SystemTime::now().into(),
+                reason: diri_proto::HibernationReason::Manual,
+                tree_pids: tree.iter().map(|(pid, _)| *pid).collect(),
+                tree_start_times: Some(tree.into_iter().collect()),
+            }),
+        );
+        let _ = registry.persist();
+        self.publish_updated(&registry, &p.session_id.0);
+        Ok(json!({}))
+    }
+
+    fn session_wake(&self, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
+        let p: diri_proto::SessionIdParams = decode(params)?;
+        let mut registry = self.registry.lock().map_err(poisoned)?;
+        {
+            let session = registry
+                .get(&p.session_id.0)
+                .ok_or_else(|| ControlError::not_found(p.session_id.0.clone()))?;
+            session
+                .signal_tree(libc::SIGCONT)
+                .map_err(|error| ControlError::internal(error.to_string()))?;
+        }
+        registry.set_hibernation(&p.session_id.0, None);
+        let _ = registry.persist();
+        self.publish_updated(&registry, &p.session_id.0);
+        Ok(json!({}))
+    }
+
+    fn daemon_prepare_shutdown(&self) -> Result<JsonValue, ControlError> {
+        let registry = self.registry.lock().map_err(poisoned)?;
+        let _ = registry.persist();
+        Ok(json!({}))
+    }
+
+    /// Ack first, then exit: the response has to flush before the process
+    /// dies, so the client sees a clean reply followed by a socket drop and
+    /// relaunches the fresh binary.
+    fn daemon_shutdown(&self) -> Result<JsonValue, ControlError> {
+        {
+            let registry = self.registry.lock().map_err(poisoned)?;
+            let _ = registry.persist();
+        }
+        std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            std::process::exit(0);
+        });
+        Ok(json!({}))
+    }
+
     /// Publishes `session.updated` with the session's current record.
     fn publish_updated(&self, registry: &Registry, id: &str) {
         if let Some(record) = registry
@@ -817,6 +1123,36 @@ fn decode<T: serde::de::DeserializeOwned>(params: Option<JsonValue>) -> Result<T
 
 fn encode<T: serde::Serialize>(value: &T) -> Result<JsonValue, ControlError> {
     serde_json::to_value(value).map_err(|error| ControlError::internal(error.to_string()))
+}
+
+/// Resolves a binary on the daemon's PATH, as the readiness check needs.
+fn resolve_on_path(binary: &str) -> Option<String> {
+    if binary.contains('/') {
+        return Path::new(binary)
+            .exists()
+            .then(|| binary.to_string());
+    }
+    let path = std::env::var("PATH").ok()?;
+    for dir in path.split(':') {
+        let candidate = Path::new(dir).join(binary);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if std::fs::metadata(&candidate)
+                .map(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+                .unwrap_or(false)
+            {
+                return Some(candidate.to_string_lossy().into_owned());
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            if candidate.is_file() {
+                return Some(candidate.to_string_lossy().into_owned());
+            }
+        }
+    }
+    None
 }
 
 fn io_control_error(error: std::io::Error) -> ControlError {
@@ -1082,6 +1418,169 @@ mod tests {
         ));
         let list = ok_of(call(&server, "session.list", None));
         assert_eq!(list["sessions"].as_array().map(Vec::len), Some(0));
+    }
+
+    #[test]
+    fn a_hook_report_folds_identity_into_the_record() {
+        let temp = tempfile::tempdir().expect("temp");
+        let registry = Arc::new(Mutex::new(Registry::new(
+            engine(),
+            temp.path().join("state.json"),
+        )));
+        registry
+            .lock()
+            .expect("registry")
+            .insert_record(test_record("s_hook"));
+        let server = ControlServer::new(registry, temp.path().join("daemon.sock"));
+
+        ok_of(call(
+            &server,
+            "hook.report",
+            Some(json!({
+                "kind": "claude-hook",
+                "dirijorSessionID": "s_hook",
+                "event": "UserPromptSubmit",
+                "payload": {
+                    "session_id": "uuid-from-hook",
+                    "transcript_path": "/tmp/t.jsonl",
+                    "prompt": "fix the flaky test in ci",
+                },
+            })),
+        ));
+
+        let list = ok_of(call(&server, "session.list", None));
+        let record = &list["sessions"][0];
+        assert_eq!(record["agentSessionID"], "uuid-from-hook");
+        assert_eq!(record["transcriptPath"], "/tmp/t.jsonl");
+        assert_eq!(
+            record["title"], "fix the flaky test in ci",
+            "the first prompt titles a placeholder session"
+        );
+    }
+
+    #[test]
+    fn project_ids_are_deterministic_and_idempotent() {
+        let temp = tempfile::tempdir().expect("temp");
+        let server = server(temp.path());
+        let first = ok_of(call(
+            &server,
+            "project.add",
+            Some(json!({ "root": "/Users/x/code/app" })),
+        ));
+        let second = ok_of(call(
+            &server,
+            "project.add",
+            Some(json!({ "root": "/Users/x/code/app" })),
+        ));
+        assert_eq!(first["id"], second["id"], "re-adding never duplicates");
+        assert!(
+            first["id"].as_str().expect("id").starts_with("p_"),
+            "{first}"
+        );
+        assert_eq!(first["name"], "app");
+        let list = ok_of(call(&server, "session.list", None));
+        assert_eq!(list["projects"].as_array().map(Vec::len), Some(1));
+    }
+
+    #[test]
+    fn agent_readiness_serves_the_catalog_with_descriptors() {
+        let temp = tempfile::tempdir().expect("temp");
+        let server = server(temp.path());
+        let result = ok_of(call(&server, "agent.readiness", None));
+        let agents = result["agents"].as_array().expect("agents");
+        assert!(!agents.is_empty());
+        let claude = agents
+            .iter()
+            .find(|agent| agent["kind"] == "claude-code")
+            .expect("claude in the catalog");
+        assert_eq!(claude["binary"], "claude");
+        assert!(
+            claude["descriptor"]["injection"]["claudeHooks"]
+                .as_bool()
+                .unwrap_or(false),
+            "the raw manifest descriptor rides along: {claude}"
+        );
+    }
+
+    #[test]
+    fn a_removed_session_can_be_reopened() {
+        let temp = tempfile::tempdir().expect("temp");
+        let registry = Arc::new(Mutex::new(Registry::new(
+            engine(),
+            temp.path().join("state.json"),
+        )));
+        registry
+            .lock()
+            .expect("registry")
+            .insert_record(test_record("s_gone"));
+        let server = ControlServer::new(registry, temp.path().join("daemon.sock"));
+
+        ok_of(call(
+            &server,
+            "session.remove",
+            Some(json!({ "sessionID": "s_gone" })),
+        ));
+        let list = ok_of(call(&server, "session.list", None));
+        assert_eq!(list["sessions"].as_array().map(Vec::len), Some(0));
+
+        let reopened = ok_of(call(&server, "session.reopen_last", None));
+        assert_eq!(reopened["id"], "s_gone");
+        let list = ok_of(call(&server, "session.list", None));
+        assert_eq!(list["sessions"].as_array().map(Vec::len), Some(1));
+
+        // The stack is spent.
+        let empty = err_of(call(&server, "session.reopen_last", None));
+        assert_eq!(empty.code, "bad_request");
+    }
+
+    #[test]
+    fn read_diff_reports_working_changes() {
+        let temp = tempfile::tempdir().expect("temp");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("mkdir");
+        let git = |arguments: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(arguments)
+                .current_dir(&repo)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .status()
+                .expect("git");
+            assert!(status.success(), "git {arguments:?}");
+        };
+        git(&["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("file.txt"), "original\n").expect("write");
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "root"]);
+        std::fs::write(repo.join("file.txt"), "changed by the session\n").expect("write");
+
+        let registry = Arc::new(Mutex::new(Registry::new(
+            engine(),
+            temp.path().join("state.json"),
+        )));
+        let mut record = test_record("s_diff");
+        record.cwd = repo.to_string_lossy().into_owned();
+        registry.lock().expect("registry").insert_record(record);
+        let server = ControlServer::new(registry, temp.path().join("daemon.sock"));
+
+        let result = ok_of(call(
+            &server,
+            "session.read_diff",
+            Some(json!({ "sessionID": "s_diff" })),
+        ));
+        assert_eq!(result["truncated"], false);
+        // The patch travels base64-encoded, as the Swift daemon sends it.
+        use base64::Engine as _;
+        let patch = base64::engine::general_purpose::STANDARD
+            .decode(result["patch"].as_str().expect("patch"))
+            .expect("base64");
+        let patch = String::from_utf8_lossy(&patch);
+        assert!(
+            patch.contains("changed by the session"),
+            "the working change is in the patch: {patch}"
+        );
     }
 
     #[test]

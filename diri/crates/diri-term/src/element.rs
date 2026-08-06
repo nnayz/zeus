@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant};
@@ -67,6 +68,43 @@ struct ElementSharedState {
     find_spans: Mutex<Vec<FindSpan>>,
     modes: Mutex<TerminalModes>,
     scroll_router: Mutex<ScrollRouter>,
+    history_lines: Mutex<HistoryLineCache>,
+}
+
+/// Shaped lines for history rows, keyed by absolute row. Fetched history rows
+/// never change, so their shaping survives across scrolled frames instead of
+/// being redone per frame; the map follows the viewport's fetch cache for
+/// content invalidation.
+#[derive(Default)]
+struct HistoryLineCache {
+    key: Option<HistoryShapeKey>,
+    cache_seq: Option<u64>,
+    lines: HashMap<i64, ShapedLine>,
+}
+
+/// Everything shaping depends on besides the cells themselves. Row position is
+/// deliberately absent: a `ShapedLine` is position-independent and stays valid
+/// as a history row slides through the window.
+#[derive(Clone, Copy, Eq, PartialEq)]
+struct HistoryShapeKey {
+    theme_signature: u64,
+    font_id: FontId,
+    font_size_bits: u32,
+    cell_width_bits: u32,
+    visible_cols: usize,
+}
+
+impl HistoryLineCache {
+    const MAX_ROWS: usize = 1024;
+
+    fn validate(&mut self, key: HistoryShapeKey, cache_seq: Option<u64>) {
+        if self.key != Some(key) || self.cache_seq != cache_seq || self.lines.len() > Self::MAX_ROWS
+        {
+            self.lines.clear();
+            self.key = Some(key);
+            self.cache_seq = cache_seq;
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -132,6 +170,7 @@ impl TerminalElement {
                 find_spans: Mutex::new(Vec::new()),
                 modes: Mutex::new(TerminalModes::default()),
                 scroll_router: Mutex::new(ScrollRouter::default()),
+                history_lines: Mutex::new(HistoryLineCache::default()),
             }),
             theme: TermTheme::default(),
             font: terminal_font,
@@ -601,7 +640,10 @@ impl Element for TerminalElement {
             usize::from(grid_rows).min(usize::from(metrics.rows_for_height(bounds.size.height)));
         let visible_cols =
             usize::from(grid_cols).min(usize::from(metrics.cols_for_width(bounds.size.width)));
-        let viewport = mutex_lock(&self.shared.viewport).clone();
+        // Hold the viewport lock for the whole prepaint instead of deep-cloning
+        // it: every party that touches these mutexes runs on the main thread,
+        // and the clone copied the entire fetched-history cell cache per frame.
+        let viewport = mutex_lock(&self.shared.viewport);
         let mut background_quads = vec![fill(bounds, self.theme.background)];
         let mut decoration_quads = Vec::new();
         let mut overlay_quads = Vec::new();
@@ -611,23 +653,63 @@ impl Element for TerminalElement {
         let cache_misses;
 
         if viewport.view_offset() > 0 {
-            // History browsing already composes owned rows; it is interactive
-            // and uncommon, so prepare that viewport directly. Returning live
-            // forces one complete cache re-seed.
+            // History browsing composes owned rows per frame; quads are cheap
+            // arithmetic, but shaping is not, so shaped lines are reused from
+            // the absolute-row cache. Returning live still forces one complete
+            // live-cache re-seed.
             *mutex_lock(&self.shared.render_context) = None;
-            let snapshot = read_lock(&self.buffer).clone();
-            cursor = snapshot.cursor;
-            let composed_rows = viewport.compose(&snapshot, visible_rows);
-            for (row_index, row) in composed_rows.into_iter().enumerate() {
-                let cells = row[..visible_cols.min(row.len())].to_vec();
-                let prepared =
-                    self.prepare_row(cells, row_index as u16, bounds.origin, metrics, window);
-                background_quads.extend(prepared.background_quads);
-                decoration_quads.extend(prepared.decoration_quads);
-                lines.push((row_index as u16, prepared.line));
+            let buffer = read_lock(&self.buffer);
+            cursor = buffer.cursor;
+            let key = HistoryShapeKey {
+                theme_signature: self.theme.signature(),
+                font_id: metrics.font_id,
+                font_size_bits: f32::from(self.font_size).to_bits(),
+                cell_width_bits: f32::from(metrics.cell_width).to_bits(),
+                visible_cols,
+            };
+            let mut history = mutex_lock(&self.shared.history_lines);
+            history.validate(key, viewport.cache_seq());
+            let mut hits = 0u64;
+            for row_index in 0..visible_rows {
+                let absolute = viewport.absolute_row(row_index);
+                let mut cells = viewport.window_row(&buffer, row_index);
+                cells.truncate(visible_cols);
+                append_background_quads(
+                    &cells,
+                    row_index as u16,
+                    bounds.origin,
+                    metrics,
+                    self.theme,
+                    &mut background_quads,
+                );
+                append_decoration_quads(
+                    &cells,
+                    row_index as u16,
+                    bounds.origin,
+                    metrics,
+                    self.theme,
+                    &mut decoration_quads,
+                );
+                let is_history = absolute < viewport.live_start_row();
+                let line = if let Some(line) =
+                    is_history.then(|| history.lines.get(&absolute)).flatten()
+                {
+                    hits += 1;
+                    line.clone()
+                } else {
+                    let line = self.shape_row(&cells, metrics, window);
+                    // A row the viewport has not fetched yet composes as
+                    // blank; caching that would pin the blank on screen after
+                    // the fetch lands.
+                    if is_history && viewport.cached_row(absolute).is_some() {
+                        history.lines.insert(absolute, line.clone());
+                    }
+                    line
+                };
+                lines.push((row_index as u16, line));
             }
-            cache_hits = 0;
-            cache_misses = visible_rows as u64;
+            cache_hits = hits;
+            cache_misses = (visible_rows as u64).saturating_sub(hits);
         } else {
             let context = RowRenderContext {
                 theme_signature: self.theme.signature(),

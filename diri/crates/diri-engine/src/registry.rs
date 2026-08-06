@@ -45,6 +45,8 @@ pub struct Registry {
     /// Carried through untouched: this engine has no project model yet, and
     /// dropping the key would erase the Swift daemon's projects on first write.
     projects: Vec<serde_json::Value>,
+    /// Sessions the user closed, newest last — the "reopen closed tab" stack.
+    recently_closed: Vec<SessionRecord>,
     state_file: PathBuf,
 }
 
@@ -55,6 +57,7 @@ impl Registry {
             sessions: HashMap::new(),
             records: HashMap::new(),
             projects: Vec::new(),
+            recently_closed: Vec::new(),
             state_file: state_file.into(),
         }
     }
@@ -257,12 +260,109 @@ impl Registry {
         if self.sessions.contains_key(id) {
             let _ = self.terminate(id, std::time::Duration::from_millis(500));
         }
-        if self.records.remove(id).is_none() {
+        let Some(record) = self.records.remove(id) else {
             return Err(not_found(id));
+        };
+        self.recently_closed.push(record);
+        if self.recently_closed.len() > 10 {
+            self.recently_closed.remove(0);
         }
         self.sessions.remove(id);
         let _ = std::fs::remove_file(logs_dir.join(format!("{id}.bin")));
         Ok(())
+    }
+
+    /// Pops the most recently closed session whose folder still exists (a
+    /// remote cwd can't be checked locally, so it always qualifies) and
+    /// re-lists it. The caller drives the resume path from there.
+    pub fn reopen_last_closed(&mut self) -> Option<SessionRecord> {
+        while let Some(record) = self.recently_closed.pop() {
+            if record.host.is_none() && !Path::new(&record.cwd).exists() {
+                continue; // the folder is gone; try the next candidate
+            }
+            self.records.insert(record.id.0.clone(), record.clone());
+            return Some(record);
+        }
+        None
+    }
+
+    /// Respawns a session under an EXISTING record — the resume path.
+    pub fn respawn(&mut self, spec: SessionSpec) -> std::io::Result<()> {
+        let id = spec.id.clone();
+        if !self.records.contains_key(&id) {
+            return Err(not_found(&id));
+        }
+        let session = Session::spawn(spec, Arc::clone(&self.engine))?;
+        self.sessions.insert(id.clone(), session);
+        let record = self.records.get_mut(&id).expect("checked above");
+        record.status = SessionStatus::Starting;
+        record.needs_input = None;
+        record.updated_at = DateMillis::from(std::time::SystemTime::now());
+        Ok(())
+    }
+
+    /// Folds identity a hook payload carried into the record: the agent-side
+    /// conversation id (what makes resume possible), the live transcript path
+    /// (it MOVES when the agent enters a worktree), and a first-prompt title
+    /// when nothing better has been assigned. Returns whether anything
+    /// changed.
+    pub fn apply_hook_metadata(&mut self, id: &str, meta: &crate::hooks::HookMetadata) -> bool {
+        let Some(record) = self.records.get_mut(id) else {
+            return false;
+        };
+        let mut changed = false;
+        if let Some(agent_id) = &meta.agent_session_id
+            && record.agent_session_id.as_ref() != Some(agent_id)
+        {
+            record.agent_session_id = Some(agent_id.clone());
+            record.resumability = diri_proto::Resumability::Live;
+            changed = true;
+        }
+        if let Some(transcript) = &meta.transcript_path
+            && record.transcript_path.as_ref() != Some(transcript)
+        {
+            record.transcript_path = Some(transcript.clone());
+            changed = true;
+        }
+        if let Some(title) = &meta.first_prompt_title
+            && record.title_source == TitleSource::Placeholder
+        {
+            record.title = title.clone();
+            record.title_source = TitleSource::FirstPrompt;
+            changed = true;
+        }
+        if changed {
+            record.updated_at = DateMillis::from(std::time::SystemTime::now());
+        }
+        changed
+    }
+
+    pub fn set_hibernation(&mut self, id: &str, info: Option<diri_proto::HibernationInfo>) {
+        if let Some(record) = self.records.get_mut(id) {
+            record.hibernation = info;
+            record.updated_at = DateMillis::from(std::time::SystemTime::now());
+        }
+    }
+
+    /// Upserts a project by its deterministic root-derived id and returns it
+    /// as wire JSON. The id rule matches Swift's `ProjectID(root:)` FNV-1a,
+    /// so re-adding a folder either engine already listed never duplicates.
+    pub fn add_project(&mut self, root: &str) -> serde_json::Value {
+        let id = project_id(root);
+        if let Some(existing) = self
+            .projects
+            .iter()
+            .find(|project| project.get("id").and_then(|value| value.as_str()) == Some(&id))
+        {
+            return existing.clone();
+        }
+        let name = Path::new(root)
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| root.to_string());
+        let project = serde_json::json!({ "id": id, "root": root, "name": name });
+        self.projects.push(project.clone());
+        project
     }
 
     pub fn rename(&mut self, id: &str, title: &str) -> std::io::Result<()> {
@@ -341,6 +441,19 @@ impl Registry {
 
 fn not_found(id: &str) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::NotFound, format!("no session {id}"))
+}
+
+/// Swift's `ProjectID(root:)`: FNV-1a-shaped hash over the root, low 48 bits
+/// as hex. The multiplier is Swift's literal `0x1000_0000_01b3` — NOT the
+/// classic FNV prime (one extra zero) — and must stay byte-identical or the
+/// same folder gets a second project id after an engine switch.
+fn project_id(root: &str) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in root.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_1000_0000_01B3);
+    }
+    format!("p_{:012x}", hash & 0xFFFF_FFFF_FFFF)
 }
 
 #[cfg(test)]

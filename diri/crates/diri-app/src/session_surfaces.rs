@@ -18,7 +18,7 @@ use diri_ui::{
 };
 use gpui::{
     AnyElement, BoxShadow, ClickEvent, Context, Entity, FocusHandle, FontWeight, KeyDownEvent,
-    KeyUpEvent, ModifiersChangedEvent, MouseButton, Render, SharedString, Window, div, point,
+    KeyUpEvent, ModifiersChangedEvent, MouseButton, Render, SharedString, Task, Window, div, point,
     prelude::*, px, rgba,
 };
 
@@ -27,15 +27,32 @@ pub struct SessionSurfaces {
     focus_handle: FocusHandle,
     resident_previews: HashMap<SessionId, TerminalElement>,
     status_glyphs: HashMap<(SessionId, u16, diri_ui::AgentKind), Entity<StatusGlyph>>,
+    /// This view is `.cached()` in RootView, so ambient window redraws no
+    /// longer reach it: store changes must notify it directly.
+    _store_changes: Task<()>,
 }
 
 impl SessionSurfaces {
     pub fn new(runtime: Arc<StoreRuntime>, cx: &mut Context<Self>) -> Self {
+        let mut changes = runtime.changes();
+        let store_changes = cx.spawn(async move |this, cx| {
+            loop {
+                match changes.recv().await {
+                    Ok(()) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        if this.update(cx, |_, cx| cx.notify()).is_err() {
+                            return;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                }
+            }
+        });
         Self {
             store: Arc::clone(&runtime.store),
             focus_handle: cx.focus_handle(),
             resident_previews: HashMap::new(),
             status_glyphs: HashMap::new(),
+            _store_changes: store_changes,
         }
     }
 
@@ -87,16 +104,21 @@ impl SessionSurfaces {
 
 impl Render for SessionSurfaces {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (session_ids, overview_visible, switcher_visible) = {
+        let (overview_visible, switcher_visible) = {
             let store = self.store.read().expect("session store lock poisoned");
             (
-                store.sessions().keys().cloned().collect::<HashSet<_>>(),
                 store.overview_state().is_visible(),
                 store.switcher_state().is_visible(),
             )
         };
-        self.status_glyphs
-            .retain(|(id, _, _), _| session_ids.contains(id));
+        if overview_visible || switcher_visible {
+            let session_ids: HashSet<_> = {
+                let store = self.store.read().expect("session store lock poisoned");
+                store.sessions().keys().cloned().collect()
+            };
+            self.status_glyphs
+                .retain(|(id, _, _), _| session_ids.contains(id));
+        }
         let root = div()
             .id("session-surfaces")
             .absolute()

@@ -1,10 +1,11 @@
 use diri_proto::{
-    AgentKind, DateMillis, ExitInfo, ExitReason, HibernationInfo, HibernationReason,
-    NeedsInputDetail, NeedsInputKind, NeedsInputSource, PortInfo, Project, ProjectId, Resumability,
-    RiskHint, SessionId, SessionListResult, SessionRecord, SessionStatus, TitleSource,
+    AgentKind, ArtifactKind, DateMillis, ExitInfo, ExitReason, HibernationInfo, HibernationReason,
+    NeedsInputDetail, NeedsInputKind, NeedsInputSource, PortInfo, PrCheck, PrDiscussionItem,
+    Project, ProjectId, PullRequestStatus, Resumability, RiskHint, SessionArtifact, SessionId,
+    SessionListResult, SessionRecord, SessionStatus, TitleSource,
 };
 
-use crate::store::{Prefs, SessionStore};
+use crate::store::{InspectorTab, Prefs, SessionStore};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PreviewScenario {
@@ -12,6 +13,7 @@ pub enum PreviewScenario {
     Typical,
     Stress,
     Empty,
+    Artifacts,
 }
 
 impl PreviewScenario {
@@ -19,6 +21,7 @@ impl PreviewScenario {
         match value.map(str::to_ascii_lowercase).as_deref() {
             Some("stress") => Self::Stress,
             Some("empty") => Self::Empty,
+            Some("artifacts") => Self::Artifacts,
             _ => Self::Typical,
         }
     }
@@ -61,7 +64,7 @@ impl SidebarPreviewFixture {
             "Settings Kit",
         );
 
-        let codex: SessionRecord = session(
+        let mut codex: SessionRecord = session(
             "preview-codex",
             AgentKind::CODEX,
             &dirijor,
@@ -72,6 +75,89 @@ impl SidebarPreviewFixture {
         )
         .memory(3_650_000_000)
         .into();
+        if scenario == PreviewScenario::Artifacts {
+            codex.title = "Move repository cloning into the background".into();
+            let pull_request_url = "https://github.com/acme/dirijor/pull/63";
+            codex.artifacts = Some(vec![SessionArtifact {
+                kind: ArtifactKind::PullRequest,
+                url: pull_request_url.into(),
+                first_seen_at: DateMillis(now - minutes(14.0)),
+            }]);
+            codex.pull_requests = Some(vec![PullRequestStatus {
+                url: pull_request_url.into(),
+                number: 63,
+                title: Some("Move repository cloning into the background".into()),
+                author: Some("antfu".into()),
+                body: Some(
+                    "Repository cloning now leaves the foreground path immediately while progress and failures remain visible to the active session."
+                        .into(),
+                ),
+                base_ref_name: Some("main".into()),
+                head_ref_name: Some("refactor/repository-cloning".into()),
+                state: "OPEN".into(),
+                is_draft: false,
+                review_decision: Some("APPROVED".into()),
+                mergeable: Some("MERGEABLE".into()),
+                merge_state_status: Some("CLEAN".into()),
+                additions: 431,
+                deletions: 381,
+                changed_files: 8,
+                comment_count: 2,
+                review_count: 1,
+                resolved_threads: Some(4),
+                total_threads: Some(4),
+                checks_passed: 2,
+                checks_failed: 0,
+                checks_pending: 1,
+                checks: Some(vec![
+                    PrCheck {
+                        name: "CI / macOS 15".into(),
+                        result: "pending".into(),
+                        detail: Some("IN_PROGRESS".into()),
+                        url: Some("https://github.com/acme/dirijor/actions/runs/103".into()),
+                    },
+                    PrCheck {
+                        name: "Swift tests".into(),
+                        result: "pass".into(),
+                        detail: Some("SUCCESS".into()),
+                        url: Some("https://github.com/acme/dirijor/actions/runs/101".into()),
+                    },
+                    PrCheck {
+                        name: "Rust / clippy".into(),
+                        result: "pass".into(),
+                        detail: Some("SUCCESS".into()),
+                        url: Some("https://github.com/acme/dirijor/actions/runs/102".into()),
+                    },
+                ]),
+                discussion: Some(vec![
+                    PrDiscussionItem {
+                        kind: "comment".into(),
+                        author: "ruru".into(),
+                        body: "Please make sure the background task still reports clone failures in the active session.".into(),
+                        state: None,
+                        created_at: None,
+                        url: Some(format!("{pull_request_url}#issuecomment-1")),
+                    },
+                    PrDiscussionItem {
+                        kind: "comment".into(),
+                        author: "antfu".into(),
+                        body: "Added coverage for cancellation and for a failed remote fetch.".into(),
+                        state: None,
+                        created_at: None,
+                        url: Some(format!("{pull_request_url}#issuecomment-2")),
+                    },
+                    PrDiscussionItem {
+                        kind: "review".into(),
+                        author: "yyx990803".into(),
+                        body: "The lifecycle reads clearly now. Nice separation between scheduling and progress reporting.".into(),
+                        state: Some("APPROVED".into()),
+                        created_at: None,
+                        url: Some(format!("{pull_request_url}#pullrequestreview-3")),
+                    },
+                ]),
+                fetched_at: DateMillis(now),
+            }]);
+        }
         let claude: SessionRecord = session(
             "preview-claude",
             AgentKind::CLAUDE_CODE,
@@ -241,6 +327,11 @@ impl SidebarPreviewFixture {
             ..Prefs::default()
         };
         prefs.normalize();
+        if scenario == PreviewScenario::Artifacts {
+            prefs.inspector_open = true;
+            prefs.inspector_width = 480.0;
+            prefs.inspector_tab = InspectorTab::Artifacts;
+        }
         Self {
             list: SessionListResult {
                 sessions,
@@ -397,6 +488,25 @@ mod tests {
                 .iter()
                 .any(|session| { session.title.starts_with("Investigate why exceptionally") })
         );
+    }
+
+    #[test]
+    fn artifacts_fixture_carries_a_rich_pull_request() {
+        let fixture = SidebarPreviewFixture::make(PreviewScenario::Artifacts);
+        let session = fixture
+            .list
+            .sessions
+            .iter()
+            .find(|session| Some(&session.id) == fixture.selected_session_id.as_ref())
+            .expect("selected session");
+        let pull_request = session
+            .pull_requests
+            .as_deref()
+            .and_then(|pull_requests| pull_requests.first())
+            .expect("pull request fixture");
+        assert_eq!(pull_request.checks.as_deref().map(<[_]>::len), Some(3));
+        assert_eq!(pull_request.discussion.as_deref().map(<[_]>::len), Some(3));
+        assert_eq!(fixture.prefs.inspector_tab, InspectorTab::Artifacts);
     }
 
     #[test]

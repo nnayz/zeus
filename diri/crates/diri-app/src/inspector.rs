@@ -10,8 +10,8 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use diri_proto::{
-    AgentKind as ProtoAgentKind, ArtifactKind, PullRequestStatus, SessionArtifact, SessionDiffBase,
-    SessionId, SessionRecord, SessionStatus,
+    AgentKind as ProtoAgentKind, ArtifactKind, PrCheck, PrDiscussionItem, PullRequestStatus,
+    SessionArtifact, SessionDiffBase, SessionId, SessionRecord, SessionStatus,
 };
 use diri_ui::{
     AgentKind, AgentLogo, Fill, FloatingSurface, Ink, Metrics, Radius, SemanticColors, Typo,
@@ -1450,31 +1450,283 @@ fn render_pull_request(pull_request: &PullRequestStatus, colors: SemanticColors)
         "Pull request".to_owned()
     };
     let title = pull_request.title.clone().unwrap_or_else(|| number.clone());
+    let author = pull_request.author.as_deref().unwrap_or("contributor");
     let (state_label, state_color) = pull_request_state(pull_request, colors);
     let checks_total =
         pull_request.checks_passed + pull_request.checks_failed + pull_request.checks_pending;
-    let discussion = pull_request_discussion(pull_request);
-    let url = pull_request.url.clone();
-    let id = SharedString::from(format!("inspector-pr-{}", pull_request.url));
+    let discussion_total = pull_request.comment_count + pull_request.review_count;
+    let can_merge = pull_request_can_merge(pull_request);
+    let view_url = pull_request.url.clone();
+    let merge_url = pull_request.url.clone();
+    let checks = sorted_pr_checks(pull_request);
+    let discussion = pull_request.discussion.as_deref().unwrap_or_default();
+    let body = pull_request
+        .body
+        .as_deref()
+        .map(compact_markdown)
+        .filter(|body| !body.is_empty());
 
-    div()
-        .id(id)
-        .p(px(11.0))
+    let mut surface = div()
+        .id(SharedString::from(format!(
+            "inspector-pr-{}",
+            pull_request.url
+        )))
         .flex()
         .flex_col()
-        .gap(px(9.0))
+        .gap(px(14.0))
         .rounded(px(Radius::CARD))
-        .bg(colors.primary.alpha(0.035))
+        .bg(colors.primary.alpha(0.022))
         .border_1()
-        .border_color(colors.primary.alpha(0.065))
-        .cursor_pointer()
-        .hover(move |card| card.bg(colors.primary.alpha(0.065)))
+        .border_color(colors.primary.alpha(0.075))
+        .overflow_hidden()
         .child(
             div()
+                .p(px(13.0))
+                .pb(px(12.0))
                 .flex()
-                .items_start()
-                .gap(px(9.0))
-                .child(artifact_icon("arrow.triangle.pull", colors))
+                .flex_col()
+                .gap(px(10.0))
+                .child(
+                    div()
+                        .flex()
+                        .items_start()
+                        .gap(px(9.0))
+                        .child(
+                            div()
+                                .size(px(30.0))
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded_full()
+                                .bg(state_color.alpha(0.12))
+                                .child(sf_symbol_weighted(
+                                    "arrow.triangle.pull",
+                                    13.0,
+                                    SymbolWeight::Semibold,
+                                    state_color,
+                                )),
+                        )
+                        .child(
+                            div()
+                                .min_w(px(0.0))
+                                .flex_1()
+                                .flex()
+                                .flex_col()
+                                .gap(px(3.0))
+                                .child(
+                                    div()
+                                        .line_height(px(17.0))
+                                        .text_size(px(13.0))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(colors.primary)
+                                        .child(title),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(Typo::META.size))
+                                        .text_color(colors.tertiary)
+                                        .child(format!("{author} opened {number}")),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .px(px(7.0))
+                                .h(px(21.0))
+                                .flex()
+                                .items_center()
+                                .rounded_full()
+                                .bg(state_color.alpha(0.12))
+                                .text_size(px(10.0))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(state_color)
+                                .child(state_label),
+                        )
+                        .child(
+                            div()
+                                .id(SharedString::from(format!(
+                                    "inspector-pr-open-{}",
+                                    pull_request.number
+                                )))
+                                .debug_selector(|| "INSPECTOR_PR_OPEN".to_owned())
+                                .size(px(24.0))
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(Radius::CHIP))
+                                .cursor_pointer()
+                                .hover(move |button| button.bg(colors.primary.alpha(0.06)))
+                                .child(sf_symbol("arrow.up.right", 10.5, colors.tertiary))
+                                .on_click(move |_, _, cx| cx.open_url(&view_url)),
+                        ),
+                )
+                .when(
+                    pull_request.head_ref_name.is_some() || pull_request.base_ref_name.is_some(),
+                    |header| {
+                        let head = pull_request
+                            .head_ref_name
+                            .clone()
+                            .unwrap_or_else(|| "head".to_owned());
+                        let base = pull_request
+                            .base_ref_name
+                            .clone()
+                            .unwrap_or_else(|| "base".to_owned());
+                        header.child(
+                            div()
+                                .h(px(24.0))
+                                .flex()
+                                .items_center()
+                                .gap(px(6.0))
+                                .child(branch_badge(base, colors))
+                                .child(sf_symbol("arrow.left", 9.5, colors.tertiary))
+                                .child(branch_badge(head, colors)),
+                        )
+                    },
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(7.0))
+                        .child(diff_stat(
+                            format!("+{}", pull_request.additions),
+                            Ink::FRESH,
+                        ))
+                        .child(diff_stat(
+                            format!("−{}", pull_request.deletions),
+                            Ink::DANGER,
+                        ))
+                        .child(
+                            div()
+                                .text_size(px(Typo::META.size))
+                                .text_color(colors.tertiary)
+                                .child(format!(
+                                    "{} changed {}",
+                                    pull_request.changed_files,
+                                    if pull_request.changed_files == 1 {
+                                        "file"
+                                    } else {
+                                        "files"
+                                    }
+                                )),
+                        )
+                        .when_some(pull_request.total_threads, |stats, total| {
+                            stats.child(
+                                div()
+                                    .ml_auto()
+                                    .text_size(px(10.5))
+                                    .text_color(colors.tertiary)
+                                    .child(format!(
+                                        "{}/{} resolved",
+                                        pull_request.resolved_threads.unwrap_or(0),
+                                        total
+                                    )),
+                            )
+                        }),
+                )
+                .when_some(body, |header, body| {
+                    header.child(
+                        div()
+                            .mt(px(1.0))
+                            .p(px(9.0))
+                            .rounded(px(Radius::BADGE))
+                            .bg(colors.primary.alpha(0.035))
+                            .line_height(px(16.0))
+                            .text_size(px(Typo::META.size))
+                            .text_color(colors.secondary)
+                            .child(body),
+                    )
+                }),
+        );
+
+    if checks_total > 0 {
+        let (checks_label, checks_color) = checks_rollup(pull_request);
+        let mut check_rows = div()
+            .rounded(px(Radius::BADGE))
+            .border_1()
+            .border_color(colors.primary.alpha(0.07))
+            .overflow_hidden();
+        for (index, check) in checks.iter().enumerate() {
+            check_rows = check_rows.child(render_pr_check(
+                check,
+                index,
+                checks.len(),
+                pull_request.number,
+                colors,
+            ));
+        }
+        surface = surface.child(
+            div()
+                .px(px(13.0))
+                .flex()
+                .flex_col()
+                .gap(px(7.0))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .child(section_label("Checks", colors))
+                        .child(
+                            div()
+                                .ml_auto()
+                                .text_size(px(10.5))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(checks_color)
+                                .child(checks_label),
+                        ),
+                )
+                .child(check_rows),
+        );
+    }
+
+    if discussion_total > 0 {
+        let mut conversation = div().px(px(13.0)).flex().flex_col().gap(px(8.0)).child(
+            div()
+                .flex()
+                .items_center()
+                .child(section_label("Conversation", colors))
+                .child(
+                    div()
+                        .ml_auto()
+                        .text_size(px(10.5))
+                        .text_color(colors.tertiary)
+                        .child(format!("{discussion_total} items")),
+                ),
+        );
+        if discussion.is_empty() {
+            conversation = conversation.child(render_discussion_fallback(pull_request, colors));
+        } else {
+            for (index, item) in discussion.iter().enumerate() {
+                conversation = conversation.child(render_discussion_item(
+                    item,
+                    index,
+                    discussion.len(),
+                    pull_request.number,
+                    colors,
+                ));
+            }
+        }
+        surface = surface.child(conversation);
+    }
+
+    if pull_request.state == "OPEN" {
+        let (merge_detail, merge_color) = if can_merge {
+            ("Ready to merge", Ink::FRESH)
+        } else {
+            (merge_blocker_label(pull_request), Ink::ATTENTION)
+        };
+        surface = surface.child(
+            div()
+                .mt(px(1.0))
+                .p(px(13.0))
+                .flex()
+                .items_center()
+                .gap(px(10.0))
+                .border_t_1()
+                .border_color(colors.primary.alpha(0.07))
+                .bg(merge_color.alpha(0.045))
                 .child(
                     div()
                         .min_w(px(0.0))
@@ -1484,116 +1736,433 @@ fn render_pull_request(pull_request: &PullRequestStatus, colors: SemanticColors)
                         .gap(px(2.0))
                         .child(
                             div()
-                                .text_size(px(Typo::ROW_EMPHASIZED.size))
-                                .font_weight(Typo::ROW_EMPHASIZED.weight)
+                                .text_size(px(Typo::META.size))
+                                .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(colors.primary)
-                                .child(title),
+                                .child(merge_detail),
                         )
                         .child(
                             div()
-                                .text_size(px(Typo::META.size))
+                                .text_size(px(10.0))
                                 .text_color(colors.tertiary)
-                                .child(format!(
-                                    "{number}  ·  +{} −{}  ·  {} {}",
-                                    pull_request.additions,
-                                    pull_request.deletions,
-                                    pull_request.changed_files,
-                                    if pull_request.changed_files == 1 {
-                                        "file"
-                                    } else {
-                                        "files"
-                                    }
-                                )),
+                                .child("Review and confirm on GitHub"),
                         ),
                 )
                 .child(
                     div()
+                        .id(SharedString::from(format!(
+                            "inspector-pr-merge-{}",
+                            pull_request.number
+                        )))
+                        .debug_selector(|| "INSPECTOR_PR_MERGE".to_owned())
+                        .h(px(30.0))
+                        .px(px(10.0))
                         .flex_none()
-                        .px(px(6.0))
-                        .h(px(20.0))
                         .flex()
                         .items_center()
-                        .rounded(px(Radius::CHIP))
-                        .bg(state_color.alpha(0.12))
-                        .text_size(px(10.0))
+                        .gap(px(6.0))
+                        .rounded(px(Radius::BADGE))
+                        .cursor_pointer()
+                        .bg(merge_color.alpha(if can_merge { 0.86 } else { 0.13 }))
+                        .text_size(px(11.0))
                         .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(state_color)
-                        .child(state_label),
-                ),
-        )
-        .when(checks_total > 0, |card| {
-            let (symbol, label, color) = if pull_request.checks_failed > 0 {
-                (
-                    "xmark.circle.fill",
-                    format!(
-                        "{} {} failed",
-                        pull_request.checks_failed,
-                        if pull_request.checks_failed == 1 {
-                            "check"
+                        .text_color(if can_merge {
+                            rgba(0xffffffff)
                         } else {
-                            "checks"
-                        }
-                    ),
-                    Ink::DANGER,
+                            merge_color
+                        })
+                        .hover(move |button| {
+                            button.bg(merge_color.alpha(if can_merge { 1.0 } else { 0.19 }))
+                        })
+                        .child("Merge pull request")
+                        .child(sf_symbol(
+                            "arrow.up.right",
+                            9.0,
+                            if can_merge {
+                                rgba(0xffffffff)
+                            } else {
+                                merge_color
+                            },
+                        ))
+                        .on_click(move |_, _, cx| cx.open_url(&merge_url)),
+                ),
+        );
+    }
+
+    surface.pb(px(13.0)).into_any_element()
+}
+
+fn branch_badge(branch: String, colors: SemanticColors) -> AnyElement {
+    div()
+        .min_w(px(0.0))
+        .max_w(px(158.0))
+        .h(px(22.0))
+        .px(px(7.0))
+        .flex()
+        .items_center()
+        .rounded(px(Radius::CHIP))
+        .bg(colors.primary.alpha(0.045))
+        .font_family(crate::fonts::mono_family())
+        .text_size(px(10.0))
+        .text_color(colors.secondary)
+        .truncate()
+        .child(branch)
+        .into_any_element()
+}
+
+fn diff_stat(label: String, color: gpui::Rgba) -> AnyElement {
+    div()
+        .px(px(7.0))
+        .h(px(22.0))
+        .flex()
+        .items_center()
+        .rounded(px(Radius::CHIP))
+        .bg(color.alpha(0.09))
+        .text_size(px(10.5))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(color)
+        .child(label)
+        .into_any_element()
+}
+
+fn render_pr_check(
+    check: &PrCheck,
+    index: usize,
+    total: usize,
+    pr_number: i64,
+    colors: SemanticColors,
+) -> AnyElement {
+    let (symbol, color, status) = match check.result.as_str() {
+        "pass" => ("checkmark.circle.fill", Ink::FRESH, "Passed"),
+        "fail" => ("xmark.circle.fill", Ink::DANGER, "Failed"),
+        "pending" => ("clock.fill", Ink::ATTENTION, "Running"),
+        _ => ("circle", colors.tertiary, "Unknown"),
+    };
+    let detail = check
+        .detail
+        .as_deref()
+        .map(humanize_github_state)
+        .filter(|detail| detail != status)
+        .unwrap_or_else(|| status.to_owned());
+    let url = check.url.clone();
+    div()
+        .id(SharedString::from(format!(
+            "inspector-pr-{pr_number}-check-{index}"
+        )))
+        .debug_selector(move || format!("INSPECTOR_PR_CHECK_{index}"))
+        .min_h(px(34.0))
+        .px(px(9.0))
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .bg(colors.primary.alpha(if check.result == "pending" {
+            0.025
+        } else {
+            0.0
+        }))
+        .when(index + 1 < total, |row| {
+            row.border_b_1().border_color(colors.primary.alpha(0.055))
+        })
+        .when(url.is_some(), |row| {
+            row.cursor_pointer()
+                .hover(move |row| row.bg(colors.primary.alpha(0.045)))
+        })
+        .child(sf_symbol(symbol, 12.0, color))
+        .child(
+            div()
+                .min_w(px(0.0))
+                .flex_1()
+                .truncate()
+                .text_size(px(Typo::META.size))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(colors.secondary)
+                .child(check.name.clone()),
+        )
+        .child(
+            div()
+                .flex_none()
+                .text_size(px(10.0))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(color)
+                .child(detail),
+        )
+        .when_some(url, |row, url| {
+            row.child(sf_symbol("arrow.up.right", 9.0, colors.tertiary))
+                .on_click(move |_, _, cx| cx.open_url(&url))
+        })
+        .into_any_element()
+}
+
+fn render_discussion_item(
+    item: &PrDiscussionItem,
+    index: usize,
+    total: usize,
+    pr_number: i64,
+    colors: SemanticColors,
+) -> AnyElement {
+    let author = item.author.clone();
+    let initial = author
+        .chars()
+        .next()
+        .map(|character| character.to_uppercase().collect::<String>())
+        .unwrap_or_else(|| "?".to_owned());
+    let is_review = item.kind == "review";
+    let (review_label, review_color) = discussion_state(item, colors);
+    let compact_body = compact_markdown(&item.body);
+    let body = if compact_body.is_empty() {
+        review_label
+            .clone()
+            .unwrap_or_else(|| "Commented".to_owned())
+    } else {
+        compact_body
+    };
+    let time = item.created_at.as_ref().map(|date| relative_time(date.0));
+    let url = item.url.clone();
+
+    div()
+        .id(SharedString::from(format!(
+            "inspector-pr-{pr_number}-comment-{index}"
+        )))
+        .debug_selector(move || format!("INSPECTOR_PR_COMMENT_{index}"))
+        .flex()
+        .items_stretch()
+        .gap(px(8.0))
+        .child(
+            div()
+                .w(px(26.0))
+                .flex_none()
+                .flex()
+                .flex_col()
+                .items_center()
+                .child(
+                    div()
+                        .size(px(24.0))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_full()
+                        .bg(if is_review {
+                            review_color.alpha(0.13)
+                        } else {
+                            colors.primary.alpha(0.075)
+                        })
+                        .text_size(px(9.5))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(if is_review {
+                            review_color
+                        } else {
+                            colors.secondary
+                        })
+                        .child(initial),
                 )
-            } else if pull_request.checks_pending > 0 {
-                (
-                    "clock.fill",
-                    format!("{} checks running", pull_request.checks_pending),
-                    Ink::ATTENTION,
-                )
-            } else {
-                (
-                    "checkmark.circle.fill",
-                    "Checks passing".to_owned(),
-                    Ink::FRESH,
-                )
-            };
-            card.child(
-                div()
-                    .h(px(28.0))
-                    .px(px(8.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(7.0))
-                    .rounded(px(Radius::BADGE))
-                    .bg(color.alpha(0.10))
-                    .child(sf_symbol(symbol, 12.0, color))
-                    .child(
+                .when(index + 1 < total, |rail| {
+                    rail.child(
                         div()
+                            .mt(px(4.0))
+                            .w(px(1.0))
                             .flex_1()
-                            .text_size(px(Typo::META.size))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(color)
-                            .child(label),
+                            .min_h(px(10.0))
+                            .bg(colors.primary.alpha(0.08)),
                     )
-                    .child(
-                        div()
-                            .text_size(px(10.0))
-                            .text_color(color.alpha(0.76))
-                            .child(format!("{}/{checks_total}", pull_request.checks_passed)),
-                    ),
-            )
-        })
-        .when_some(discussion, |card, discussion| {
-            card.child(
-                div()
-                    .h(px(24.0))
-                    .px(px(2.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(7.0))
-                    .child(sf_symbol("bubble.left", 11.5, colors.tertiary))
-                    .child(
-                        div()
-                            .text_size(px(Typo::META.size))
-                            .text_color(colors.tertiary)
-                            .child(discussion),
-                    ),
-            )
-        })
+                }),
+        )
+        .child(
+            div()
+                .id(SharedString::from(format!(
+                    "inspector-pr-{pr_number}-comment-card-{index}"
+                )))
+                .min_w(px(0.0))
+                .flex_1()
+                .mb(px(if index + 1 < total { 2.0 } else { 0.0 }))
+                .rounded(px(Radius::BADGE))
+                .border_1()
+                .border_color(colors.primary.alpha(0.07))
+                .bg(colors.primary.alpha(0.025))
+                .when(url.is_some(), |card| {
+                    card.cursor_pointer()
+                        .hover(move |card| card.bg(colors.primary.alpha(0.05)))
+                })
+                .child(
+                    div()
+                        .min_h(px(29.0))
+                        .px(px(9.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(5.0))
+                        .border_b_1()
+                        .border_color(colors.primary.alpha(0.055))
+                        .child(
+                            div()
+                                .text_size(px(10.5))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(colors.primary)
+                                .child(author),
+                        )
+                        .when_some(review_label, |header, label| {
+                            header.child(
+                                div()
+                                    .px(px(5.0))
+                                    .h(px(17.0))
+                                    .flex()
+                                    .items_center()
+                                    .rounded_full()
+                                    .bg(review_color.alpha(0.11))
+                                    .text_size(px(9.0))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(review_color)
+                                    .child(label),
+                            )
+                        })
+                        .when_some(time, |header, time| {
+                            header.child(
+                                div()
+                                    .ml_auto()
+                                    .text_size(px(9.5))
+                                    .text_color(colors.tertiary)
+                                    .child(time),
+                            )
+                        }),
+                )
+                .child(
+                    div()
+                        .px(px(9.0))
+                        .py(px(8.0))
+                        .line_height(px(16.0))
+                        .text_size(px(Typo::META.size))
+                        .text_color(colors.secondary)
+                        .child(body),
+                )
+                .when_some(url, |card, url| {
+                    card.on_click(move |_, _, cx| cx.open_url(&url))
+                }),
+        )
+        .into_any_element()
+}
+
+fn render_discussion_fallback(
+    pull_request: &PullRequestStatus,
+    colors: SemanticColors,
+) -> AnyElement {
+    let discussion = pull_request_discussion(pull_request)
+        .unwrap_or_else(|| "Open the conversation on GitHub".to_owned());
+    let url = pull_request.url.clone();
+    div()
+        .id(SharedString::from(format!(
+            "inspector-pr-discussion-{}",
+            pull_request.number
+        )))
+        .min_h(px(38.0))
+        .px(px(9.0))
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .rounded(px(Radius::BADGE))
+        .border_1()
+        .border_color(colors.primary.alpha(0.07))
+        .bg(colors.primary.alpha(0.025))
+        .cursor_pointer()
+        .hover(move |row| row.bg(colors.primary.alpha(0.05)))
+        .child(sf_symbol(
+            "bubble.left.and.bubble.right",
+            12.0,
+            colors.secondary,
+        ))
+        .child(
+            div()
+                .flex_1()
+                .text_size(px(Typo::META.size))
+                .text_color(colors.secondary)
+                .child(discussion),
+        )
+        .child(sf_symbol("arrow.up.right", 9.0, colors.tertiary))
         .on_click(move |_, _, cx| cx.open_url(&url))
         .into_any_element()
+}
+
+fn sorted_pr_checks(pull_request: &PullRequestStatus) -> Vec<PrCheck> {
+    let mut checks = pull_request.checks.clone().unwrap_or_default();
+    checks.sort_by_key(|check| match check.result.as_str() {
+        "fail" => 0,
+        "pending" => 1,
+        "pass" => 2,
+        _ => 3,
+    });
+    checks
+}
+
+fn checks_rollup(pull_request: &PullRequestStatus) -> (String, gpui::Rgba) {
+    if pull_request.checks_failed > 0 {
+        return (
+            format!("{} failed", pull_request.checks_failed),
+            Ink::DANGER,
+        );
+    }
+    if pull_request.checks_pending > 0 {
+        return (
+            format!("{} running", pull_request.checks_pending),
+            Ink::ATTENTION,
+        );
+    }
+    ("All passed".to_owned(), Ink::FRESH)
+}
+
+fn discussion_state(
+    item: &PrDiscussionItem,
+    colors: SemanticColors,
+) -> (Option<String>, gpui::Rgba) {
+    match item.state.as_deref() {
+        Some("APPROVED") => (Some("Approved".to_owned()), Ink::FRESH),
+        Some("CHANGES_REQUESTED") => (Some("Requested changes".to_owned()), Ink::DANGER),
+        Some("COMMENTED") => (Some("Reviewed".to_owned()), colors.secondary),
+        Some(state) => (Some(humanize_github_state(state)), colors.secondary),
+        None => (None, colors.secondary),
+    }
+}
+
+fn pull_request_can_merge(pull_request: &PullRequestStatus) -> bool {
+    pull_request.state == "OPEN"
+        && !pull_request.is_draft
+        && pull_request.mergeable.as_deref() != Some("CONFLICTING")
+        && pull_request.checks_failed == 0
+        && pull_request.checks_pending == 0
+        && !matches!(
+            pull_request.review_decision.as_deref(),
+            Some("CHANGES_REQUESTED") | Some("REVIEW_REQUIRED")
+        )
+        && !matches!(
+            pull_request.merge_state_status.as_deref(),
+            Some("BLOCKED") | Some("DIRTY") | Some("DRAFT")
+        )
+}
+
+fn merge_blocker_label(pull_request: &PullRequestStatus) -> &'static str {
+    if pull_request.checks_failed > 0 {
+        "Checks are failing"
+    } else if pull_request.checks_pending > 0 {
+        "Checks are still running"
+    } else if pull_request.mergeable.as_deref() == Some("CONFLICTING") {
+        "Resolve merge conflicts"
+    } else if pull_request.review_decision.as_deref() == Some("CHANGES_REQUESTED") {
+        "Changes were requested"
+    } else if pull_request.review_decision.as_deref() == Some("REVIEW_REQUIRED") {
+        "Review is required"
+    } else {
+        "GitHub is blocking the merge"
+    }
+}
+
+fn compact_markdown(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn humanize_github_state(value: &str) -> String {
+    let lower = value.replace('_', " ").to_ascii_lowercase();
+    let mut chars = lower.chars();
+    chars
+        .next()
+        .map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
+        .unwrap_or_default()
 }
 
 fn render_artifact_row(artifact: &SessionArtifact, colors: SemanticColors) -> AnyElement {
@@ -2005,10 +2574,29 @@ mod tests {
         assert_eq!(artifact_title(&preview), "feature-dirijor.vercel.app");
     }
 
+    #[test]
+    fn merge_gate_waits_for_checks_and_review_blockers() {
+        let fixture = SidebarPreviewFixture::make(PreviewScenario::Artifacts);
+        let pull_request = fixture.list.sessions[0].pull_requests.as_ref().unwrap()[0].clone();
+        assert!(!pull_request_can_merge(&pull_request));
+        assert_eq!(
+            merge_blocker_label(&pull_request),
+            "Checks are still running"
+        );
+
+        let mut ready = pull_request;
+        ready.checks_pending = 0;
+        ready.checks_passed = 3;
+        for check in ready.checks.as_mut().unwrap() {
+            check.result = "pass".to_owned();
+        }
+        assert!(pull_request_can_merge(&ready));
+    }
+
     #[gpui::test]
     fn tabs_fit_and_switch_at_the_minimum_inspector_width(cx: &mut TestAppContext) {
         let runtime = Arc::new(StoreRuntime::inert());
-        let mut fixture = SidebarPreviewFixture::make(PreviewScenario::Typical);
+        let mut fixture = SidebarPreviewFixture::make(PreviewScenario::Artifacts);
         let selected = fixture.selected_session_id.clone();
         if let Some(session) = fixture
             .list
@@ -2109,5 +2697,10 @@ mod tests {
                 .inspector_tab,
             InspectorTab::Artifacts
         );
+
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("INSPECTOR_PR_MERGE").is_some());
+        assert!(cx.debug_bounds("INSPECTOR_PR_CHECK_0").is_some());
+        assert!(cx.debug_bounds("INSPECTOR_PR_COMMENT_0").is_some());
     }
 }

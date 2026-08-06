@@ -50,6 +50,7 @@ Deterministic sidebar fixtures render without connecting to the daemon. Run any 
 DIRIJOR_SIDEBAR_PREVIEW=1 DIRIJOR_SIDEBAR_SCENARIO=typical cargo run -p diri-app
 DIRIJOR_SIDEBAR_PREVIEW=1 DIRIJOR_SIDEBAR_SCENARIO=stress cargo run -p diri-app
 DIRIJOR_SIDEBAR_PREVIEW=1 DIRIJOR_SIDEBAR_SCENARIO=empty cargo run -p diri-app
+DIRIJOR_SIDEBAR_PREVIEW=1 DIRIJOR_SIDEBAR_SCENARIO=artifacts cargo run -p diri-app
 ```
 
 Preview mode uses deterministic mock dates, account identity, and usage values. It never opens a daemon connection or reads local account/transcript data.

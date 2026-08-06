@@ -42,7 +42,7 @@ use gpui::{
 };
 use gpui_platform::application;
 use root::RootView;
-use sidebar::PreviewScenario;
+use sidebar::{PreviewScenario, SidebarPreviewFixture};
 use terminal_pane::bind_terminal_keys;
 use tokio::runtime::{Builder as RuntimeBuilder, Runtime};
 
@@ -162,6 +162,27 @@ fn main() {
             StoreRuntime::start_default(Arc::clone(&client)).expect("failed to load diri state")
         })
     };
+    if preview {
+        let fixture = SidebarPreviewFixture::make(scenario);
+        let selected = fixture.selected_session_id.clone();
+        let mut store = store_runtime
+            .store
+            .write()
+            .expect("preview session store lock poisoned");
+        store.hydrate(fixture.list);
+        if let Some(selected) = selected {
+            store.select(selected);
+        }
+        if scenario == PreviewScenario::Artifacts {
+            store
+                .update_preferences(|prefs| {
+                    prefs.inspector_open = true;
+                    prefs.inspector_width = 480.0;
+                    prefs.inspector_tab = store::InspectorTab::Artifacts;
+                })
+                .expect("headless preview preferences");
+        }
+    }
     let (usage_tx, _) = tokio::sync::watch::channel(UsageSnapshot::default());
     if !preview {
         let usage_tx = usage_tx.clone();

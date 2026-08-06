@@ -214,7 +214,7 @@ impl RootView {
             let updates = services.updates.clone();
             cx.new(|cx| UtilitySurfaces::new(runtime, tokio, updates, window, cx))
         });
-        let inspector = (!preview).then(|| {
+        let inspector = (!preview || preview_scenario == PreviewScenario::Artifacts).then(|| {
             let runtime = Arc::clone(&services.store);
             let tokio = Arc::clone(&services.tokio);
             cx.new(|cx| WorkbenchInspector::new(runtime, tokio, cx))
@@ -1522,6 +1522,7 @@ impl RootView {
             PreviewScenario::Typical => "Typical",
             PreviewScenario::Stress => "Stress",
             PreviewScenario::Empty => "Empty",
+            PreviewScenario::Artifacts => "Artifacts",
         };
         div()
             .size_full()

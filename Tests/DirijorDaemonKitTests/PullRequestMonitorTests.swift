@@ -18,6 +18,10 @@ private let prURL = "https://github.com/acme/widgets/pull/123"
         {
           "number": 123,
           "title": "Fix scroll jitter",
+          "author": {"login": "antfu"},
+          "body": "Moves repository cloning off the foreground path.",
+          "baseRefName": "main",
+          "headRefName": "refactor/repository-cloning",
           "state": "OPEN",
           "isDraft": false,
           "reviewDecision": "APPROVED",
@@ -26,8 +30,14 @@ private let prURL = "https://github.com/acme/widgets/pull/123"
           "additions": 45,
           "deletions": 12,
           "changedFiles": 3,
-          "comments": [{"body": "nice"}, {"body": "ship it"}],
-          "reviews": [{"state": "APPROVED"}],
+          "comments": [
+            {"author": {"login": "ruru"}, "body": "nice",
+             "createdAt": "2026-08-04T09:10:00Z", "url": "https://github.com/acme/widgets/pull/123#issuecomment-1"},
+            {"author": {"login": "yyx990803"}, "body": "ship it",
+             "createdAt": "2026-08-04T10:10:00Z"}
+          ],
+          "reviews": [{"author": {"login": "octocat"}, "state": "APPROVED", "body": "Looks good",
+                       "submittedAt": "2026-08-04T10:30:00Z"}],
           "statusCheckRollup": [
             {"__typename": "CheckRun", "name": "build", "workflowName": "CI",
              "status": "COMPLETED", "conclusion": "SUCCESS",
@@ -45,6 +55,10 @@ private let prURL = "https://github.com/acme/widgets/pull/123"
     #expect(status.url == prURL)
     #expect(status.number == 123)
     #expect(status.title == "Fix scroll jitter")
+    #expect(status.author == "antfu")
+    #expect(status.body == "Moves repository cloning off the foreground path.")
+    #expect(status.baseRefName == "main")
+    #expect(status.headRefName == "refactor/repository-cloning")
     #expect(status.state == "OPEN")
     #expect(!status.isDraft)
     #expect(status.reviewDecision == "APPROVED")
@@ -70,6 +84,13 @@ private let prURL = "https://github.com/acme/widgets/pull/123"
     #expect(checks[1].detail == "IN_PROGRESS")
     #expect(checks[2].name == "vercel")
     #expect(checks[2].result == "fail")
+
+    let discussion = status.discussion ?? []
+    #expect(discussion.count == 3)
+    #expect(discussion[0].author == "ruru")
+    #expect(discussion[0].body == "nice")
+    #expect(discussion[2].kind == "review")
+    #expect(discussion[2].state == "APPROVED")
 }
 
 @Test func ghPayloadParsingMinimalFields() {

@@ -574,11 +574,36 @@ pub type PRCheck = PrCheck;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct PrDiscussionItem {
+    pub kind: String,
+    pub author: String,
+    pub body: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<DateMillis>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
+/// Swift spells this type `PRDiscussionItem`; retain that spelling as an alias.
+pub type PRDiscussionItem = PrDiscussionItem;
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PullRequestStatus {
     pub url: String,
     pub number: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_ref_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub head_ref_name: Option<String>,
     pub state: String,
     pub is_draft: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -601,6 +626,8 @@ pub struct PullRequestStatus {
     pub checks_pending: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub checks: Option<Vec<PrCheck>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub discussion: Option<Vec<PrDiscussionItem>>,
     pub fetched_at: DateMillis,
 }
 

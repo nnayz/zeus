@@ -189,18 +189,16 @@ fn spawning_a_shell_over_the_socket_produces_a_watched_session() {
         let screen = request(ControlMessage::Request {
             id: 2,
             method: "session.read_screen".into(),
-            params: Some(json!({ "id": id })),
+            // The wire spelling the app uses: sessionID, and a ReadScreenResult.
+            params: Some(json!({ "sessionID": id })),
         });
         if let ControlMessage::Response {
             result: Ok(result), ..
         } = screen
         {
-            seen = result["lines"].as_array().is_some_and(|lines| {
-                lines.iter().any(|line| {
-                    line.as_str()
-                        .is_some_and(|text| text.contains("spawned-ok"))
-                })
-            });
+            seen = result["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("spawned-ok"));
         }
         if !seen {
             std::thread::sleep(std::time::Duration::from_millis(50));
@@ -238,7 +236,7 @@ fn spawning_a_shell_over_the_socket_produces_a_watched_session() {
     let killed = request(ControlMessage::Request {
         id: 4,
         method: "session.kill".into(),
-        params: Some(json!({ "id": id })),
+        params: Some(json!({ "sessionID": id })),
     });
     assert!(matches!(
         killed,

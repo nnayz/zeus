@@ -19,10 +19,22 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line};
-use alacritty_terminal::term::{Config, Term};
-use alacritty_terminal::vte::ansi::Processor;
+use alacritty_terminal::term::cell::Flags;
+use alacritty_terminal::term::{Config, Term, TermMode};
+use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor};
+use diri_proto::grid::{ChangedRow, GridCell, GridRowCodec, GridUpdate, TermColor, TermStyle};
 
 use crate::detect::ScreenSnapshot;
+
+/// Scrollback is byte-budgeted, as in the Swift daemon: enough history for a
+/// client's scrollback view without letting a build log grow daemon memory
+/// unboundedly. Divided by the per-line cell cost at construction.
+const HISTORY_CELL_BUDGET_BYTES: usize = 1 << 20;
+
+fn history_line_limit(cols: usize) -> usize {
+    let bytes_per_line = cols.max(1) * std::mem::size_of::<alacritty_terminal::term::cell::Cell>();
+    (HISTORY_CELL_BUDGET_BYTES / bytes_per_line).max(64)
+}
 
 /// Fixed screen geometry handed to the emulator.
 #[derive(Clone, Copy, Debug)]
@@ -75,6 +87,14 @@ pub struct HeadlessScreen {
     /// Trailing bytes of the previous chunk, so an OSC split across a read
     /// boundary is still recognized.
     progress_carry: Vec<u8>,
+
+    /// Diff baseline for [`grid_update`]: the cells last handed out, so the
+    /// next call sends only changed rows.
+    ///
+    /// [`grid_update`]: HeadlessScreen::grid_update
+    last_cells: Vec<GridCell>,
+    last_grid_cols: usize,
+    last_grid_rows: usize,
 }
 
 impl HeadlessScreen {
@@ -84,7 +104,11 @@ impl HeadlessScreen {
             rows: rows.max(1),
         };
         let (sender, events) = mpsc::channel();
-        let term = Term::new(Config::default(), &geometry, Collector(sender));
+        let config = Config {
+            scrolling_history: history_line_limit(geometry.cols),
+            ..Config::default()
+        };
+        let term = Term::new(config, &geometry, Collector(sender));
         Self {
             term,
             parser: Processor::new(),
@@ -96,6 +120,9 @@ impl HeadlessScreen {
             content_seq: 0,
             last_digest: 0,
             progress_carry: Vec::new(),
+            last_cells: Vec::new(),
+            last_grid_cols: 0,
+            last_grid_rows: 0,
         }
     }
 
@@ -165,6 +192,189 @@ impl HeadlessScreen {
         (self.geometry.cols, self.geometry.rows)
     }
 
+    /// Whether the child asked for mouse reporting (any flavor).
+    pub fn mouse_reporting(&self) -> bool {
+        self.term.mode().intersects(TermMode::MOUSE_MODE)
+    }
+
+    /// Cursor (col, row, visible) without touching cell data.
+    pub fn cursor(&self) -> (u16, u16, bool) {
+        let point = self.term.grid().cursor.point;
+        (
+            point.column.0 as u16,
+            point.line.0.max(0) as u16,
+            self.term.mode().contains(TermMode::SHOW_CURSOR),
+        )
+    }
+
+    /// Builds a `GridUpdate` from the current screen. When `full` is true (or
+    /// the geometry changed) every row is included and the diff baseline
+    /// resets; otherwise only rows that changed since the last call are
+    /// included. Ported from the Swift `HeadlessScreen.gridUpdate(full:)`.
+    pub fn grid_update(&mut self, full: bool) -> GridUpdate {
+        let cols = self.geometry.cols;
+        let rows = self.geometry.rows;
+        let geometry_changed = self.last_grid_cols != cols || self.last_grid_rows != rows;
+        let force_full = full || geometry_changed;
+        if geometry_changed {
+            self.last_cells = vec![GridCell::BLANK; cols * rows];
+            self.last_grid_cols = cols;
+            self.last_grid_rows = rows;
+        }
+
+        let grid = self.term.grid();
+        let mut changed = Vec::new();
+        for y in 0..rows {
+            let line = Line(y as i32);
+            let base = y * cols;
+            let mut row = Vec::with_capacity(cols);
+            let mut row_changed = force_full;
+            for x in 0..cols {
+                let cell = wire_cell(&grid[line][Column(x)]);
+                if !row_changed && self.last_cells[base + x] != cell {
+                    row_changed = true;
+                }
+                row.push(cell);
+            }
+            if !row_changed {
+                continue;
+            }
+            self.last_cells[base..base + cols].copy_from_slice(&row);
+            changed.push(ChangedRow::new(y as u16, row));
+        }
+
+        let cursor = grid.cursor.point;
+        GridUpdate {
+            cols: cols as u16,
+            rows: rows as u16,
+            cursor_col: cursor.column.0 as u16,
+            cursor_row: cursor.line.0.max(0) as u16,
+            cursor_visible: self.term.mode().contains(TermMode::SHOW_CURSOR),
+            is_full_snapshot: force_full,
+            changed_rows: changed,
+        }
+    }
+
+    /// A full-screen snapshot that does NOT disturb the diff baseline. Used
+    /// to seed a fresh sink (or repair one that fell behind) without breaking
+    /// other sinks' diffs.
+    pub fn full_snapshot(&self) -> GridUpdate {
+        let cols = self.geometry.cols;
+        let rows = self.geometry.rows;
+        let grid = self.term.grid();
+        let mut all = Vec::with_capacity(rows);
+        for y in 0..rows {
+            let line = Line(y as i32);
+            let mut row = Vec::with_capacity(cols);
+            for x in 0..cols {
+                row.push(wire_cell(&grid[line][Column(x)]));
+            }
+            all.push(ChangedRow::new(y as u16, row));
+        }
+        let cursor = grid.cursor.point;
+        GridUpdate {
+            cols: cols as u16,
+            rows: rows as u16,
+            cursor_col: cursor.column.0 as u16,
+            cursor_row: cursor.line.0.max(0) as u16,
+            cursor_visible: self.term.mode().contains(TermMode::SHOW_CURSOR),
+            is_full_snapshot: true,
+            changed_rows: all,
+        }
+    }
+
+    /// Encodes a wheel event for the child, when it asked for mouse
+    /// reporting. Returns the bytes to write to the PTY — empty means the
+    /// child doesn't care and the client should scroll its own scrollback.
+    pub fn mouse_wheel(&self, up: bool, lines: usize, col: usize, row: usize) -> Vec<u8> {
+        if !self.mouse_reporting() || lines == 0 {
+            return Vec::new();
+        }
+        let x = col.min(self.geometry.cols.saturating_sub(1));
+        let y = row.min(self.geometry.rows.saturating_sub(1));
+        let button = if up { 64 } else { 65 }; // X11 wheel buttons 4/5, wheel-flagged
+        let mut out = Vec::new();
+        for _ in 0..lines {
+            if self.term.mode().contains(TermMode::SGR_MOUSE) {
+                out.extend_from_slice(format!("\x1b[<{button};{};{}M", x + 1, y + 1).as_bytes());
+            } else {
+                // Legacy X10 encoding: 32 + button, 32 + 1-based coordinate.
+                out.push(0x1b);
+                out.extend_from_slice(b"[M");
+                out.push(32 + button as u8);
+                out.push((32 + x + 1).min(255) as u8);
+                out.push((32 + y + 1).min(255) as u8);
+            }
+        }
+        out
+    }
+
+    /// Scrollback plus the visible screen as plain text, for search.
+    ///
+    /// Row indices are relative to the oldest line this emulator still
+    /// retains. Unlike SwiftTerm's scroll-invariant index they slide once the
+    /// history budget evicts — a client caching deep scrollback across heavy
+    /// output may refetch; the visible region and recent history are exact.
+    pub fn scrollback(&self) -> diri_proto::ReadScrollbackResult {
+        let grid = self.term.grid();
+        let history = grid.history_size();
+        let rows = self.geometry.rows;
+        let cols = self.geometry.cols;
+        let total = history + rows;
+        let mut lines = Vec::with_capacity(total);
+        for index in 0..total {
+            let line = Line(index as i32 - history as i32);
+            let mut text = String::with_capacity(cols);
+            for x in 0..cols {
+                let c = grid[line][Column(x)].c;
+                text.push(if c < ' ' && c != '\t' { ' ' } else { c });
+            }
+            lines.push(text.trim_end().to_string());
+        }
+        diri_proto::ReadScrollbackResult {
+            lines,
+            first_row: 0,
+            visible_start_row: history as i64,
+            cols: cols as i64,
+            rows: rows as i64,
+            content_seq: self.content_seq,
+            is_alt_screen: self.is_alt_screen(),
+        }
+    }
+
+    /// A window of scrollback rows as encoded cells, clamped to what exists.
+    pub fn scrollback_cells(
+        &self,
+        first_row: i64,
+        max_rows: i64,
+    ) -> diri_proto::ReadScrollbackCellsResult {
+        let grid = self.term.grid();
+        let history = grid.history_size();
+        let cols = self.geometry.cols;
+        let total = history + self.geometry.rows;
+
+        let start = first_row.max(0).min(total as i64) as usize;
+        let end = (start + max_rows.max(0) as usize).min(total);
+        let mut rows = Vec::with_capacity(end.saturating_sub(start));
+        for index in start..end {
+            let line = Line(index as i32 - history as i32);
+            let mut row = Vec::with_capacity(cols);
+            for x in 0..cols {
+                row.push(wire_cell(&grid[line][Column(x)]));
+            }
+            rows.push(row);
+        }
+        diri_proto::ReadScrollbackCellsResult {
+            payload: GridRowCodec::encode_rows(&rows).unwrap_or_default(),
+            first_row: start as i64,
+            row_count: rows.len() as i64,
+            total_rows: total as i64,
+            live_start_row: history as i64,
+            cols: cols as i64,
+            content_seq: self.content_seq,
+        }
+    }
+
     /// The visible grid as plain text, trailing blank lines removed.
     pub fn lines(&self) -> Vec<String> {
         let grid = self.term.grid();
@@ -206,6 +416,8 @@ impl HeadlessScreen {
             }
         }
     }
+
+    // (cell mapping lives at module level; see `wire_cell`)
 
     /// Content fingerprint hashed straight off the grid cells, so
     /// `content_seq` only advances when the visible screen actually changed.
@@ -258,6 +470,69 @@ impl HeadlessScreen {
         let keep = haystack.len().saturating_sub(64);
         self.progress_carry = haystack[keep..].to_vec();
     }
+}
+
+/// Maps an alacritty cell to the wire cell the client renders.
+///
+/// The wire vocabulary is SwiftTerm's (the format predates this emulator):
+/// `Default`/`DefaultInverted` are the two default colors, ANSI indices cover
+/// 0–255, and the style bits follow SwiftTerm's `CharacterStyle` layout.
+fn wire_cell(cell: &alacritty_terminal::term::cell::Cell) -> GridCell {
+    let scalar = if cell.c == '\0' { 32 } else { cell.c as u32 };
+    GridCell::new(
+        scalar,
+        wire_color(cell.fg),
+        wire_color(cell.bg),
+        wire_style(cell.flags),
+    )
+}
+
+fn wire_color(color: Color) -> TermColor {
+    match color {
+        Color::Named(NamedColor::Foreground) => TermColor::Default,
+        Color::Named(NamedColor::Background) => TermColor::DefaultInverted,
+        Color::Named(named) => {
+            let index = named as usize;
+            if index < 16 {
+                TermColor::Ansi(index as u8)
+            } else if (NamedColor::DimBlack as usize..=NamedColor::DimWhite as usize)
+                .contains(&index)
+            {
+                // Dim variants render as their base color; DIM rides the style.
+                TermColor::Ansi((index - NamedColor::DimBlack as usize) as u8)
+            } else {
+                TermColor::Default
+            }
+        }
+        Color::Indexed(index) => TermColor::Ansi(index),
+        Color::Spec(rgb) => TermColor::Rgb(rgb.r, rgb.g, rgb.b),
+    }
+}
+
+fn wire_style(flags: Flags) -> TermStyle {
+    let mut style = TermStyle::empty();
+    if flags.intersects(Flags::BOLD | Flags::DIM_BOLD) {
+        style |= TermStyle::BOLD;
+    }
+    if flags.intersects(Flags::ALL_UNDERLINES) {
+        style |= TermStyle::UNDERLINE;
+    }
+    if flags.contains(Flags::INVERSE) {
+        style |= TermStyle::INVERSE;
+    }
+    if flags.contains(Flags::HIDDEN) {
+        style |= TermStyle::INVISIBLE;
+    }
+    if flags.intersects(Flags::DIM | Flags::DIM_BOLD) {
+        style |= TermStyle::DIM;
+    }
+    if flags.contains(Flags::ITALIC) {
+        style |= TermStyle::ITALIC;
+    }
+    if flags.contains(Flags::STRIKEOUT) {
+        style |= TermStyle::CROSSED_OUT;
+    }
+    style
 }
 
 fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {

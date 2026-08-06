@@ -32,6 +32,7 @@ pub struct ControlServer {
     logs_dir: PathBuf,
     holder: Option<crate::session::HolderConfig>,
     events: crate::events::EventBus,
+    attach: crate::attach::AttachHub,
 }
 
 impl ControlServer {
@@ -47,6 +48,7 @@ impl ControlServer {
             logs_dir,
             holder: None,
             events: crate::events::EventBus::new(),
+            attach: crate::attach::AttachHub::new(),
         }
     }
 
@@ -103,19 +105,50 @@ impl ControlServer {
 
     /// Serves one connection to completion.
     ///
+    /// The FIRST line decides what this connection is: an [`AttachRequest`]
+    /// makes it a binary session data channel, anything else is control
+    /// NDJSON — the same sniff the Swift `ConnectionHub` does, so one socket
+    /// path serves both.
+    ///
     /// The write half is shared: after `events.subscribe`, a forwarder thread
     /// pushes event frames onto the same socket while this loop keeps
     /// answering requests — one connection carries both, as the Swift daemon's
     /// does.
     pub fn serve(&self, stream: UnixStream) -> std::io::Result<()> {
-        let reader = BufReader::new(stream.try_clone()?);
+        let mut reader = BufReader::new(stream.try_clone()?);
         let writer = Arc::new(Mutex::new(stream));
         let mut subscription: Option<SubscriptionHandle> = None;
 
-        for line in reader.split(b'\n') {
-            let line = line?;
+        let mut first = true;
+        loop {
+            let mut line = Vec::new();
+            let read = reader.read_until(b'\n', &mut line)?;
+            if read == 0 {
+                return Ok(());
+            }
+            if line.last() == Some(&b'\n') {
+                line.pop();
+            }
             if line.is_empty() {
                 continue;
+            }
+            if first {
+                first = false;
+                if let Ok(attach) =
+                    serde_json::from_slice::<diri_proto::AttachRequest>(&line)
+                {
+                    // Bytes the line reader buffered past the attach line are
+                    // already binary frames; hand them over.
+                    let buffered = reader.buffer().to_vec();
+                    self.attach.serve(
+                        &self.registry,
+                        &attach.attach.0,
+                        reader.into_inner(),
+                        buffered,
+                        writer,
+                    );
+                    return Ok(());
+                }
             }
             if line.len() > MAX_CONTROL_LINE_BYTES {
                 // A client that sends an oversized frame is out of contract;
@@ -130,7 +163,6 @@ impl ControlServer {
             };
             write_message(&writer, &response)?;
         }
-        Ok(())
     }
 
     fn handle_line(
@@ -293,6 +325,8 @@ impl ControlServer {
             Method::SESSION_SEND_TEXT => self.session_send_text(params),
             Method::SESSION_RESIZE => self.session_resize(params),
             Method::SESSION_READ_SCREEN => self.session_read_screen(params),
+            Method::SESSION_READ_SCROLLBACK => self.session_read_scrollback(params),
+            Method::SESSION_READ_SCROLLBACK_CELLS => self.session_read_scrollback_cells(params),
             Method::SESSION_KILL => self.session_kill(params),
             Method::SESSION_REMOVE => self.session_remove(params),
             Method::SESSION_RENAME => self.session_rename(params),
@@ -457,6 +491,27 @@ impl ControlServer {
             cols: cols as i64,
             rows: rows as i64,
         })
+    }
+
+    fn session_read_scrollback(&self, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
+        let p: diri_proto::SessionIdParams = decode(params)?;
+        let registry = self.registry.lock().map_err(poisoned)?;
+        let session = registry
+            .get(&p.session_id.0)
+            .ok_or_else(|| ControlError::not_found(p.session_id.0.clone()))?;
+        encode(&session.read_scrollback())
+    }
+
+    fn session_read_scrollback_cells(
+        &self,
+        params: Option<JsonValue>,
+    ) -> Result<JsonValue, ControlError> {
+        let p: diri_proto::ReadScrollbackCellsParams = decode(params)?;
+        let registry = self.registry.lock().map_err(poisoned)?;
+        let session = registry
+            .get(&p.session_id.0)
+            .ok_or_else(|| ControlError::not_found(p.session_id.0.clone()))?;
+        encode(&session.read_scrollback_cells(p.first_row, p.max_rows))
     }
 
     fn session_kill(&self, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {

@@ -74,6 +74,17 @@ struct Shared {
     stop: AtomicBool,
 }
 
+/// What the grid pump compares between ticks to decide whether anything
+/// observable changed. Default is "never seen anything".
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct GridSignature {
+    pub content_seq: u64,
+    pub size: (usize, usize),
+    pub cursor: (u16, u16, bool),
+    pub alt_screen: bool,
+    pub mouse_reporting: bool,
+}
+
 /// Who owns the PTY.
 enum Transport {
     /// This process does; dropping the session kills the child.
@@ -278,6 +289,88 @@ impl Session {
     /// The emulator's current geometry.
     pub fn screen_size(&self) -> (usize, usize) {
         self.shared.screen.lock().expect("screen").size()
+    }
+
+    /// A full grid snapshot for a freshly attached sink, plus current modes.
+    /// Does not disturb the shared diff baseline.
+    pub fn full_grid(&self) -> (diri_proto::grid::GridUpdate, (bool, bool)) {
+        let screen = self.shared.screen.lock().expect("screen");
+        let modes = (screen.is_alt_screen(), screen.mouse_reporting());
+        (screen.full_snapshot(), modes)
+    }
+
+    /// The next grid diff, if anything observable changed since `signature`.
+    /// The signature compare makes an idle 16ms pump tick cost one mutex lock
+    /// and a tuple compare — the grid walk only happens on change.
+    pub fn grid_update_if_changed(
+        &self,
+        signature: &mut GridSignature,
+    ) -> Option<diri_proto::grid::GridUpdate> {
+        let mut screen = self.shared.screen.lock().expect("screen");
+        let current = GridSignature {
+            content_seq: screen.content_seq(),
+            size: screen.size(),
+            cursor: screen.cursor(),
+            alt_screen: screen.is_alt_screen(),
+            mouse_reporting: screen.mouse_reporting(),
+        };
+        if current == *signature {
+            return None;
+        }
+        *signature = current;
+        Some(screen.grid_update(false))
+    }
+
+    /// Current (alt_screen, mouse_reporting).
+    pub fn modes(&self) -> (bool, bool) {
+        let screen = self.shared.screen.lock().expect("screen");
+        (screen.is_alt_screen(), screen.mouse_reporting())
+    }
+
+    /// A wheel event from an attached client: forwarded to the child when it
+    /// asked for mouse reporting, otherwise ignored (the client scrolls its
+    /// own scrollback).
+    pub fn scroll(&self, up: bool, lines: usize, col: usize, row: usize) -> std::io::Result<()> {
+        let bytes = self
+            .shared
+            .screen
+            .lock()
+            .expect("screen")
+            .mouse_wheel(up, lines, col, row);
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        // Raw: a wheel is not a keystroke, and must not look like user typing
+        // to the status reducer.
+        self.write_raw(&bytes)
+    }
+
+    pub fn read_scrollback(&self) -> diri_proto::ReadScrollbackResult {
+        self.shared.screen.lock().expect("screen").scrollback()
+    }
+
+    pub fn read_scrollback_cells(
+        &self,
+        first_row: i64,
+        max_rows: i64,
+    ) -> diri_proto::ReadScrollbackCellsResult {
+        self.shared
+            .screen
+            .lock()
+            .expect("screen")
+            .scrollback_cells(first_row, max_rows)
+    }
+
+    fn write_raw(&self, bytes: &[u8]) -> std::io::Result<()> {
+        match &self.transport {
+            Transport::Direct(pty) => {
+                use std::io::Write;
+                let mut writer = pty.lock().expect("pty").writer()?;
+                writer.write_all(bytes)?;
+                writer.flush()
+            }
+            Transport::Held(client) => client.write(bytes).map_err(holder_io_error),
+        }
     }
 
     /// Sends text the way a user would.

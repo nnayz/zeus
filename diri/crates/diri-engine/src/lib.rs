@@ -19,6 +19,7 @@
 //!   sessions.
 
 pub mod agent;
+pub mod attach;
 pub mod control;
 pub mod detect;
 pub mod events;

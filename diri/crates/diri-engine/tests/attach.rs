@@ -111,7 +111,7 @@ fn an_attach_is_seeded_then_streams_diffs_and_answers_input() {
         id: 1,
         method: "session.spawn".into(),
         params: Some(json!({
-            "kind": "shell",
+            "kind": { "shell": {} },
             "cwd": "/tmp",
             "argv": ["/bin/sh", "-c", "printf 'seeded-screen\\n'; exec cat"],
         })),
@@ -125,7 +125,7 @@ fn an_attach_is_seeded_then_streams_diffs_and_answers_input() {
         match reply {
             ControlMessage::Response {
                 result: Ok(result), ..
-            } => result["session"]["id"].as_str().expect("id").to_string(),
+            } => result["id"].as_str().expect("id").to_string(),
             other => panic!("spawn failed: {other:?}"),
         }
     };

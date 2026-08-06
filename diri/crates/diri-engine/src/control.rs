@@ -408,16 +408,10 @@ impl ControlServer {
     /// `generic` need an explicit `argv`, since their manifests declare no
     /// binary.
     fn session_spawn(&self, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
-        let params = params.ok_or_else(|| ControlError::bad_request("params are required"))?;
-        let kind = string_field(&params, "kind")?;
-        let cwd = string_field(&params, "cwd")?;
-        let cwd_path = PathBuf::from(&cwd);
-        if !cwd_path.is_dir() {
-            return Err(ControlError::bad_request(format!(
-                "cwd {cwd:?} is not a directory"
-            )));
-        }
-        let argv: Vec<String> = params
+        let raw = params.ok_or_else(|| ControlError::bad_request("params are required"))?;
+        // Tests and scripts may pass a raw argv; the app never does. Read it
+        // before the typed decode consumes the value.
+        let argv: Vec<String> = raw
             .get("argv")
             .and_then(Value::as_array)
             .map(|values| {
@@ -428,6 +422,51 @@ impl ControlServer {
                     .collect()
             })
             .unwrap_or_default();
+        let p: diri_proto::SessionSpawnParams = decode(Some(raw))?;
+        if p.host.is_some() {
+            return Err(ControlError::bad_request(
+                "remote-host spawning is not supported by this engine yet",
+            ));
+        }
+        let kind = p.kind.id().to_string();
+        // A generic kind carries the user's command line inside itself.
+        let argv = if argv.is_empty() {
+            match p.kind.command() {
+                Some(command) if !command.is_empty() => {
+                    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+                    vec![shell, "-lc".into(), command.to_string()]
+                }
+                _ if kind == diri_proto::AgentKind::SHELL_ID => {
+                    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+                    vec![shell, "-l".into()]
+                }
+                _ => Vec::new(),
+            }
+        } else {
+            argv
+        };
+
+        // A worktree spawn creates the checkout first, then lands in it.
+        let mut cwd = p.cwd.clone();
+        let mut worktree_path = None;
+        let mut git_branch = None;
+        if p.new_worktree.unwrap_or(false) {
+            let info = crate::git::create_worktree(
+                Path::new(&p.cwd),
+                p.worktree_branch.as_deref(),
+                None,
+            )
+            .map_err(io_control_error)?;
+            git_branch.clone_from(&info.branch);
+            cwd.clone_from(&info.path);
+            worktree_path = Some(info.path);
+        }
+        let cwd_path = PathBuf::from(&cwd);
+        if !cwd_path.is_dir() {
+            return Err(ControlError::bad_request(format!(
+                "cwd {cwd:?} is not a directory"
+            )));
+        }
 
         let mut registry = self.registry.lock().map_err(poisoned)?;
         let engine = registry.engine();
@@ -456,6 +495,17 @@ impl ControlServer {
 
         let id = next_session_id();
         let mut record = new_record(&id, &kind, &cwd);
+        if let Some(title) = &p.title {
+            record.title = title.clone();
+            record.title_source = diri_proto::TitleSource::DirijorAssigned;
+        }
+        record.worktree_path = worktree_path;
+        record.git_branch = git_branch.or_else(|| crate::git::branch(&cwd_path));
+        record.parent = p.parent.clone();
+        if let (Some(cols), Some(rows)) = (p.initial_cols, p.initial_rows) {
+            pty.cols = cols.clamp(2, u16::MAX as i64) as u16;
+            pty.rows = rows.clamp(2, u16::MAX as i64) as u16;
+        }
 
         // Injection: manifest spawn args, a caller-minted conversation UUID
         // (what makes resume possible later), the Dirijor env triplet, and
@@ -514,13 +564,46 @@ impl ControlServer {
         let _ = registry.persist();
         self.publish_updated(&registry, &id);
 
+        // An initial prompt is typed once the TUI has painted something,
+        // then submitted — a blind fixed delay raced Claude Code's boot.
+        if let Some(prompt) = p.initial_prompt.clone().filter(|prompt| !prompt.is_empty()) {
+            let registry = Arc::clone(&self.registry);
+            let session_id = id.clone();
+            std::thread::spawn(move || {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                loop {
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                    let ready = registry
+                        .lock()
+                        .ok()
+                        .and_then(|guard| {
+                            guard.get(&session_id).map(|session| {
+                                !session.screen_lines().is_empty()
+                            })
+                        });
+                    match ready {
+                        Some(true) => break,
+                        Some(false) if std::time::Instant::now() < deadline => continue,
+                        _ => break,
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                if let Ok(guard) = registry.lock()
+                    && let Some(session) = guard.get(&session_id)
+                {
+                    let _ = session.send_text(&prompt, true);
+                }
+            });
+        }
+
         let record = registry
             .records()
             .into_iter()
             .find(|record| record.id.0 == id)
             .ok_or_else(|| ControlError::internal("the new session vanished"))?;
-        serde_json::to_value(json!({ "session": record }))
-            .map_err(|error| ControlError::internal(error.to_string()))
+        // SessionSpawnResult is the record itself, as the Swift daemon
+        // answers — not wrapped.
+        serde_json::to_value(&record).map_err(|error| ControlError::internal(error.to_string()))
     }
 
     /// `session.list` and `state.snapshot` are the same view: every record

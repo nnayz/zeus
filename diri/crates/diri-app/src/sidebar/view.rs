@@ -777,8 +777,7 @@ impl Sidebar {
                     }
                 })
                 .on_drop(cx.listener(|this, _: &DraggedSidebarItem, _, cx| {
-                    this.ui.drag = None;
-                    this.ui.drag_target = None;
+                    this.finish_drag();
                     cx.notify();
                 }))
                 .child(project_badge(colors))
@@ -1087,8 +1086,7 @@ impl Sidebar {
                             .expect("session store lock poisoned")
                             .revive_sessions(vec![id.clone()]);
                     }
-                    this.ui.drag = None;
-                    this.ui.drag_target = None;
+                    this.finish_drag();
                     cx.notify();
                 }
             }))
@@ -1291,7 +1289,7 @@ impl Sidebar {
                         _ => Vec::new(),
                     };
                     this.archive_sessions(ids);
-                    this.ui.drag_target = None;
+                    this.finish_drag();
                     cx.notify();
                 }
             }))
@@ -2712,7 +2710,7 @@ impl Sidebar {
         let mut order = store.preferences().sidebar_project_order.clone();
         ensure_present(&mut order, store.projects().keys().cloned());
         move_before(&mut order, moved, target);
-        let _ = store.set_project_order(order);
+        self.ui.order_dirty |= store.stage_project_order(order);
     }
 
     fn reorder_session(&mut self, moved: &SessionId, target: &SessionId) {
@@ -2720,7 +2718,22 @@ impl Sidebar {
         let mut order = store.preferences().sidebar_session_order.clone();
         ensure_present(&mut order, store.sessions().keys().cloned());
         move_before(&mut order, moved, target);
-        let _ = store.set_session_order(order);
+        self.ui.order_dirty |= store.stage_session_order(order);
+    }
+
+    /// Ends a drag gesture: clears the visual state and writes any staged
+    /// reorder to disk exactly once.
+    fn finish_drag(&mut self) {
+        self.ui.drag = None;
+        self.ui.drag_target = None;
+        if self.ui.order_dirty {
+            self.ui.order_dirty = false;
+            let _ = self
+                .store
+                .read()
+                .expect("session store lock poisoned")
+                .persist_preferences();
+        }
     }
 
     /// Drops the moved session at the end of the manual order. The projection

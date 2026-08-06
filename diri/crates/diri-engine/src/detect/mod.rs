@@ -129,6 +129,28 @@ impl ManifestEngine {
         Ok((engine, failed))
     }
 
+    /// Loads several directories in order, later dirs overriding earlier ones
+    /// by manifest id — base catalog first, user overrides second.
+    pub fn load_dirs(dirs: &[&Path]) -> std::io::Result<(Self, Vec<String>)> {
+        let mut merged: Option<Self> = None;
+        let mut all_failed = Vec::new();
+        for dir in dirs {
+            if !dir.is_dir() {
+                continue;
+            }
+            let (engine, failed) = Self::load_dir(dir)?;
+            all_failed.extend(failed);
+            match &mut merged {
+                None => merged = Some(engine),
+                Some(base) => {
+                    base.manifests.extend(engine.manifests);
+                    base.raw_agents.extend(engine.raw_agents);
+                }
+            }
+        }
+        Ok((merged.unwrap_or_else(|| Self::new(Vec::new())), all_failed))
+    }
+
     pub fn manifest(&self, id: &str) -> Option<&Manifest> {
         self.manifests.get(id)
     }

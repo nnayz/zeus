@@ -110,6 +110,16 @@ cp "${daemon_bin}/dirijor" "${app_bin_dir}/dirijor"
 cp "${universal_mcp_binary}" "${app_bin_dir}/dirijor-mcp"
 lipo -info "${app_bin_dir}/dirijord"
 
+# The Rust daemon rides along for the engine switch: opt a machine in with
+#   DIRIJORD_PATH=.../Resources/bin/dirijord-rs open -a diri
+# Native arch like the Swift daemon; it adopts the same holders, so flipping
+# back and forth never loses a session.
+echo "==> Building the Rust daemon (native)"
+cargo build --release --package diri-engine --bin dirijord-rs --bin diri-holder \
+    --target aarch64-apple-darwin
+cp "${target_dir}/aarch64-apple-darwin/release/dirijord-rs" "${app_bin_dir}/dirijord-rs"
+cp "${target_dir}/aarch64-apple-darwin/release/diri-holder" "${app_bin_dir}/diri-holder"
+
 # SwiftPM resource bundles (agent manifests). Copy them NEXT TO the binaries,
 # because for a bare executable `Bundle.main` is the directory containing that
 # executable — Resources/bin here, not Contents/Resources — and that is the
@@ -168,6 +178,8 @@ codesign --force --options runtime "${ts_flag[@]}" --sign "${sign_id}" "${app_bi
 codesign --force --options runtime "${ts_flag[@]}" --sign "${sign_id}" "${app_bin_dir}/dirijord"
 codesign --force --options runtime "${ts_flag[@]}" --sign "${sign_id}" "${app_bin_dir}/dirijor"
 codesign --force --options runtime "${ts_flag[@]}" --sign "${sign_id}" "${app_bin_dir}/dirijor-mcp"
+codesign --force --options runtime "${ts_flag[@]}" --sign "${sign_id}" "${app_bin_dir}/dirijord-rs"
+codesign --force --options runtime "${ts_flag[@]}" --sign "${sign_id}" "${app_bin_dir}/diri-holder"
 echo "==> Signing ${app_path}"
 codesign --force --options runtime "${ts_flag[@]}" \
     --entitlements "${entitlements}" \

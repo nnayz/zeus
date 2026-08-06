@@ -33,6 +33,15 @@ pub struct ControlServer {
     holder: Option<crate::session::HolderConfig>,
     events: crate::events::EventBus,
     attach: crate::attach::AttachHub,
+    injection: Option<InjectionConfig>,
+}
+
+/// Where injection files live and which CLI they point at. Present, spawns
+/// become hook-driven and get the dirijor MCP tools.
+#[derive(Clone, Debug)]
+pub struct InjectionConfig {
+    pub inject_dir: PathBuf,
+    pub cli_path: PathBuf,
 }
 
 impl ControlServer {
@@ -49,7 +58,18 @@ impl ControlServer {
             holder: None,
             events: crate::events::EventBus::new(),
             attach: crate::attach::AttachHub::new(),
+            injection: None,
         }
+    }
+
+    /// Enables spawn-time hook/MCP injection: writes the shim files (like the
+    /// Swift daemon does at startup) and applies each manifest's mechanisms
+    /// to future spawns.
+    pub fn with_injection(mut self, config: InjectionConfig) -> Self {
+        let _ = crate::inject::write_claude_hooks_file(&config.inject_dir);
+        let _ = crate::inject::write_claude_mcp_file(&config.inject_dir, &config.cli_path);
+        self.injection = Some(config);
+        self
     }
 
     /// The bus this server publishes to — the daemon shares it with the
@@ -401,7 +421,7 @@ impl ControlServer {
         let authority = descriptor.authority();
 
         let inherited: Vec<(String, String)> = std::env::vars().collect();
-        let pty = match descriptor.spawn_spec(&cwd_path, inherited.clone(), &argv) {
+        let mut pty = match descriptor.spawn_spec(&cwd_path, inherited.clone(), &argv) {
             Some(spec) => spec,
             // No binary in the manifest: the caller has to say what to run.
             None if !argv.is_empty() => {
@@ -418,7 +438,51 @@ impl ControlServer {
         };
 
         let id = next_session_id();
-        let record = new_record(&id, &kind, &cwd);
+        let mut record = new_record(&id, &kind, &cwd);
+
+        // Injection: manifest spawn args, a caller-minted conversation UUID
+        // (what makes resume possible later), the Dirijor env triplet, and
+        // the hook/MCP shim flags the manifest opted into.
+        if descriptor.binary.is_some() {
+            pty.argv.extend(descriptor.spawn_args.iter().cloned());
+            let agent_session_id = descriptor.session_id_flag.as_ref().map(|flag| {
+                let uuid = crate::inject::uuid_v4();
+                pty.argv.push(flag.clone());
+                pty.argv.push(uuid.clone());
+                uuid
+            });
+            if let Some(injection) = &self.injection {
+                pty.env.push((
+                    crate::inject::SESSION_ID_ENV.into(),
+                    id.clone(),
+                ));
+                pty.env.push((
+                    crate::inject::SOCKET_ENV.into(),
+                    self.socket_path.to_string_lossy().into_owned(),
+                ));
+                pty.env.push((
+                    crate::inject::CLI_ENV.into(),
+                    injection.cli_path.to_string_lossy().into_owned(),
+                ));
+                pty.argv.extend(crate::inject::injection_args(
+                    &descriptor.injection,
+                    &injection.inject_dir,
+                    &injection.cli_path,
+                ));
+            }
+            if let Some(uuid) = &agent_session_id {
+                record.agent_session_id = Some(uuid.clone());
+                if descriptor.injection.claude_hooks
+                    && let Ok(home) = std::env::var("HOME")
+                {
+                    record.transcript_path = Some(
+                        crate::inject::claude_transcript_path(Path::new(&home), &cwd, uuid)
+                            .to_string_lossy()
+                            .into_owned(),
+                    );
+                }
+            }
+        }
         let spec = crate::session::SessionSpec {
             id: id.clone(),
             pty,
@@ -905,6 +969,25 @@ mod tests {
             Some(json!({ "proto": 99, "build": "future-client" })),
         ));
         assert_eq!(error.code, "version_mismatch");
+    }
+
+    #[test]
+    fn the_claude_manifest_declares_its_injection_mechanisms() {
+        // The spawn path reads these; a manifest-parsing regression would
+        // silently ship screen-detected Claudes with no MCP tools.
+        let engine = engine();
+        let manifest = engine.manifest("claude-code").expect("claude manifest");
+        let descriptor = manifest.agent.clone().expect("agent");
+        assert!(descriptor.injection.claude_hooks);
+        assert!(descriptor.injection.claude_mcp);
+        assert!(descriptor.session_id_flag.is_some());
+
+        let codex = engine.manifest("codex").expect("codex manifest");
+        let codex_descriptor = codex.agent.clone().expect("agent");
+        assert!(
+            codex_descriptor.injection.codex_notify || codex_descriptor.injection.codex_mcp,
+            "codex opts into at least one shim"
+        );
     }
 
     #[test]

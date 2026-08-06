@@ -38,6 +38,21 @@ pub struct ResumeSpec {
     pub token: Option<String>,
 }
 
+/// The config-injection mechanisms a manifest can opt into. Each is a
+/// Dirijor-implemented shim (hooks file, MCP config, notify callback): the
+/// manifest names the mechanism, the daemon owns the file it points at.
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+pub struct InjectionSpec {
+    #[serde(default, rename = "claudeHooks")]
+    pub claude_hooks: bool,
+    #[serde(default, rename = "claudeMCP")]
+    pub claude_mcp: bool,
+    #[serde(default, rename = "codexNotify")]
+    pub codex_notify: bool,
+    #[serde(default, rename = "codexMCP")]
+    pub codex_mcp: bool,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApproveSpec {
@@ -66,8 +81,17 @@ pub struct AgentDescriptor {
     pub binary: Option<String>,
     #[serde(default)]
     pub return_to_login_shell: bool,
-    #[serde(default)]
+    /// Swift Codable spelling: capital ID, which `rename_all = "camelCase"`
+    /// would miss (`sessionIdFlag`) — and a silently-unparsed flag means no
+    /// caller-minted conversation UUID and therefore no resume.
+    #[serde(default, rename = "sessionIDFlag")]
     pub session_id_flag: Option<String>,
+    /// Extra argv the manifest wants on every spawn, before injection args.
+    #[serde(default)]
+    pub spawn_args: Vec<String>,
+    /// Which Dirijor-implemented config shims this agent takes.
+    #[serde(default)]
+    pub injection: InjectionSpec,
     #[serde(default)]
     pub resume: Option<ResumeSpec>,
     /// Environment the agent needs.

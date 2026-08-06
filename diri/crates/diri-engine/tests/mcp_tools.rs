@@ -77,6 +77,7 @@ fn spec(id: &str, script: &str, logs: &Path) -> SessionSpec {
         manifest_id: "shell".into(),
         authority: Authority::ProcessOnly,
         logs_dir: logs.to_path_buf(),
+        holder: None,
     }
 }
 

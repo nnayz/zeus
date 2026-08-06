@@ -13,7 +13,8 @@ use diri_proto::{SessionRecord, SessionStatus};
 use serde::{Deserialize, Serialize};
 
 use crate::detect::ManifestEngine;
-use crate::session::{Session, SessionSpec, SessionView};
+use crate::holder::{HolderClient, HolderManagerPaths, HolderPaths};
+use crate::session::{HolderConfig, Session, SessionSpec, SessionView};
 
 /// The on-disk snapshot. Field names and the version match the Swift
 /// `PersistedState` exactly.
@@ -112,6 +113,70 @@ impl Registry {
         self.records.insert(id.clone(), record);
         self.sessions.insert(id.clone(), session);
         Ok(id)
+    }
+
+    /// Adopts every still-live holder-owned session found under
+    /// `holder.holders_dir` that has a persisted record. Call after [`load`]:
+    /// this is what makes sessions survive a daemon restart — or the switch
+    /// from the Swift daemon to this one.
+    ///
+    /// Returns the ids adopted. Sessions whose holder is gone are left as
+    /// records only, exactly as [`load`] left them.
+    ///
+    /// [`load`]: Registry::load
+    pub fn restore(&mut self, holder: &HolderConfig, logs_dir: &Path) -> Vec<String> {
+        let holders_dir = HolderPaths::new(&holder.holders_dir, "probe").directory;
+        let Ok(entries) = std::fs::read_dir(&holders_dir) else {
+            return Vec::new();
+        };
+        let holder_session_ids: Vec<String> = entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.extension().is_some_and(|extension| extension == "sock")
+                    && !HolderManagerPaths::is_manager_socket(path)
+            })
+            .filter_map(|path| {
+                path.file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .map(str::to_string)
+            })
+            .collect();
+
+        let mut adopted = Vec::new();
+        for session_id in holder_session_ids {
+            let Some(record) = self.records.get(&session_id) else {
+                continue; // a holder without a record is not ours to run
+            };
+            if self.sessions.contains_key(&session_id) {
+                continue;
+            }
+            let paths = HolderPaths::new(&holder.holders_dir, &session_id);
+            let client = HolderClient::new(paths.socket());
+            let Ok(stat) = client.stat() else { continue };
+            if !stat.alive {
+                continue;
+            }
+            let manifest_id = record.kind.id().to_string();
+            let spec = SessionSpec {
+                id: session_id.clone(),
+                // The holder owns the real spec; this one only shapes the
+                // emulator until stat's dimensions overwrite it in `adopt`.
+                pty: crate::pty::PtySpec::new(Vec::new(), record.cwd.clone()),
+                manifest_id: manifest_id.clone(),
+                authority: crate::session::authority_for(&manifest_id, &self.engine),
+                logs_dir: logs_dir.to_path_buf(),
+                holder: Some(holder.clone()),
+            };
+            match Session::adopt(spec, holder, &stat, Arc::clone(&self.engine)) {
+                Ok(session) => {
+                    self.sessions.insert(session_id.clone(), session);
+                    adopted.push(session_id);
+                }
+                Err(_) => continue,
+            }
+        }
+        adopted
     }
 
     /// The manifest engine these sessions were started with.

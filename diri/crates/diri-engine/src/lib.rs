@@ -23,6 +23,8 @@ pub mod control;
 pub mod detect;
 pub mod git;
 pub mod history;
+#[cfg(unix)]
+pub mod holder;
 pub mod hooks;
 pub mod log;
 pub mod mcp;
@@ -39,5 +41,5 @@ pub use log::OutputLog;
 pub use pty::{Exit, Pty, PtySpec};
 pub use registry::Registry;
 pub use screen::HeadlessScreen;
-pub use session::{Session, SessionSpec, SessionView};
+pub use session::{HolderConfig, Session, SessionSpec, SessionView};
 pub use status::{Authority, ReducerOutcome, StatusReducer, StatusSignal};

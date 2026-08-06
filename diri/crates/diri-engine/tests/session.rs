@@ -57,6 +57,7 @@ fn spec(
         manifest_id: manifest_id.into(),
         authority,
         logs_dir: logs.to_path_buf(),
+        holder: None,
     }
 }
 

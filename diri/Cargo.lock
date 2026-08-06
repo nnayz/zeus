@@ -1361,6 +1361,7 @@ name = "diri-engine"
 version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
+ "base64",
  "diri-proto",
  "getrandom 0.3.4",
  "libc",

@@ -41,10 +41,30 @@ This is the record of replacing it with `crates/diri-engine`.
 | Git facts | **done** | Branch and linked-worktree detection by reading `.git` directly; porcelain parsing |
 | Worktree operations | **done** | Create, list, remove against real git; paths canonicalized so they match what git reports |
 | MCP server | **done** | JSON-RPC stdio protocol + 13 tools executing against the registry |
-| Holder (session survival) | not started | The reason the Rust engine cannot replace the Swift one yet |
+| Holder (session survival) | **done** | Server, manager, launcher, client — same sockets, NDJSON protocol, pid files, and OSC 777 exit marker as `DirijorHolderKit`. Interop-proven live: the Rust client/launcher drives the real Swift `dirijord-holder` binary (spec encode → Swift decode, stat/write/resize/signal/kill-tree, Swift-written log read back, Swift exit marker parsed) |
+| Held sessions + adoption | **done** | `Session::spawn` goes through a holder when a `HolderConfig` is present; `Registry::restore` scans the holders directory and adopts live holders after a restart. Tested: a session survives its session object being dropped and a brand-new registry picks it up mid-flight |
 | History / resume | **done** | Claude and Codex transcript stores; verified against the real ones — 500 conversations in 0.9s |
 | Remote hosts (ssh + tmux) | **done** | argv, reattach naming, shell quoting verified through a real shell, scp handoff |
 | Swift daemon retirement | not started | Only after the above ships and is proven |
+
+Holder-port notes, for whoever wires the daemon:
+
+- **The mixed-fleet upgrade works by construction**: paths, spec JSON, and the
+  log format are shared, so a Rust daemon adopts Swift-spawned holders (this
+  direction is what `tests/holder_interop.rs` proves against the real Swift
+  binary) and a Swift daemon would adopt Rust-spawned ones. The reverse
+  direction has no automated test — it only matters for a rollback, and would
+  need Swift-side test infrastructure.
+- **Screen checkpoints are not ported.** The Swift daemon restores adopted
+  sessions from `<id>.screen.plist` when fresh enough; the Rust held pump
+  replays a bounded raw tail (256 KiB, same budget) through the emulator
+  instead. Same bound on startup work, slightly more of it.
+- **Deferred launch is not ported.** The Swift daemon delays exec until the
+  first client resize so TUI banners render at the settled width; the Rust
+  engine spawns at the spec size. Worth revisiting when the app moves to this
+  engine.
+- **A markerless holder death** (SIGKILL of the holder itself) is caught by a
+  ~2s liveness probe in the held pump, so a session cannot look alive forever.
 
 ## What the risky parts turned out to be
 

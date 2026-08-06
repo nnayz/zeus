@@ -1,10 +1,16 @@
 //! A live session: one child process on a PTY, watched.
 //!
-//! This is where the previous layers meet. A session owns the PTY, appends
-//! everything the child writes to its [`OutputLog`], feeds the same bytes to a
+//! This is where the previous layers meet. A session appends everything the
+//! child writes to its [`OutputLog`], feeds the same bytes to a
 //! [`HeadlessScreen`], evaluates the screen against the agent's manifest, and
 //! folds the result through a [`StatusReducer`]. The current status and the
 //! output log are what everything else in the product reads.
+//!
+//! Who owns the PTY is a transport choice. A *direct* session owns it in
+//! process — simple, and gone when this process is. A *held* session's PTY
+//! belongs to a holder (see [`crate::holder`]): the session is then only a
+//! client and a log tail, and the child survives this process dying. Held is
+//! what the daemon uses; direct remains for tests and embedded callers.
 //!
 //! The pump runs on its own thread rather than the async runtime, because the
 //! PTY read is a blocking syscall — the same reasoning that moved the test
@@ -20,6 +26,10 @@ use std::time::{Duration, SystemTime};
 use diri_proto::{NeedsInputDetail, SessionStatus};
 
 use crate::detect::ManifestEngine;
+use crate::holder::{
+    HolderClient, HolderExitMarker, HolderExitStatus, HolderLaunchSpec, HolderLauncher,
+    HolderPaths, HolderStat,
+};
 use crate::log::OutputLog;
 use crate::pty::{Exit, Pty, PtySpec};
 use crate::screen::HeadlessScreen;
@@ -28,6 +38,15 @@ use crate::status::{Authority, ClaudeHook, ReducerOutcome, StatusReducer, Status
 /// How often the pump ticks when the child is quiet, so debounce timers still
 /// advance and staleness is noticed.
 const TICK_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Maximum raw log tail replayed when starting or adopting a held session.
+/// The same hard startup-work bound the Swift daemon enforced.
+const REPLAY_BUDGET: usize = 256 << 10;
+
+/// How many quiet ticks between holder liveness probes (~2s): a holder that
+/// died markerless (SIGKILL, machine issues) must not leave a forever-live
+/// session behind.
+const LIVENESS_EVERY_TICKS: u32 = 20;
 
 /// What a session looks like from the outside.
 #[derive(Clone, Debug)]
@@ -49,15 +68,34 @@ struct Shared {
     log: Mutex<OutputLog>,
     screen: Mutex<HeadlessScreen>,
     reducer: Mutex<StatusReducer>,
+    /// How the child ended, once known (from `wait` or the exit marker).
+    exit: Mutex<Option<Exit>>,
     exited: AtomicBool,
     stop: AtomicBool,
 }
 
+/// Who owns the PTY.
+enum Transport {
+    /// This process does; dropping the session kills the child.
+    Direct(Arc<Mutex<Pty>>),
+    /// A holder process does; this session is a socket client and a log
+    /// tail, and the child outlives it.
+    Held(HolderClient),
+}
+
 pub struct Session {
     shared: Arc<Shared>,
-    pty: Arc<Mutex<Pty>>,
+    transport: Transport,
     pump: Option<JoinHandle<()>>,
     manifest_id: String,
+}
+
+/// Where holders live and what binary hosts them. Present on a spec, it makes
+/// the spawn holder-backed.
+#[derive(Clone, Debug)]
+pub struct HolderConfig {
+    pub holders_dir: PathBuf,
+    pub executable: PathBuf,
 }
 
 /// How to start a session.
@@ -68,27 +106,24 @@ pub struct SessionSpec {
     pub manifest_id: String,
     pub authority: Authority,
     pub logs_dir: PathBuf,
+    /// `Some` spawns through a holder so the child survives this process.
+    pub holder: Option<HolderConfig>,
 }
 
 impl Session {
-    /// Spawns the child and starts watching it.
+    /// Spawns the child and starts watching it — through a holder when the
+    /// spec carries a [`HolderConfig`], directly otherwise.
     pub fn spawn(spec: SessionSpec, engine: Arc<ManifestEngine>) -> std::io::Result<Self> {
+        match spec.holder.clone() {
+            Some(holder) => Self::spawn_held(spec, &holder, engine),
+            None => Self::spawn_direct(spec, engine),
+        }
+    }
+
+    fn spawn_direct(spec: SessionSpec, engine: Arc<ManifestEngine>) -> std::io::Result<Self> {
         let pty = Pty::spawn(&spec.pty)?;
         let log = OutputLog::writer(&spec.logs_dir, &spec.id)?;
-        let screen = HeadlessScreen::new(spec.pty.cols as usize, spec.pty.rows as usize);
-        let reducer = StatusReducer::new(spec.authority, SystemTime::now());
-
-        let shared = Arc::new(Shared {
-            id: spec.id.clone(),
-            status: Mutex::new(SessionStatus::Starting),
-            needs_input: Mutex::new(None),
-            title: Mutex::new(None),
-            log: Mutex::new(log),
-            screen: Mutex::new(screen),
-            reducer: Mutex::new(reducer),
-            exited: AtomicBool::new(false),
-            stop: AtomicBool::new(false),
-        });
+        let shared = new_shared(&spec, log);
 
         let reader = pty.reader()?;
         let pty = Arc::new(Mutex::new(pty));
@@ -105,7 +140,99 @@ impl Session {
 
         Ok(Self {
             shared,
-            pty,
+            transport: Transport::Direct(pty),
+            pump: Some(pump),
+            manifest_id: spec.manifest_id,
+        })
+    }
+
+    /// Spawns through the holder manager, so the child outlives this process.
+    fn spawn_held(
+        spec: SessionSpec,
+        holder: &HolderConfig,
+        engine: Arc<ManifestEngine>,
+    ) -> std::io::Result<Self> {
+        let paths = HolderPaths::new(&holder.holders_dir, &spec.id);
+        // Incarnation-boundary fallback for pre-epoch holders: everything
+        // already in the log predates the child about to spawn.
+        let pre_spawn_tail = {
+            let mut log = OutputLog::reader(&spec.logs_dir, &spec.id)?;
+            log.refresh_from_disk();
+            log.tail_offset()
+        };
+        let launch = HolderLaunchSpec {
+            session_id: spec.id.clone(),
+            socket_path: paths.socket().to_string_lossy().into_owned(),
+            pid_file_path: paths.pid_file().to_string_lossy().into_owned(),
+            log_file_path: spec
+                .logs_dir
+                .join(format!("{}.bin", spec.id))
+                .to_string_lossy()
+                .into_owned(),
+            argv: spec.pty.argv.clone(),
+            cwd: spec.pty.cwd.to_string_lossy().into_owned(),
+            environment: spec.pty.env.iter().cloned().collect(),
+            cols: spec.pty.cols.max(2),
+            rows: spec.pty.rows.max(2),
+            disk_capacity: crate::holder::protocol::DEFAULT_DISK_CAPACITY,
+        };
+        HolderLauncher::launch(&holder.executable, &paths, &launch)
+            .map_err(holder_io_error)?;
+
+        let client = HolderClient::new(paths.socket());
+        let floor = wait_for_holder(&client, &spec.logs_dir, &spec.id, pre_spawn_tail)
+            .map_err(holder_io_error)?;
+        Self::attach(spec, client, floor, engine)
+    }
+
+    /// Reconstitutes a live session owned by a holder a previous daemon
+    /// spawned. The holder must already be alive; `stat` is its current view.
+    pub fn adopt(
+        spec: SessionSpec,
+        holder: &HolderConfig,
+        stat: &HolderStat,
+        engine: Arc<ManifestEngine>,
+    ) -> std::io::Result<Self> {
+        let paths = HolderPaths::new(&holder.holders_dir, &spec.id);
+        let client = HolderClient::new(paths.socket());
+        // Exit markers below the adopted holder's epoch were written by prior
+        // incarnations of this session id — never by this child. Markers at
+        // or above it (including one written while no daemon ran) apply.
+        let floor = stat.epoch_offset.unwrap_or(0);
+        let mut spec = spec;
+        if let (Some(cols), Some(rows)) = (stat.cols, stat.rows) {
+            spec.pty.cols = cols;
+            spec.pty.rows = rows;
+        }
+        Self::attach(spec, client, floor, engine)
+    }
+
+    /// The held-transport core: a read-only log tail drives the screen and
+    /// reducer; the holder socket carries input, resize, and kill.
+    fn attach(
+        spec: SessionSpec,
+        client: HolderClient,
+        exit_marker_floor: u64,
+        engine: Arc<ManifestEngine>,
+    ) -> std::io::Result<Self> {
+        let log = OutputLog::reader(&spec.logs_dir, &spec.id)?;
+        let shared = new_shared(&spec, log);
+
+        let pump = {
+            let shared = Arc::clone(&shared);
+            let engine = Arc::clone(&engine);
+            let client = client.clone();
+            let manifest_id = spec.manifest_id.clone();
+            std::thread::Builder::new()
+                .name(format!("diri-session-{}", spec.id))
+                .spawn(move || {
+                    pump_held(shared, engine, client, exit_marker_floor, manifest_id)
+                })?
+        };
+
+        Ok(Self {
+            shared,
+            transport: Transport::Held(client),
             pump: Some(pump),
             manifest_id: spec.manifest_id,
         })
@@ -150,16 +277,24 @@ impl Session {
 
     /// Sends bytes to the child, as if typed.
     pub fn write_input(&self, bytes: &[u8]) -> std::io::Result<()> {
-        use std::io::Write;
-        let mut writer = self.pty.lock().expect("pty").writer()?;
-        writer.write_all(bytes)?;
-        writer.flush()?;
+        match &self.transport {
+            Transport::Direct(pty) => {
+                use std::io::Write;
+                let mut writer = pty.lock().expect("pty").writer()?;
+                writer.write_all(bytes)?;
+                writer.flush()?;
+            }
+            Transport::Held(client) => client.write(bytes).map_err(holder_io_error)?,
+        }
         self.feed_signal(StatusSignal::UserKeystroke);
         Ok(())
     }
 
     pub fn resize(&self, cols: u16, rows: u16) -> std::io::Result<()> {
-        self.pty.lock().expect("pty").resize(cols, rows)?;
+        match &self.transport {
+            Transport::Direct(pty) => pty.lock().expect("pty").resize(cols, rows)?,
+            Transport::Held(client) => client.resize(cols, rows).map_err(holder_io_error)?,
+        }
         self.shared
             .screen
             .lock()
@@ -185,9 +320,29 @@ impl Session {
         self.feed_signal(StatusSignal::ClaudeHook { hook, is_subagent })
     }
 
-    /// Ends the session, killing the child's whole process group.
+    /// Ends the session, killing the child's whole tree.
     pub fn terminate(&mut self, grace: Duration) -> std::io::Result<Exit> {
-        let exit = self.pty.lock().expect("pty").terminate(grace)?;
+        let exit = match &self.transport {
+            Transport::Direct(pty) => pty.lock().expect("pty").terminate(grace)?,
+            Transport::Held(client) => {
+                // The holder escalates TERM → KILL itself; wait for the exit
+                // marker to land in the log so the recorded exit is the real
+                // one.
+                let _ = client.kill_tree();
+                let deadline = std::time::Instant::now() + grace + Duration::from_secs(1);
+                while std::time::Instant::now() < deadline {
+                    if self.shared.exited.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                self.shared
+                    .exit
+                    .lock()
+                    .expect("exit")
+                    .unwrap_or(Exit::Signal(libc::SIGKILL))
+            }
+        };
         self.shared.stop.store(true, Ordering::SeqCst);
         if let Some(pump) = self.pump.take() {
             let _ = pump.join();
@@ -197,17 +352,21 @@ impl Session {
 }
 
 impl Drop for Session {
-    /// Dropping a session ends it.
+    /// Dropping a session ends the *watch*; what happens to the child depends
+    /// on who owns the PTY.
     ///
-    /// The child has to go, not merely be forgotten: the pump thread cannot be
-    /// reclaimed while the terminal has a writer, and a forgotten child would
-    /// keep running with nothing watching or reaping it. Surviving the owner is
-    /// the holder's job — a separate process, not yet ported — and not
-    /// something this type can honestly offer.
+    /// Direct: the child has to go, not merely be forgotten — the pump thread
+    /// cannot be reclaimed while the terminal has a writer, and a forgotten
+    /// child would keep running with nothing watching or reaping it.
+    ///
+    /// Held: the child is deliberately left running. Surviving the owner is
+    /// the holder's whole purpose; a restarted daemon adopts it via
+    /// [`Session::adopt`].
     fn drop(&mut self) {
         self.shared.stop.store(true, Ordering::SeqCst);
-        if !self.shared.exited.load(Ordering::SeqCst)
-            && let Ok(pty) = self.pty.lock()
+        if let Transport::Direct(pty) = &self.transport
+            && !self.shared.exited.load(Ordering::SeqCst)
+            && let Ok(pty) = pty.lock()
         {
             let _ = pty.kill_group(libc::SIGKILL);
         }
@@ -215,6 +374,59 @@ impl Drop for Session {
             let _ = pump.join();
         }
     }
+}
+
+fn new_shared(spec: &SessionSpec, log: OutputLog) -> Arc<Shared> {
+    Arc::new(Shared {
+        id: spec.id.clone(),
+        status: Mutex::new(SessionStatus::Starting),
+        needs_input: Mutex::new(None),
+        title: Mutex::new(None),
+        log: Mutex::new(log),
+        screen: Mutex::new(HeadlessScreen::new(
+            spec.pty.cols as usize,
+            spec.pty.rows as usize,
+        )),
+        reducer: Mutex::new(StatusReducer::new(spec.authority, SystemTime::now())),
+        exit: Mutex::new(None),
+        exited: AtomicBool::new(false),
+        stop: AtomicBool::new(false),
+    })
+}
+
+/// Waits for a freshly launched holder and returns the exit-marker floor:
+/// 250 × 20ms.
+///
+/// Any stat answer attaches — `alive: false` just means the child already
+/// exited, and the pump will find its marker. A child so short-lived that the
+/// holder has *already cleaned up* is attached by evidence instead: the log
+/// advancing past the pre-spawn tail proves the holder ran and wrote a
+/// marker.
+fn wait_for_holder(
+    client: &HolderClient,
+    logs_dir: &Path,
+    session_id: &str,
+    pre_spawn_tail: u64,
+) -> Result<u64, crate::holder::HolderError> {
+    for _ in 0..250 {
+        if let Ok(stat) = client.stat() {
+            return Ok(stat.epoch_offset.unwrap_or(pre_spawn_tail));
+        }
+        if let Ok(mut log) = OutputLog::reader(logs_dir, session_id) {
+            log.refresh_from_disk();
+            if log.tail_offset() > pre_spawn_tail {
+                return Ok(pre_spawn_tail);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    Err(crate::holder::HolderError::Launch(
+        "holder did not become ready".into(),
+    ))
+}
+
+fn holder_io_error(error: crate::holder::HolderError) -> std::io::Error {
+    std::io::Error::other(error.to_string())
 }
 
 /// Applies a reducer outcome to the shared state.
@@ -331,6 +543,7 @@ fn pump(
 
     // The stream ended: reap the child and record how it died.
     let exit = pty.lock().expect("pty").wait().ok();
+    *shared.exit.lock().expect("exit") = exit;
     let (code, signal) = match exit {
         Some(Exit::Code(code)) => (Some(code), None),
         Some(Exit::Signal(signal)) => (None, Some(signal)),
@@ -343,6 +556,142 @@ fn pump(
     apply(&shared, &outcome);
     shared.exited.store(true, Ordering::SeqCst);
     let _ = shared.log.lock().expect("log").flush();
+}
+
+/// The held-transport pump: tails the holder-owned output log.
+///
+/// The holder writes the log; this loop replays a bounded tail, then follows
+/// new bytes — stripping exit markers before the emulator sees them, and
+/// honoring only markers at or beyond `exit_marker_floor` (bytes below it
+/// belong to prior incarnations of the session id). A holder that dies
+/// *without* a marker is caught by a periodic liveness probe.
+fn pump_held(
+    shared: Arc<Shared>,
+    engine: Arc<ManifestEngine>,
+    client: HolderClient,
+    exit_marker_floor: u64,
+    manifest_id: String,
+) {
+    let mut offset = {
+        let mut log = shared.log.lock().expect("log");
+        log.refresh_from_disk();
+        log.preferred_replay_start(REPLAY_BUDGET)
+    };
+    let mut marker_buffer: Vec<u8> = Vec::new();
+    let mut ticks_since_liveness = 0u32;
+    let mut exit_status: Option<HolderExitStatus> = None;
+    // Until the tail is first caught up, bytes are history, not activity:
+    // they must render, but not flip a quiet adopted session to Working.
+    let mut replaying = true;
+
+    while !shared.stop.load(Ordering::SeqCst) && exit_status.is_none() {
+        let (start, chunk) = {
+            let mut log = shared.log.lock().expect("log");
+            log.refresh_from_disk();
+            log.read(offset, 64 << 10)
+        };
+
+        if chunk.is_empty() {
+            replaying = false;
+            // Quiet: advance the reducer's timers, and periodically make sure
+            // the holder is still there at all.
+            std::thread::sleep(TICK_INTERVAL);
+            let outcome = shared
+                .reducer
+                .lock()
+                .expect("reducer")
+                .reduce(StatusSignal::Tick, SystemTime::now());
+            apply(&shared, &outcome);
+
+            ticks_since_liveness += 1;
+            if ticks_since_liveness >= LIVENESS_EVERY_TICKS {
+                ticks_since_liveness = 0;
+                if !client.is_alive() {
+                    // One last look for a marker that raced the probe.
+                    let (_, tail) = {
+                        let mut log = shared.log.lock().expect("log");
+                        log.refresh_from_disk();
+                        log.read(offset, 64 << 10)
+                    };
+                    if tail.is_empty() {
+                        // Markerless death: the child is gone but how is
+                        // unknowable.
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+
+        // A rotation can move the readable floor past us; resynchronize.
+        if start > offset && !marker_buffer.is_empty() {
+            marker_buffer.clear();
+        }
+        offset = start + chunk.len() as u64;
+        ticks_since_liveness = 0;
+
+        // The floor is an incarnation boundary, so no marker straddles it:
+        // markers wholly below are stripped but their statuses ignored.
+        let honored_from = exit_marker_floor.saturating_sub(start).min(chunk.len() as u64) as usize;
+        let mut output = Vec::new();
+        if honored_from > 0 {
+            marker_buffer.extend_from_slice(&chunk[..honored_from]);
+            let (replayed, _stale_exit) = HolderExitMarker::drain(&mut marker_buffer);
+            output.extend_from_slice(&replayed);
+            if start + honored_from as u64 >= exit_marker_floor {
+                marker_buffer.clear(); // an unfinished stale marker ends here
+            }
+        }
+        if honored_from < chunk.len() {
+            marker_buffer.extend_from_slice(&chunk[honored_from..]);
+            let (live, exit) = HolderExitMarker::drain(&mut marker_buffer);
+            output.extend_from_slice(&live);
+            if exit.is_some() {
+                exit_status = exit;
+            }
+        }
+
+        if !output.is_empty() {
+            let observation = {
+                let mut screen = shared.screen.lock().expect("screen");
+                screen.feed(&output);
+                *shared.title.lock().expect("title") = screen.title().map(str::to_string);
+                engine.evaluate(&screen.snapshot(), &manifest_id)
+            };
+            let now = SystemTime::now();
+            let mut reducer = shared.reducer.lock().expect("reducer");
+            if !replaying {
+                let outcome = reducer.reduce(StatusSignal::PtyOutputActivity, now);
+                apply(&shared, &outcome);
+            }
+            if let Some(observation) = observation {
+                let outcome = reducer.reduce(StatusSignal::Screen(observation), now);
+                drop(reducer);
+                apply(&shared, &outcome);
+            }
+        }
+    }
+
+    if shared.stop.load(Ordering::SeqCst) && exit_status.is_none() {
+        return; // detaching, not exiting: the held child lives on
+    }
+
+    let exit = exit_status.map(|status| match (status.code, status.signal) {
+        (_, Some(signal)) => Exit::Signal(signal),
+        (code, None) => Exit::Code(code.unwrap_or(-1)),
+    });
+    *shared.exit.lock().expect("exit") = exit;
+    let (code, signal) = match exit {
+        Some(Exit::Code(code)) => (Some(code), None),
+        Some(Exit::Signal(signal)) => (None, Some(signal)),
+        None => (None, None),
+    };
+    let outcome = shared.reducer.lock().expect("reducer").reduce(
+        StatusSignal::ProcessExit { code, signal },
+        SystemTime::now(),
+    );
+    apply(&shared, &outcome);
+    shared.exited.store(true, Ordering::SeqCst);
 }
 
 /// Convenience for tests and callers that just want the shipped rules.

@@ -30,6 +30,7 @@ pub struct ControlServer {
     registry: Arc<Mutex<Registry>>,
     socket_path: PathBuf,
     logs_dir: PathBuf,
+    holder: Option<crate::session::HolderConfig>,
 }
 
 impl ControlServer {
@@ -43,6 +44,7 @@ impl ControlServer {
             registry,
             socket_path,
             logs_dir,
+            holder: None,
         }
     }
 
@@ -50,6 +52,13 @@ impl ControlServer {
     /// socket, matching the Swift daemon's layout.
     pub fn with_logs_dir(mut self, logs_dir: impl Into<PathBuf>) -> Self {
         self.logs_dir = logs_dir.into();
+        self
+    }
+
+    /// Spawn sessions through holders, so they survive this process. This is
+    /// how the daemon runs; tests and embedded callers may stay direct.
+    pub fn with_holder(mut self, holder: crate::session::HolderConfig) -> Self {
+        self.holder = Some(holder);
         self
     }
 
@@ -234,6 +243,7 @@ impl ControlServer {
             manifest_id: kind,
             authority,
             logs_dir: self.logs_dir.clone(),
+            holder: self.holder.clone(),
         };
         registry
             .spawn(spec, record)

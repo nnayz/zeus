@@ -151,11 +151,20 @@ impl ControlServer {
         match method {
             Method::HELLO => self.hello(params),
             Method::SESSION_SPAWN => self.session_spawn(params),
-            Method::SESSION_LIST => self.session_list(),
+            Method::SESSION_LIST | Method::STATE_SNAPSHOT => self.session_list(),
             Method::SESSION_SEND_TEXT => self.session_send_text(params),
             Method::SESSION_RESIZE => self.session_resize(params),
             Method::SESSION_READ_SCREEN => self.session_read_screen(params),
             Method::SESSION_KILL => self.session_kill(params),
+            Method::SESSION_REMOVE => self.session_remove(params),
+            Method::SESSION_RENAME => self.session_rename(params),
+            Method::SESSION_MARK_SEEN => self.session_mark_seen(params),
+            Method::SESSION_ARCHIVE => self.session_archive(params),
+            Method::SESSION_UNARCHIVE => self.session_unarchive(params),
+            Method::SESSION_HISTORY => self.session_history(),
+            Method::WORKTREE_CREATE => self.worktree_create(params),
+            Method::WORKTREE_LIST => self.worktree_list(params),
+            Method::WORKTREE_REMOVE => self.worktree_remove(params),
             other => Err(ControlError::not_found(format!(
                 "method {other:?} is not implemented by this engine yet"
             ))),
@@ -259,37 +268,37 @@ impl ControlServer {
             .map_err(|error| ControlError::internal(error.to_string()))
     }
 
+    /// `session.list` and `state.snapshot` are the same view: every record
+    /// plus the project list, exactly as the Swift daemon answers them.
     fn session_list(&self) -> Result<JsonValue, ControlError> {
         let registry = self.registry.lock().map_err(poisoned)?;
-        serde_json::to_value(json!({ "sessions": registry.records() }))
-            .map_err(|error| ControlError::internal(error.to_string()))
+        serde_json::to_value(json!({
+            "sessions": registry.records(),
+            "projects": registry.projects_raw(),
+        }))
+        .map_err(|error| ControlError::internal(error.to_string()))
     }
 
     fn session_send_text(&self, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
-        let params = params.ok_or_else(|| ControlError::bad_request("params are required"))?;
-        let id = string_field(&params, "id")?;
-        let text = string_field(&params, "text")?;
-
+        let p: diri_proto::SendTextParams = decode(params)?;
         let registry = self.registry.lock().map_err(poisoned)?;
         let session = registry
-            .get(&id)
-            .ok_or_else(|| ControlError::not_found(format!("no session {id}")))?;
+            .get(&p.session_id.0)
+            .ok_or_else(|| ControlError::not_found(p.session_id.0.clone()))?;
         session
-            .write_input(text.as_bytes())
+            .send_text(&p.text, p.submit)
             .map_err(|error| ControlError::internal(error.to_string()))?;
         Ok(json!({}))
     }
 
     fn session_resize(&self, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
-        let params = params.ok_or_else(|| ControlError::bad_request("params are required"))?;
-        let id = string_field(&params, "id")?;
-        let cols = u16_field(&params, "cols")?;
-        let rows = u16_field(&params, "rows")?;
-
+        let p: diri_proto::ResizeParams = decode(params)?;
+        let cols = u16::try_from(p.cols.clamp(2, u16::MAX as i64)).expect("clamped");
+        let rows = u16::try_from(p.rows.clamp(2, u16::MAX as i64)).expect("clamped");
         let registry = self.registry.lock().map_err(poisoned)?;
         let session = registry
-            .get(&id)
-            .ok_or_else(|| ControlError::not_found(format!("no session {id}")))?;
+            .get(&p.session_id.0)
+            .ok_or_else(|| ControlError::not_found(p.session_id.0.clone()))?;
         session
             .resize(cols, rows)
             .map_err(|error| ControlError::internal(error.to_string()))?;
@@ -297,28 +306,120 @@ impl ControlServer {
     }
 
     fn session_read_screen(&self, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
-        let params = params.ok_or_else(|| ControlError::bad_request("params are required"))?;
-        let id = string_field(&params, "id")?;
-
+        let p: diri_proto::SessionIdParams = decode(params)?;
         let registry = self.registry.lock().map_err(poisoned)?;
         let session = registry
-            .get(&id)
-            .ok_or_else(|| ControlError::not_found(format!("no session {id}")))?;
-        Ok(json!({ "lines": session.screen_lines() }))
+            .get(&p.session_id.0)
+            .ok_or_else(|| ControlError::not_found(p.session_id.0.clone()))?;
+        let (cols, rows) = session.screen_size();
+        encode(&diri_proto::ReadScreenResult {
+            text: session.screen_lines().join("\n"),
+            cols: cols as i64,
+            rows: rows as i64,
+        })
     }
 
     fn session_kill(&self, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
-        let params = params.ok_or_else(|| ControlError::bad_request("params are required"))?;
-        let id = string_field(&params, "id")?;
-
+        let p: diri_proto::SessionIdParams = decode(params)?;
         let mut registry = self.registry.lock().map_err(poisoned)?;
         let exit = registry
-            .terminate(&id, std::time::Duration::from_secs(3))
+            .terminate(&p.session_id.0, std::time::Duration::from_secs(3))
             .map_err(|error| ControlError::internal(error.to_string()))?;
         if exit.is_none() {
-            return Err(ControlError::not_found(format!("no session {id}")));
+            return Err(ControlError::not_found(p.session_id.0.clone()));
         }
         let _ = registry.persist();
+        Ok(json!({}))
+    }
+
+    fn session_remove(&self, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
+        let p: diri_proto::SessionIdParams = decode(params)?;
+        let mut registry = self.registry.lock().map_err(poisoned)?;
+        registry
+            .remove(&p.session_id.0, &self.logs_dir)
+            .map_err(io_control_error)?;
+        let _ = registry.persist();
+        Ok(json!({}))
+    }
+
+    fn session_rename(&self, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
+        let p: diri_proto::SessionRenameParams = decode(params)?;
+        let mut registry = self.registry.lock().map_err(poisoned)?;
+        registry
+            .rename(&p.session_id.0, &p.title)
+            .map_err(io_control_error)?;
+        let _ = registry.persist();
+        Ok(json!({}))
+    }
+
+    fn session_mark_seen(&self, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
+        let p: diri_proto::SessionIdParams = decode(params)?;
+        let mut registry = self.registry.lock().map_err(poisoned)?;
+        registry
+            .mark_seen(&p.session_id.0)
+            .map_err(io_control_error)?;
+        let _ = registry.persist();
+        Ok(json!({}))
+    }
+
+    fn session_archive(&self, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
+        let p: diri_proto::SessionIdParams = decode(params)?;
+        let mut registry = self.registry.lock().map_err(poisoned)?;
+        registry
+            .archive(&p.session_id.0)
+            .map_err(io_control_error)?;
+        let _ = registry.persist();
+        Ok(json!({}))
+    }
+
+    fn session_unarchive(&self, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
+        let p: diri_proto::SessionIdParams = decode(params)?;
+        let mut registry = self.registry.lock().map_err(poisoned)?;
+        registry
+            .unarchive(&p.session_id.0)
+            .map_err(io_control_error)?;
+        let _ = registry.persist();
+        Ok(json!({}))
+    }
+
+    /// Resumable past conversations from the agents' own transcript stores,
+    /// excluding ones already represented by live records.
+    fn session_history(&self) -> Result<JsonValue, ControlError> {
+        let tracked = {
+            let registry = self.registry.lock().map_err(poisoned)?;
+            registry.tracked_agent_session_ids()
+        };
+        let home = std::env::var("HOME")
+            .map(PathBuf::from)
+            .map_err(|_| ControlError::internal("HOME is not set"))?;
+        let entries: Vec<diri_proto::HistoryEntry> = crate::history::scan(&home, &tracked)
+            .into_iter()
+            .map(history_entry_to_wire)
+            .collect();
+        encode(&diri_proto::SessionHistoryResult { entries })
+    }
+
+    fn worktree_create(&self, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
+        let p: diri_proto::WorktreeCreateParams = decode(params)?;
+        let info = crate::git::create_worktree(
+            Path::new(&p.repo_path),
+            p.branch.as_deref(),
+            p.base.as_deref(),
+        )
+        .map_err(io_control_error)?;
+        encode(&worktree_to_wire(info))
+    }
+
+    fn worktree_list(&self, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
+        let p: diri_proto::WorktreeListParams = decode(params)?;
+        let list = crate::git::list_worktrees(Path::new(&p.repo_path)).map_err(io_control_error)?;
+        encode(&list.into_iter().map(worktree_to_wire).collect::<Vec<_>>())
+    }
+
+    fn worktree_remove(&self, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
+        let p: diri_proto::WorktreeRemoveParams = decode(params)?;
+        crate::git::remove_worktree(Path::new(&p.repo_path), &p.worktree_path, p.force)
+            .map_err(io_control_error)?;
         Ok(json!({}))
     }
 
@@ -390,12 +491,49 @@ fn string_field(params: &JsonValue, name: &str) -> Result<String, ControlError> 
         .ok_or_else(|| ControlError::bad_request(format!("{name} must be a string")))
 }
 
-fn u16_field(params: &JsonValue, name: &str) -> Result<u16, ControlError> {
-    params
-        .get(name)
-        .and_then(Value::as_u64)
-        .and_then(|value| u16::try_from(value).ok())
-        .ok_or_else(|| ControlError::bad_request(format!("{name} must fit in a u16")))
+/// Decodes params into the shared `diri-proto` type for the method — the same
+/// types the app itself serializes, so a shape drift is a compile error, not
+/// a wire bug.
+fn decode<T: serde::de::DeserializeOwned>(params: Option<JsonValue>) -> Result<T, ControlError> {
+    serde_json::from_value(params.unwrap_or_else(|| json!({})))
+        .map_err(|error| ControlError::bad_request(error.to_string()))
+}
+
+fn encode<T: serde::Serialize>(value: &T) -> Result<JsonValue, ControlError> {
+    serde_json::to_value(value).map_err(|error| ControlError::internal(error.to_string()))
+}
+
+fn io_control_error(error: std::io::Error) -> ControlError {
+    match error.kind() {
+        std::io::ErrorKind::NotFound => ControlError::not_found(error.to_string()),
+        _ => ControlError::internal(error.to_string()),
+    }
+}
+
+fn history_entry_to_wire(entry: crate::history::HistoryEntry) -> diri_proto::HistoryEntry {
+    diri_proto::HistoryEntry {
+        id: entry.id,
+        kind: match entry.kind {
+            crate::history::HistoryKind::ClaudeCode => diri_proto::AgentKind::CLAUDE_CODE,
+            crate::history::HistoryKind::Codex => diri_proto::AgentKind::CODEX,
+        },
+        cwd: entry.cwd,
+        title: entry.title,
+        transcript_path: entry.transcript_path,
+        last_active_at: diri_proto::DateMillis::from(entry.last_active_at),
+        created_at: entry.created_at.map(diri_proto::DateMillis::from),
+        cwd_exists: entry.cwd_exists,
+    }
+}
+
+fn worktree_to_wire(info: crate::git::WorktreeInfo) -> diri_proto::WorktreeInfo {
+    diri_proto::WorktreeInfo {
+        path: info.path,
+        branch: info.branch,
+        is_bare: info.is_bare,
+        is_detached: info.is_detached,
+        is_prunable: info.is_prunable,
+    }
 }
 
 #[cfg(test)]
@@ -415,6 +553,40 @@ mod tests {
     fn server(temp: &Path) -> ControlServer {
         let registry = Registry::new(engine(), temp.join("state.json"));
         ControlServer::new(Arc::new(Mutex::new(registry)), temp.join("daemon.sock"))
+    }
+
+    fn test_record(id: &str) -> diri_proto::SessionRecord {
+        use diri_proto::*;
+        SessionRecord {
+            id: SessionId(id.into()),
+            kind: AgentKind::SHELL,
+            cwd: "/tmp".into(),
+            project_id: ProjectId("p".into()),
+            worktree_path: None,
+            git_branch: None,
+            title: "test".into(),
+            title_source: TitleSource::Placeholder,
+            agent_session_id: None,
+            transcript_path: None,
+            status: SessionStatus::Idle,
+            needs_input: None,
+            resumability: Resumability::NotResumable,
+            parent: None,
+            created_at: DateMillis(0.0),
+            updated_at: DateMillis(0.0),
+            last_turn_completed_at: None,
+            last_seen_at: None,
+            pinned: false,
+            archived_at: None,
+            remote_active: false,
+            host: None,
+            hibernation: None,
+            memory_bytes: None,
+            artifacts: None,
+            pull_requests: None,
+            listening_ports: None,
+            foreground_agent: None,
+        }
     }
 
     /// Round-trips one request through the dispatcher the way a client would.
@@ -479,11 +651,17 @@ mod tests {
     }
 
     #[test]
-    fn listing_sessions_returns_the_records() {
+    fn listing_sessions_returns_records_and_projects() {
+        // The app decodes SessionListResult { sessions, projects }; both keys
+        // must be present, as the Swift daemon answers.
         let temp = tempfile::tempdir().expect("temp");
         let server = server(temp.path());
         let result = ok_of(call(&server, "session.list", None));
         assert!(result["sessions"].is_array());
+        assert!(result["projects"].is_array());
+        // state.snapshot is the same view under another name.
+        let snapshot = ok_of(call(&server, "state.snapshot", None));
+        assert!(snapshot["sessions"].is_array());
     }
 
     #[test]
@@ -492,20 +670,145 @@ mod tests {
         // get a clean error, the same as an older daemon would give.
         let temp = tempfile::tempdir().expect("temp");
         let server = server(temp.path());
-        let error = err_of(call(&server, "worktree.create", Some(json!({}))));
+        let error = err_of(call(&server, "session.migrate", Some(json!({}))));
         assert_eq!(error.code, "not_found");
     }
 
     #[test]
     fn addressing_a_session_that_does_not_exist_is_an_error() {
+        // Params use the wire spelling the app sends: `sessionID`, not `id`.
         let temp = tempfile::tempdir().expect("temp");
         let server = server(temp.path());
         let error = err_of(call(
             &server,
             "session.send_text",
-            Some(json!({ "id": "s_missing", "text": "hi" })),
+            Some(json!({ "sessionID": "s_missing", "text": "hi", "submit": false })),
         ));
         assert_eq!(error.code, "not_found");
+    }
+
+    #[test]
+    fn record_mutations_round_trip_over_the_wire() {
+        // rename → mark_seen → archive → unarchive against a record-only
+        // session (no live process needed).
+        let temp = tempfile::tempdir().expect("temp");
+        let registry = Arc::new(Mutex::new(Registry::new(
+            engine(),
+            temp.path().join("state.json"),
+        )));
+        registry
+            .lock()
+            .expect("registry")
+            .insert_record(test_record("s_rec"));
+        let server = ControlServer::new(registry, temp.path().join("daemon.sock"));
+
+        let params = json!({ "sessionID": "s_rec", "title": "renamed by hand" });
+        ok_of(call(&server, "session.rename", Some(params)));
+        ok_of(call(
+            &server,
+            "session.mark_seen",
+            Some(json!({ "sessionID": "s_rec" })),
+        ));
+        ok_of(call(
+            &server,
+            "session.archive",
+            Some(json!({ "sessionID": "s_rec" })),
+        ));
+
+        let list = ok_of(call(&server, "session.list", None));
+        let record = &list["sessions"][0];
+        assert_eq!(record["title"], "renamed by hand");
+        // TitleSource is numeric on the wire (Swift Int-raw enum);
+        // serialize the variant rather than hardcoding its index.
+        assert_eq!(
+            record["titleSource"],
+            serde_json::to_value(diri_proto::TitleSource::UserRename).expect("encode")
+        );
+        assert!(record["lastSeenAt"].is_number());
+        assert!(record["archivedAt"].is_number());
+
+        ok_of(call(
+            &server,
+            "session.unarchive",
+            Some(json!({ "sessionID": "s_rec" })),
+        ));
+        let list = ok_of(call(&server, "session.list", None));
+        assert!(list["sessions"][0].get("archivedAt").is_none());
+
+        ok_of(call(
+            &server,
+            "session.remove",
+            Some(json!({ "sessionID": "s_rec" })),
+        ));
+        let list = ok_of(call(&server, "session.list", None));
+        assert_eq!(list["sessions"].as_array().map(Vec::len), Some(0));
+    }
+
+    #[test]
+    fn worktrees_are_managed_over_the_wire() {
+        let temp = tempfile::tempdir().expect("temp");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("mkdir");
+        for arguments in [
+            vec!["init", "-b", "main"],
+            vec!["commit", "--allow-empty", "-m", "root"],
+        ] {
+            let status = std::process::Command::new("git")
+                .args(&arguments)
+                .arg("--quiet")
+                .current_dir(&repo)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .status()
+                .expect("git");
+            assert!(status.success(), "git {arguments:?}");
+        }
+        let server = server(temp.path());
+        let repo_path = repo.to_string_lossy();
+
+        let created = ok_of(call(
+            &server,
+            "worktree.create",
+            Some(json!({ "repoPath": repo_path, "branch": "feature/x" })),
+        ));
+        assert_eq!(created["branch"], "feature/x");
+
+        let list = ok_of(call(
+            &server,
+            "worktree.list",
+            Some(json!({ "repoPath": repo_path })),
+        ));
+        let listed = list.as_array().expect("array");
+        assert!(
+            listed
+                .iter()
+                .any(|worktree| worktree["branch"] == "feature/x"),
+            "{list}"
+        );
+
+        ok_of(call(
+            &server,
+            "worktree.remove",
+            Some(json!({
+                "repoPath": repo_path,
+                "worktreePath": created["path"],
+                "force": true,
+            })),
+        ));
+        let list = ok_of(call(
+            &server,
+            "worktree.list",
+            Some(json!({ "repoPath": repo_path })),
+        ));
+        assert!(
+            !list
+                .as_array()
+                .expect("array")
+                .iter()
+                .any(|worktree| worktree["branch"] == "feature/x")
+        );
     }
 
     #[test]

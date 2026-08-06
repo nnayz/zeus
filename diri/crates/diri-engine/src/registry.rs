@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use diri_proto::{SessionRecord, SessionStatus};
+use diri_proto::{DateMillis, SessionRecord, SessionStatus, TitleSource};
 use serde::{Deserialize, Serialize};
 
 use crate::detect::ManifestEngine;
@@ -104,6 +104,14 @@ impl Registry {
         // Rename is atomic, so a crash mid-write cannot truncate the real file.
         std::fs::rename(&temp, &self.state_file)?;
         Ok(())
+    }
+
+    /// Adds (or replaces) a record without a live session — restores,
+    /// imports, and tests use this; live sessions come from [`spawn`].
+    ///
+    /// [`spawn`]: Registry::spawn
+    pub fn insert_record(&mut self, record: SessionRecord) {
+        self.records.insert(record.id.0.clone(), record);
     }
 
     /// Starts a session and takes ownership of it.
@@ -243,6 +251,81 @@ impl Registry {
         self.records.remove(id);
     }
 
+    /// Ends the session (if live), deletes its record AND its output log.
+    /// This is the user closing a tab for good, not archiving.
+    pub fn remove(&mut self, id: &str, logs_dir: &Path) -> std::io::Result<()> {
+        if self.sessions.contains_key(id) {
+            let _ = self.terminate(id, std::time::Duration::from_millis(500));
+        }
+        if self.records.remove(id).is_none() {
+            return Err(not_found(id));
+        }
+        self.sessions.remove(id);
+        let _ = std::fs::remove_file(logs_dir.join(format!("{id}.bin")));
+        Ok(())
+    }
+
+    pub fn rename(&mut self, id: &str, title: &str) -> std::io::Result<()> {
+        let record = self.records.get_mut(id).ok_or_else(|| not_found(id))?;
+        record.title = title.to_string();
+        record.title_source = TitleSource::UserRename;
+        record.updated_at = DateMillis::from(std::time::SystemTime::now());
+        Ok(())
+    }
+
+    pub fn mark_seen(&mut self, id: &str) -> std::io::Result<()> {
+        let record = self.records.get_mut(id).ok_or_else(|| not_found(id))?;
+        record.last_seen_at = Some(DateMillis::from(std::time::SystemTime::now()));
+        Ok(())
+    }
+
+    /// Ends the session but keeps its record on the shelf: kill-tree,
+    /// keep-record, stamp `archivedAt`.
+    pub fn archive(&mut self, id: &str) -> std::io::Result<()> {
+        if !self.records.contains_key(id) {
+            return Err(not_found(id));
+        }
+        if self.sessions.contains_key(id) {
+            let _ = self.terminate(id, std::time::Duration::from_millis(500));
+        }
+        let record = self.records.get_mut(id).expect("checked above");
+        record.archived_at = Some(DateMillis::from(std::time::SystemTime::now()));
+        if !matches!(record.status, SessionStatus::Exited(_)) {
+            record.status = SessionStatus::Exited(diri_proto::ExitInfo {
+                reason: diri_proto::ExitReason::Archived,
+                code: None,
+                signal: None,
+            });
+        }
+        record.needs_input = None;
+        Ok(())
+    }
+
+    pub fn unarchive(&mut self, id: &str) -> std::io::Result<()> {
+        let record = self.records.get_mut(id).ok_or_else(|| not_found(id))?;
+        if record.archived_at.is_none() {
+            return Ok(());
+        }
+        record.archived_at = None;
+        record.updated_at = DateMillis::from(std::time::SystemTime::now());
+        Ok(())
+    }
+
+    /// Agent-side conversation ids already represented here, so a history
+    /// scan can exclude conversations that are live sessions.
+    pub fn tracked_agent_session_ids(&self) -> Vec<String> {
+        self.records
+            .values()
+            .filter_map(|record| record.agent_session_id.clone())
+            .collect()
+    }
+
+    /// The project list, verbatim as loaded — this engine does not model
+    /// projects yet, but the list response carries them.
+    pub fn projects_raw(&self) -> &[serde_json::Value] {
+        &self.projects
+    }
+
     pub fn live_count(&self) -> usize {
         self.sessions.len()
     }
@@ -254,6 +337,10 @@ impl Registry {
     pub fn state_file(&self) -> &Path {
         &self.state_file
     }
+}
+
+fn not_found(id: &str) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::NotFound, format!("no session {id}"))
 }
 
 #[cfg(test)]

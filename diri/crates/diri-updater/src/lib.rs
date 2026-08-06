@@ -285,6 +285,58 @@ mod tests {
         }
     }
 
+    /// Live end-to-end of the half the feed test does not reach: actually pull
+    /// the newest release's zip and put it through the real integrity and
+    /// signature checks.
+    ///
+    /// This is the path GitHub's redirect runs through. `github.com` hands an
+    /// asset request to `release-assets.githubusercontent.com`, so a curl
+    /// config that failed to follow redirects — or a host pin applied to the
+    /// post-redirect URL — would break every download while the feed kept
+    /// parsing fine. Only downloading catches that.
+    ///
+    /// Ignored by default: it needs the network and pulls ~18 MB.
+    #[test]
+    #[ignore = "requires network access and downloads a release"]
+    fn the_published_release_downloads_and_verifies() {
+        let http = Http::new();
+        let feed = Feed::parse(&http.fetch_text(DEFAULT_FEED_URL).expect("feed"))
+            .expect("feed parses");
+        let release = feed
+            .releases
+            .iter()
+            .max_by_key(|release| release.parsed_version().unwrap_or_default())
+            .expect("the feed lists a release")
+            .clone();
+
+        let directory = tempfile::tempdir().expect("temp dir");
+        let updater = Updater::new(UpdaterConfig {
+            cache_dir: directory.path().to_path_buf(),
+            // Pin to the Developer ID the releases are actually signed with, so
+            // this asserts the published artifact is ours — not merely that
+            // some notarized app came down the wire.
+            installed_signature: SignatureInfo {
+                identifier: Some("com.dirijor.diri".to_owned()),
+                team_identifier: Some("A56RVNJ69X".to_owned()),
+                authorities: vec![
+                    "Developer ID Application: CRISTIAN EMANUEL CRETU (A56RVNJ69X)".to_owned(),
+                ],
+            },
+            // A version below the release so `download` has something to fetch.
+            current_version: Version::new(0, 0, 1),
+            ..config()
+        });
+
+        let archive = updater
+            .download(&release, |_| {})
+            .expect("the release zip downloads and matches its sha256");
+        let staged = updater
+            .stage(&release, &archive)
+            .expect("the download passes signature, Gatekeeper, and version checks");
+        assert_eq!(staged.app.file_name().expect("a bundle"), "diri.app");
+        assert_eq!(staged.release.version, release.version);
+    }
+
     #[test]
     fn the_default_feed_lives_on_the_pinned_host() {
         assert!(DEFAULT_FEED_URL.starts_with(&format!("https://{RELEASES_HOST}/")));

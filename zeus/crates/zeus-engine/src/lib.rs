@@ -28,6 +28,7 @@ pub mod history;
 #[cfg(unix)]
 pub mod holder;
 pub mod hooks;
+pub mod inject;
 pub mod log;
 pub mod mcp;
 pub mod pty;

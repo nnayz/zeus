@@ -248,3 +248,145 @@ fn spawning_a_shell_over_the_socket_produces_a_watched_session() {
         .expect("half-close");
     accepting.join().expect("server thread");
 }
+
+/// Subscribing turns the connection into an event sink: a mutation made on a
+/// SECOND connection arrives as an event frame on the first, and
+/// `events.wait` long-polls a live status transition to completion.
+#[test]
+fn events_flow_to_a_subscribed_connection() {
+    let temp = tempfile::tempdir().expect("temp");
+    let registry = Arc::new(Mutex::new(Registry::new(
+        engine(),
+        temp.path().join("state.json"),
+    )));
+    let server = Arc::new(ControlServer::new(
+        Arc::clone(&registry),
+        temp.path().join("daemon.sock"),
+    ));
+    let listener = server.bind().expect("bind");
+
+    // Accept every connection, daemon-style.
+    {
+        let server = Arc::clone(&server);
+        std::thread::spawn(move || {
+            while let Ok((stream, _)) = listener.accept() {
+                let server = Arc::clone(&server);
+                std::thread::spawn(move || {
+                    let _ = server.serve(stream);
+                });
+            }
+        });
+    }
+    // Live status transitions publish through the watcher.
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let watcher = diri_engine::events::spawn_registry_watcher(
+        Arc::clone(&registry),
+        server.events(),
+        Arc::clone(&stop),
+    );
+
+    let connect = || {
+        let handle = UnixStream::connect(server.socket_path()).expect("connect");
+        let reader = BufReader::new(handle.try_clone().expect("clone"));
+        (handle, reader)
+    };
+    let send = |stream: &mut UnixStream, message: &ControlMessage| {
+        let mut bytes = serde_json::to_vec(message).expect("encode");
+        bytes.push(b'\n');
+        stream.write_all(&bytes).expect("write");
+        stream.flush().expect("flush");
+    };
+    let read_message = |reader: &mut BufReader<UnixStream>| -> ControlMessage {
+        let mut line = String::new();
+        reader.read_line(&mut line).expect("read");
+        serde_json::from_str(&line).expect("decode")
+    };
+
+    // Connection A subscribes.
+    let (mut subscriber, mut subscriber_reader) = connect();
+    send(
+        &mut subscriber,
+        &ControlMessage::Request {
+            id: 1,
+            method: "events.subscribe".into(),
+            params: Some(json!({})),
+        },
+    );
+    match read_message(&mut subscriber_reader) {
+        ControlMessage::Response {
+            result: Ok(result), ..
+        } => assert_eq!(result["subscribed"], true),
+        other => panic!("subscribe failed: {other:?}"),
+    }
+
+    // Connection B spawns a short-lived shell and renames it.
+    let (mut actor, mut actor_reader) = connect();
+    send(
+        &mut actor,
+        &ControlMessage::Request {
+            id: 2,
+            method: "session.spawn".into(),
+            params: Some(json!({
+                "kind": "shell",
+                "cwd": "/tmp",
+                "argv": ["/bin/sh", "-c", "exit 0"],
+            })),
+        },
+    );
+    let spawned = read_message(&mut actor_reader);
+    let id = match spawned {
+        ControlMessage::Response {
+            result: Ok(result), ..
+        } => result["session"]["id"].as_str().expect("id").to_string(),
+        other => panic!("spawn failed: {other:?}"),
+    };
+    send(
+        &mut actor,
+        &ControlMessage::Request {
+            id: 3,
+            method: "session.rename".into(),
+            params: Some(json!({ "sessionID": id, "title": "event test" })),
+        },
+    );
+    let _ = read_message(&mut actor_reader);
+
+    // The subscriber sees session.updated frames without asking again.
+    let mut saw_rename = false;
+    for _ in 0..20 {
+        match read_message(&mut subscriber_reader) {
+            ControlMessage::Event { name, seq, params } => {
+                assert!(seq > 0, "published events carry real seqs");
+                if name == "session.updated" && params["title"] == "event test" {
+                    saw_rename = true;
+                    break;
+                }
+            }
+            other => panic!("expected an event frame, got {other:?}"),
+        }
+    }
+    assert!(saw_rename, "the rename never reached the subscriber");
+
+    // events.wait resolves when the watcher publishes the exit transition.
+    send(
+        &mut actor,
+        &ControlMessage::Request {
+            id: 4,
+            method: "events.wait".into(),
+            params: Some(json!({ "sessionID": id, "until": ["exited"], "timeoutMs": 10_000 })),
+        },
+    );
+    match read_message(&mut actor_reader) {
+        ControlMessage::Response {
+            result: Ok(result), ..
+        } => {
+            assert_eq!(result["timedOut"], false, "{result}");
+            assert!(result["session"]["status"].get("exited").is_some(), "{result}");
+        }
+        other => panic!("wait failed: {other:?}"),
+    }
+
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    let _ = subscriber.shutdown(std::net::Shutdown::Both);
+    let _ = actor.shutdown(std::net::Shutdown::Both);
+    watcher.join().expect("watcher");
+}

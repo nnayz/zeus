@@ -31,6 +31,7 @@ pub struct ControlServer {
     socket_path: PathBuf,
     logs_dir: PathBuf,
     holder: Option<crate::session::HolderConfig>,
+    events: crate::events::EventBus,
 }
 
 impl ControlServer {
@@ -45,7 +46,14 @@ impl ControlServer {
             socket_path,
             logs_dir,
             holder: None,
+            events: crate::events::EventBus::new(),
         }
+    }
+
+    /// The bus this server publishes to — the daemon shares it with the
+    /// registry watcher (see [`crate::events::spawn_registry_watcher`]).
+    pub fn events(&self) -> crate::events::EventBus {
+        self.events.clone()
     }
 
     /// Where session output logs are written. Defaults to `logs/` beside the
@@ -94,9 +102,15 @@ impl ControlServer {
     }
 
     /// Serves one connection to completion.
+    ///
+    /// The write half is shared: after `events.subscribe`, a forwarder thread
+    /// pushes event frames onto the same socket while this loop keeps
+    /// answering requests — one connection carries both, as the Swift daemon's
+    /// does.
     pub fn serve(&self, stream: UnixStream) -> std::io::Result<()> {
         let reader = BufReader::new(stream.try_clone()?);
-        let mut writer = stream;
+        let writer = Arc::new(Mutex::new(stream));
+        let mut subscription: Option<SubscriptionHandle> = None;
 
         for line in reader.split(b'\n') {
             let line = line?;
@@ -111,18 +125,20 @@ impl ControlServer {
                     "control line exceeded the protocol maximum",
                 ));
             }
-            let Some(response) = self.handle_line(&line) else {
+            let Some(response) = self.handle_line(&line, &writer, &mut subscription) else {
                 continue;
             };
-            let mut bytes = serde_json::to_vec(&response)?;
-            bytes.push(b'\n');
-            writer.write_all(&bytes)?;
-            writer.flush()?;
+            write_message(&writer, &response)?;
         }
         Ok(())
     }
 
-    fn handle_line(&self, line: &[u8]) -> Option<ControlMessage> {
+    fn handle_line(
+        &self,
+        line: &[u8],
+        writer: &Arc<Mutex<UnixStream>>,
+        subscription: &mut Option<SubscriptionHandle>,
+    ) -> Option<ControlMessage> {
         let message: ControlMessage = match serde_json::from_slice(line) {
             Ok(message) => message,
             Err(error) => {
@@ -138,12 +154,134 @@ impl ControlServer {
         };
 
         match message {
+            ControlMessage::Request { id, method, params }
+                if method == Method::EVENTS_SUBSCRIBE =>
+            {
+                Some(ControlMessage::Response {
+                    id,
+                    result: self.events_subscribe(params, writer, subscription),
+                })
+            }
             ControlMessage::Request { id, method, params } => Some(ControlMessage::Response {
                 id,
                 result: self.dispatch(&method, params),
             }),
             // Responses and events are the daemon's to send, not receive.
             ControlMessage::Response { .. } | ControlMessage::Event { .. } => None,
+        }
+    }
+
+    /// Turns this connection into an event sink: a forwarder thread streams
+    /// matching events as they publish, replaying from `sinceSeq` first.
+    /// Re-subscribing replaces the previous subscription, as in Swift.
+    fn events_subscribe(
+        &self,
+        params: Option<JsonValue>,
+        writer: &Arc<Mutex<UnixStream>>,
+        subscription: &mut Option<SubscriptionHandle>,
+    ) -> Result<JsonValue, ControlError> {
+        let p: diri_proto::EventsSubscribeParams = decode(params).unwrap_or_default();
+        if let Some(previous) = subscription.take() {
+            previous.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        let stream = self.events.subscribe(
+            p.since_seq,
+            crate::events::Filter::new(
+                p.sessions
+                    .map(|sessions| sessions.into_iter().map(|id| id.0).collect()),
+                p.kinds,
+            ),
+        );
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let handle = {
+            let stop = Arc::clone(&stop);
+            let writer = Arc::clone(writer);
+            std::thread::Builder::new()
+                .name("diri-control-events".into())
+                .spawn(move || {
+                    while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                        let Some(event) =
+                            stream.recv(std::time::Duration::from_millis(250))
+                        else {
+                            continue;
+                        };
+                        let frame = ControlMessage::Event {
+                            name: event.name,
+                            seq: event.seq,
+                            params: event.params,
+                        };
+                        if write_message(&writer, &frame).is_err() {
+                            break; // peer is gone; dropping the stream unsubscribes
+                        }
+                    }
+                })
+                .map_err(|error| ControlError::internal(error.to_string()))?
+        };
+        *subscription = Some(SubscriptionHandle {
+            stop,
+            _thread: handle,
+        });
+        Ok(json!({ "subscribed": true }))
+    }
+
+    /// One-shot long poll for a session reaching one of the `until` statuses.
+    fn events_wait(&self, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
+        let p: diri_proto::EventsWaitParams = decode(params)?;
+        if p.until.is_empty() {
+            return Err(ControlError::bad_request(
+                "events.wait needs `until` statuses",
+            ));
+        }
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_millis(p.timeout_ms.clamp(0, 600_000) as u64);
+
+        // Subscribe before the pre-check, so a transition landing between the
+        // two is buffered rather than lost.
+        let stream = self.events.subscribe(
+            None,
+            crate::events::Filter::new(
+                Some(vec![p.session_id.0.clone()]),
+                Some(vec![diri_proto::EventName::SESSION_UPDATED.to_string()]),
+            ),
+        );
+
+        let current = |registry: &Registry| -> Option<diri_proto::SessionRecord> {
+            registry
+                .records()
+                .into_iter()
+                .find(|record| record.id.0 == p.session_id.0)
+        };
+        let matches = |record: &diri_proto::SessionRecord| {
+            p.until
+                .iter()
+                .any(|target| crate::events::satisfies_wait_target(&record.status, target))
+        };
+
+        let mut latest = {
+            let registry = self.registry.lock().map_err(poisoned)?;
+            current(&registry)
+                .ok_or_else(|| ControlError::not_found(p.session_id.0.clone()))?
+        };
+        loop {
+            if matches(&latest) {
+                return encode(&diri_proto::EventsWaitResult {
+                    session: latest,
+                    timed_out: false,
+                });
+            }
+            let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now())
+            else {
+                return encode(&diri_proto::EventsWaitResult {
+                    session: latest,
+                    timed_out: true,
+                });
+            };
+            if stream.recv(remaining).is_some() {
+                let registry = self.registry.lock().map_err(poisoned)?;
+                if let Some(record) = current(&registry) {
+                    latest = record;
+                }
+            }
         }
     }
 
@@ -165,6 +303,7 @@ impl ControlServer {
             Method::WORKTREE_CREATE => self.worktree_create(params),
             Method::WORKTREE_LIST => self.worktree_list(params),
             Method::WORKTREE_REMOVE => self.worktree_remove(params),
+            Method::EVENTS_WAIT => self.events_wait(params),
             other => Err(ControlError::not_found(format!(
                 "method {other:?} is not implemented by this engine yet"
             ))),
@@ -258,6 +397,7 @@ impl ControlServer {
             .spawn(spec, record)
             .map_err(|error| ControlError::internal(error.to_string()))?;
         let _ = registry.persist();
+        self.publish_updated(&registry, &id);
 
         let record = registry
             .records()
@@ -329,6 +469,7 @@ impl ControlServer {
             return Err(ControlError::not_found(p.session_id.0.clone()));
         }
         let _ = registry.persist();
+        self.publish_updated(&registry, &p.session_id.0);
         Ok(json!({}))
     }
 
@@ -339,6 +480,11 @@ impl ControlServer {
             .remove(&p.session_id.0, &self.logs_dir)
             .map_err(io_control_error)?;
         let _ = registry.persist();
+        self.events.publish(
+            diri_proto::EventName::SESSION_REMOVED,
+            json!({ "id": p.session_id.0, "reason": "released" }),
+            Some(&p.session_id.0),
+        );
         Ok(json!({}))
     }
 
@@ -349,6 +495,7 @@ impl ControlServer {
             .rename(&p.session_id.0, &p.title)
             .map_err(io_control_error)?;
         let _ = registry.persist();
+        self.publish_updated(&registry, &p.session_id.0);
         Ok(json!({}))
     }
 
@@ -359,6 +506,7 @@ impl ControlServer {
             .mark_seen(&p.session_id.0)
             .map_err(io_control_error)?;
         let _ = registry.persist();
+        self.publish_updated(&registry, &p.session_id.0);
         Ok(json!({}))
     }
 
@@ -369,6 +517,7 @@ impl ControlServer {
             .archive(&p.session_id.0)
             .map_err(io_control_error)?;
         let _ = registry.persist();
+        self.publish_updated(&registry, &p.session_id.0);
         Ok(json!({}))
     }
 
@@ -379,7 +528,23 @@ impl ControlServer {
             .unarchive(&p.session_id.0)
             .map_err(io_control_error)?;
         let _ = registry.persist();
+        self.publish_updated(&registry, &p.session_id.0);
         Ok(json!({}))
+    }
+
+    /// Publishes `session.updated` with the session's current record.
+    fn publish_updated(&self, registry: &Registry, id: &str) {
+        if let Some(record) = registry
+            .records()
+            .into_iter()
+            .find(|record| record.id.0 == id)
+        {
+            self.events.publish_encoded(
+                diri_proto::EventName::SESSION_UPDATED,
+                &record,
+                Some(id),
+            );
+        }
     }
 
     /// Resumable past conversations from the agents' own transcript stores,
@@ -407,6 +572,11 @@ impl ControlServer {
             p.base.as_deref(),
         )
         .map_err(io_control_error)?;
+        self.events.publish(
+            "worktree.created",
+            json!({ "repoPath": p.repo_path, "path": info.path, "branch": info.branch }),
+            None,
+        );
         encode(&worktree_to_wire(info))
     }
 
@@ -420,6 +590,11 @@ impl ControlServer {
         let p: diri_proto::WorktreeRemoveParams = decode(params)?;
         crate::git::remove_worktree(Path::new(&p.repo_path), &p.worktree_path, p.force)
             .map_err(io_control_error)?;
+        self.events.publish(
+            "worktree.removed",
+            json!({ "repoPath": p.repo_path, "path": p.worktree_path }),
+            None,
+        );
         Ok(json!({}))
     }
 
@@ -477,6 +652,28 @@ pub(crate) fn new_record(id: &str, kind: &str, cwd: &str) -> diri_proto::Session
         listening_ports: None,
         foreground_agent: None,
     }
+}
+
+/// A connection's live event subscription: stopping it ends the forwarder,
+/// whose stream-drop unsubscribes from the bus.
+struct SubscriptionHandle {
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    _thread: std::thread::JoinHandle<()>,
+}
+
+/// Serializes one message onto the shared write half. Responses and event
+/// frames interleave here; the mutex keeps each line whole.
+fn write_message(
+    writer: &Arc<Mutex<UnixStream>>,
+    message: &ControlMessage,
+) -> std::io::Result<()> {
+    let mut bytes = serde_json::to_vec(message)?;
+    bytes.push(b'\n');
+    let mut stream = writer
+        .lock()
+        .map_err(|_| std::io::Error::other("writer poisoned"))?;
+    stream.write_all(&bytes)?;
+    stream.flush()
 }
 
 fn poisoned<T>(_: T) -> ControlError {
@@ -590,6 +787,13 @@ mod tests {
     }
 
     /// Round-trips one request through the dispatcher the way a client would.
+    /// Dispatches one line the way `serve` would, with a throwaway socket
+    /// standing in for the connection's write half.
+    fn handle(server: &ControlServer, line: &[u8]) -> Option<ControlMessage> {
+        let (writer, _peer) = UnixStream::pair().expect("socketpair");
+        server.handle_line(line, &Arc::new(Mutex::new(writer)), &mut None)
+    }
+
     fn call(server: &ControlServer, method: &str, params: Option<JsonValue>) -> ControlMessage {
         let request = ControlMessage::Request {
             id: 1,
@@ -597,9 +801,7 @@ mod tests {
             params,
         };
         let line = serde_json::to_vec(&request).expect("encode");
-        server
-            .handle_line(&line)
-            .expect("a request gets a response")
+        handle(server, &line).expect("a request gets a response")
     }
 
     fn ok_of(message: ControlMessage) -> JsonValue {
@@ -830,7 +1032,7 @@ mod tests {
         // A client waiting on a reply should learn that none is coming.
         let temp = tempfile::tempdir().expect("temp");
         let server = server(temp.path());
-        let response = server.handle_line(b"{ not json").expect("a response");
+        let response = handle(&server, b"{ not json").expect("a response");
         assert_eq!(err_of(response).code, "bad_request");
     }
 
@@ -845,7 +1047,7 @@ mod tests {
         })
         .expect("encode");
         assert!(
-            server.handle_line(&event).is_none(),
+            handle(&server, &event).is_none(),
             "the daemon sends events; it does not answer them"
         );
     }

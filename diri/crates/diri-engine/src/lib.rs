@@ -21,6 +21,7 @@
 pub mod agent;
 pub mod control;
 pub mod detect;
+pub mod events;
 pub mod git;
 pub mod history;
 #[cfg(unix)]

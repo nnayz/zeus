@@ -134,7 +134,7 @@ public actor PullRequestMonitor {
         includeThreads: Bool = true
     ) -> PullRequestStatus? {
         let fields =
-            "number,title,state,isDraft,reviewDecision,mergeable,mergeStateStatus,"
+            "number,title,author,body,baseRefName,headRefName,state,isDraft,reviewDecision,mergeable,mergeStateStatus,"
             + "additions,deletions,changedFiles,comments,reviews,statusCheckRollup"
         guard let data = runGh(["pr", "view", url, "--json", fields], ghPath: ghPath, timeout: timeout),
             var status = parse(data, url: url, now: Date())
@@ -203,8 +203,20 @@ public actor PullRequestMonitor {
     // MARK: Parsing
 
     private struct GhPRView: Decodable {
-        struct Comment: Decodable {}
-        struct Review: Decodable {}
+        struct Actor: Decodable { var login: String? }
+        struct Comment: Decodable {
+            var author: Actor?
+            var body: String?
+            var createdAt: String?
+            var url: String?
+        }
+        struct Review: Decodable {
+            var author: Actor?
+            var body: String?
+            var state: String?
+            var submittedAt: String?
+            var url: String?
+        }
         /// statusCheckRollup mixes CheckRun (name/status/conclusion/detailsUrl,
         /// optionally workflowName) and StatusContext (context/state/targetUrl)
         /// entries.
@@ -221,6 +233,10 @@ public actor PullRequestMonitor {
 
         var number: Int
         var title: String?
+        var author: Actor?
+        var body: String?
+        var baseRefName: String?
+        var headRefName: String?
         var state: String
         var isDraft: Bool?
         var reviewDecision: String?
@@ -288,10 +304,34 @@ public actor PullRequestMonitor {
         let passed = checks.count { $0.result == "pass" }
         let failed = checks.count { $0.result == "fail" }
         let pending = checks.count { $0.result == "pending" }
+        let issueComments = (view.comments ?? []).map { comment in
+            PRDiscussionItem(
+                kind: "comment",
+                author: comment.author?.login ?? "ghost",
+                body: comment.body ?? "",
+                createdAt: parseGitHubDate(comment.createdAt),
+                url: comment.url)
+        }
+        let reviews = (view.reviews ?? []).map { review in
+            PRDiscussionItem(
+                kind: "review",
+                author: review.author?.login ?? "ghost",
+                body: review.body ?? "",
+                state: review.state,
+                createdAt: parseGitHubDate(review.submittedAt),
+                url: review.url)
+        }
+        let discussion = (issueComments + reviews).sorted {
+            ($0.createdAt ?? .distantPast) < ($1.createdAt ?? .distantPast)
+        }
         return PullRequestStatus(
             url: url,
             number: view.number,
             title: view.title,
+            author: view.author?.login,
+            body: view.body,
+            baseRefName: view.baseRefName,
+            headRefName: view.headRefName,
             state: view.state,
             isDraft: view.isDraft ?? false,
             reviewDecision: (view.reviewDecision?.isEmpty ?? true) ? nil : view.reviewDecision,
@@ -306,7 +346,13 @@ public actor PullRequestMonitor {
             checksFailed: failed,
             checksPending: pending,
             checks: checks.isEmpty ? nil : checks,
+            discussion: discussion.isEmpty ? nil : discussion,
             fetchedAt: now
         )
+    }
+
+    private static func parseGitHubDate(_ value: String?) -> Date? {
+        guard let value else { return nil }
+        return ISO8601DateFormatter().date(from: value)
     }
 }

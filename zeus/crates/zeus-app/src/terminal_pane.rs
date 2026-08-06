@@ -3432,6 +3432,10 @@ mod tests {
             url: url.to_owned(),
             number: 42,
             title: Some("Keep terminal resident".to_owned()),
+            author: None,
+            body: None,
+            base_ref_name: None,
+            head_ref_name: None,
             state: "OPEN".to_owned(),
             is_draft: false,
             review_decision: Some("APPROVED".to_owned()),
@@ -3467,6 +3471,7 @@ mod tests {
                     url: None,
                 },
             ]),
+            discussion: None,
             fetched_at: DateMillis(1.0),
         }
     }

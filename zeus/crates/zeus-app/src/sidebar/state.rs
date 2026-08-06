@@ -53,6 +53,9 @@ pub struct SidebarUiState {
     pub hover_card: Option<(SessionId, f32)>,
     pub drag: Option<DragItem>,
     pub drag_target: Option<String>,
+    /// A live drag has staged a reorder in memory that still needs one prefs
+    /// write when the gesture ends.
+    pub order_dirty: bool,
     pub resize_origin: Option<(f32, f32)>,
     pub preview_account: bool,
 }
@@ -71,6 +74,7 @@ impl SidebarUiState {
             hover_card: None,
             drag: None,
             drag_target: None,
+            order_dirty: false,
             resize_origin: None,
             preview_account: false,
         }

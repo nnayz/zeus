@@ -166,7 +166,7 @@ fn spawning_a_shell_over_the_socket_produces_a_watched_session() {
         id: 1,
         method: "session.spawn".into(),
         params: Some(json!({
-            "kind": "shell",
+            "kind": { "shell": {} },
             "cwd": "/tmp",
             "argv": ["/bin/sh", "-c", "printf spawned-ok\\n; sleep 30"],
         })),
@@ -174,7 +174,7 @@ fn spawning_a_shell_over_the_socket_produces_a_watched_session() {
     let id = match spawned {
         ControlMessage::Response {
             result: Ok(result), ..
-        } => result["session"]["id"]
+        } => result["id"]
             .as_str()
             .expect("a session id")
             .to_string(),
@@ -327,7 +327,7 @@ fn events_flow_to_a_subscribed_connection() {
             id: 2,
             method: "session.spawn".into(),
             params: Some(json!({
-                "kind": "shell",
+                "kind": { "shell": {} },
                 "cwd": "/tmp",
                 "argv": ["/bin/sh", "-c", "exit 0"],
             })),
@@ -337,7 +337,7 @@ fn events_flow_to_a_subscribed_connection() {
     let id = match spawned {
         ControlMessage::Response {
             result: Ok(result), ..
-        } => result["session"]["id"].as_str().expect("id").to_string(),
+        } => result["id"].as_str().expect("id").to_string(),
         other => panic!("spawn failed: {other:?}"),
     };
     send(

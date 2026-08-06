@@ -85,6 +85,9 @@ pub enum DaemonState {
 pub enum StoreEffect {
     /// Repaint subscribers after a purely local navigation change.
     UiChanged,
+    /// Push one fresh snapshot to watch subscribers. The menu-bar panel skips
+    /// rebuilds while hidden, so opening it asks for a current snapshot.
+    PublishSnapshot,
     MarkSeen(SessionId),
     Remove(SessionId),
     Resume {
@@ -133,7 +136,9 @@ pub enum StoreEffect {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct StoreSnapshot {
-    pub sessions: Vec<SessionRecord>,
+    /// Shared, not owned: a snapshot publish happens up to every 50ms while
+    /// events flow, and its consumers only read.
+    pub sessions: Vec<Arc<SessionRecord>>,
     pub projects: Vec<Project>,
     pub selected_session_id: Option<SessionId>,
     pub global_attention: AttentionLevel,
@@ -504,6 +509,13 @@ impl SessionStore {
         &self.overview
     }
 
+    /// Ask the runtime for one immediate snapshot publish. Used when a passive
+    /// consumer (the menu-bar panel) becomes visible and needs current data
+    /// without waiting for the next daemon event.
+    pub fn request_snapshot_publish(&mut self) {
+        self.emit(StoreEffect::PublishSnapshot);
+    }
+
     pub fn update_preferences(&mut self, update: impl FnOnce(&mut Prefs)) -> io::Result<()> {
         update(&mut self.prefs);
         self.prefs.normalize();
@@ -531,6 +543,31 @@ impl SessionStore {
 
     pub fn set_session_order(&mut self, order: Vec<SessionId>) -> io::Result<()> {
         self.update_preferences(|prefs| prefs.sidebar_session_order = order)
+    }
+
+    /// In-memory reorder for live drag feedback. `drag_over` runs on every
+    /// frame the pointer hovers a row, so the prefs file write is deferred to
+    /// the drop ([`Self::persist_preferences`]) instead of happening per frame.
+    /// Returns whether the order actually moved.
+    pub fn stage_project_order(&mut self, order: Vec<ProjectId>) -> bool {
+        if self.prefs.sidebar_project_order == order {
+            return false;
+        }
+        self.prefs.sidebar_project_order = order;
+        self.prefs.normalize();
+        self.invalidate_projection();
+        true
+    }
+
+    /// See [`Self::stage_project_order`].
+    pub fn stage_session_order(&mut self, order: Vec<SessionId>) -> bool {
+        if self.prefs.sidebar_session_order == order {
+            return false;
+        }
+        self.prefs.sidebar_session_order = order;
+        self.prefs.normalize();
+        self.invalidate_projection();
+        true
     }
 
     pub fn toggle_project_pin(&mut self, id: ProjectId) -> io::Result<()> {
@@ -1066,11 +1103,7 @@ impl SessionStore {
     }
 
     pub fn snapshot(&self) -> StoreSnapshot {
-        let mut sessions: Vec<_> = self
-            .sessions
-            .values()
-            .map(|session| session.as_ref().clone())
-            .collect();
+        let mut sessions: Vec<_> = self.sessions.values().map(Arc::clone).collect();
         sessions.sort_by(|left, right| {
             right
                 .updated_at
@@ -1833,9 +1866,12 @@ async fn run_effects(
     status_tx: broadcast::Sender<StatusTransition>,
 ) {
     while let Some(effect) = effects.recv().await {
-        let became_active = matches!(&effect, StoreEffect::SetActive(true));
+        let force_snapshot = matches!(
+            &effect,
+            StoreEffect::SetActive(true) | StoreEffect::PublishSnapshot
+        );
         let result: Result<(), ClientError> = match effect {
-            StoreEffect::UiChanged => Ok(()),
+            StoreEffect::UiChanged | StoreEffect::PublishSnapshot => Ok(()),
             StoreEffect::MarkSeen(id) => client.mark_seen(&id).await,
             StoreEffect::Remove(id) => client.remove(&id).await,
             StoreEffect::Resume { id, automatic } => {
@@ -1961,7 +1997,7 @@ async fn run_effects(
         let mut store = store.write().expect("session store lock poisoned");
         store.last_action_error = result.err().map(|error| error.to_string());
         let active = store.app_is_active;
-        let activation_snapshot = became_active.then(|| store.snapshot());
+        let activation_snapshot = force_snapshot.then(|| store.snapshot());
         drop(store);
         if let Some(snapshot) = activation_snapshot {
             snapshot_tx.send_replace(snapshot);

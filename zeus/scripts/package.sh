@@ -110,6 +110,16 @@ cp "${daemon_bin}/zeus" "${app_bin_dir}/zeus"
 cp "${universal_mcp_binary}" "${app_bin_dir}/zeus-mcp"
 lipo -info "${app_bin_dir}/zeusd"
 
+# The Rust daemon rides along for the engine switch: opt a machine in with
+#   ZEUSD_PATH=.../Resources/bin/zeusd-rs open -a zeus
+# Native arch like the Swift daemon; it adopts the same holders, so flipping
+# back and forth never loses a session.
+echo "==> Building the Rust daemon (native)"
+cargo build --release --package zeus-engine --bin zeusd-rs --bin zeus-holder \
+    --target aarch64-apple-darwin
+cp "${target_dir}/aarch64-apple-darwin/release/zeusd-rs" "${app_bin_dir}/zeusd-rs"
+cp "${target_dir}/aarch64-apple-darwin/release/zeus-holder" "${app_bin_dir}/zeus-holder"
+
 # SwiftPM resource bundles (agent manifests). Copy them NEXT TO the binaries,
 # because for a bare executable `Bundle.main` is the directory containing that
 # executable — Resources/bin here, not Contents/Resources — and that is the
@@ -168,6 +178,8 @@ codesign --force --options runtime "${ts_flag[@]}" --sign "${sign_id}" "${app_bi
 codesign --force --options runtime "${ts_flag[@]}" --sign "${sign_id}" "${app_bin_dir}/zeusd"
 codesign --force --options runtime "${ts_flag[@]}" --sign "${sign_id}" "${app_bin_dir}/zeus"
 codesign --force --options runtime "${ts_flag[@]}" --sign "${sign_id}" "${app_bin_dir}/zeus-mcp"
+codesign --force --options runtime "${ts_flag[@]}" --sign "${sign_id}" "${app_bin_dir}/zeusd-rs"
+codesign --force --options runtime "${ts_flag[@]}" --sign "${sign_id}" "${app_bin_dir}/zeus-holder"
 echo "==> Signing ${app_path}"
 codesign --force --options runtime "${ts_flag[@]}" \
     --entitlements "${entitlements}" \

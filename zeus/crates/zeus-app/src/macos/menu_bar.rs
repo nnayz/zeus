@@ -42,6 +42,9 @@ pub struct NativeMenuBar {
     body: Retained<NSView>,
     // NSControl target is not retained.
     _target: Retained<MenuBarTarget>,
+    /// Hash of the last-rendered panel content. Rebuilding tears down and
+    /// recreates every NSView in the body, so identical publishes are skipped.
+    last_fingerprint: Option<u64>,
 }
 
 impl NativeMenuBar {
@@ -189,6 +192,14 @@ impl NativeMenuBar {
         let Some(mtm) = MainThreadMarker::new() else {
             return;
         };
+
+        // A hidden panel needs only the status-item glyph above. Opening the
+        // panel requests a fresh snapshot publish (see `toggle_menu`), which
+        // re-enters here with the panel visible.
+        if !self.panel.isVisible() {
+            self.last_fingerprint = None;
+            return;
+        }
 
         let rows = menu_rows(snapshot);
         let visible_sessions = rows

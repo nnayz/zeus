@@ -56,12 +56,16 @@ const TOOLBAR_MAX_VISIBLE_LINKS: usize = 4;
 const TOOLBAR_LINK_MAX_WIDTH: f32 = 176.0;
 const TOOLBAR_OVERFLOW_WIDTH: f32 = 50.0;
 const REATTACH_DELAY: Duration = Duration::from_millis(500);
-const ACTIVE_REPAINT_INTERVAL: Duration = Duration::from_millis(50);
+/// Burst ceiling for repaints (~60fps). The pacer paints the first frame of a
+/// burst immediately; this only caps sustained output, and background panes
+/// never invalidate the window, so idle budgets are unaffected. Matched to the
+/// daemon's `gridFlushInterval`.
+const ACTIVE_REPAINT_INTERVAL: Duration = Duration::from_millis(16);
 /// How often a live drag is allowed to push a new PTY geometry. Matched to the
-/// daemon's coalesced grid flush (also 50ms): resizing faster produces frames
+/// daemon's coalesced grid flush (also 16ms): resizing faster produces frames
 /// the client can never see, resizing slower makes the drag look like it snaps
 /// at the end instead of reflowing under the cursor.
-const RESIZE_CADENCE: Duration = Duration::from_millis(50);
+const RESIZE_CADENCE: Duration = Duration::from_millis(16);
 /// Two resizes further apart than this belong to different gestures. A drag
 /// steps faster than this and must keep reflowing live; anything slower is a
 /// discrete change -- a panel toggle, a window snap, a font-size change --
@@ -3303,11 +3307,13 @@ mod tests {
     fn a_live_drag_keeps_resizing_the_pty_at_the_cadence() {
         // One second of dragging at 120Hz. The trailing-edge debounce this
         // replaced sent exactly one resize here -- after the mouse stopped --
-        // which is why the terminal appeared to reflow only on drop.
+        // which is why the terminal appeared to reflow only on drop. The
+        // expected count derives from the cadence so it moves with it.
         let sent = simulate_drag(120, Duration::from_millis(8));
+        let expected = (1000 / RESIZE_CADENCE.as_millis()) as usize;
         assert!(
-            sent.len() >= 18 && sent.len() <= 22,
-            "expected ~20 resizes in a second of dragging, got {}",
+            sent.len().abs_diff(expected) <= 3,
+            "expected ~{expected} resizes in a second of dragging, got {}",
             sent.len()
         );
         // Leading edge: the drag's first frame is not made to wait.
@@ -3326,8 +3332,12 @@ mod tests {
         // Three frames then release: the last size must still go out, or the
         // pane keeps painting a grid the daemon has never been told about.
         let sent = simulate_drag(3, Duration::from_millis(8));
-        assert_eq!(sent.len(), 2);
-        assert!(sent[1] <= Duration::from_millis(58));
+        assert!(sent.len() >= 2, "the release size must be sent: {sent:?}");
+        let release = Duration::from_millis(3 * 8);
+        assert!(
+            *sent.last().expect("sent") <= release + RESIZE_CADENCE,
+            "the final size lands within one cadence of release: {sent:?}"
+        );
     }
 
     #[test]

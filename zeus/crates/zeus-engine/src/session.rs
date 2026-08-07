@@ -676,6 +676,12 @@ impl Session {
         Some(screen.grid_update(false))
     }
 
+    /// Whether the child has bracketed-paste mode on — the "composer is
+    /// alive" tell that gates initial-prompt injection.
+    pub fn bracketed_paste(&self) -> bool {
+        self.shared.screen.lock().expect("screen").bracketed_paste()
+    }
+
     /// Current (alt_screen, mouse_reporting).
     pub fn modes(&self) -> (bool, bool) {
         let screen = self.shared.screen.lock().expect("screen");

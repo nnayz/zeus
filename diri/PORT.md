@@ -68,8 +68,7 @@ Remaining gaps in `dirijord-rs` (all answer clean errors):
   unreachable until both land together.
 - **Port forwarding**: the data-channel `ForwardRequest` mode (phone preview
   tunnels) is unported — same mobile stack.
-- **Polish, not parity blockers**: screen-checkpoint restore on adoption
-  (bounded raw-tail replay instead), deferred launch at first client size,
+- **Polish, not parity blockers**: deferred launch at first client size,
   readiness-verified initial-prompt injection (heuristic wait today).
 
 Holder-port notes, for whoever wires the daemon:
@@ -80,10 +79,14 @@ Holder-port notes, for whoever wires the daemon:
   binary) and a Swift daemon would adopt Rust-spawned ones. The reverse
   direction has no automated test — it only matters for a rollback, and would
   need Swift-side test infrastructure.
-- **Screen checkpoints are not ported.** The Swift daemon restores adopted
-  sessions from `<id>.screen.plist` when fresh enough; the Rust held pump
-  replays a bounded raw tail (256 KiB, same budget) through the emulator
-  instead. Same bound on startup work, slightly more of it.
+- **Screen checkpoints are ported** (2026-08-07). The held pump writes
+  `<id>.screen.plist` after a 1s output settle — same binary-plist format
+  and keys as `ScreenCheckpoint.swift`, proven against Apple's own parser
+  (`plutil`) in both directions — and adoption restores from a fresh-enough
+  checkpoint, falling back to the bounded raw-tail replay (256 KiB) for
+  anything stale, malformed, or geometry-mismatched. A Rust daemon adopting
+  a Swift-spawned fleet therefore seeds from Swift's checkpoints, and a
+  rollback reads ours.
 - **Deferred launch is not ported.** The Swift daemon delays exec until the
   first client resize so TUI banners render at the settled width; the Rust
   engine spawns at the spec size. Worth revisiting when the app moves to this

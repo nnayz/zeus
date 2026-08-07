@@ -283,6 +283,93 @@ impl HeadlessScreen {
         }
     }
 
+    /// Restores a persisted visible grid into a fresh emulator by
+    /// synthesizing the byte stream that would have painted it. Ported from
+    /// the Swift `HeadlessScreen.restore(checkpoint:)`: each non-blank cell
+    /// is cursor-addressed independently, because a wide glyph consumes two
+    /// terminal columns while the grid also carries its blank continuation
+    /// cell — a naive row string would shift everything after it.
+    pub fn restore(
+        &mut self,
+        update: &GridUpdate,
+        alt_screen: bool,
+        bracketed_paste: bool,
+        mouse_reporting: bool,
+    ) -> bool {
+        let cols = self.geometry.cols;
+        let rows = self.geometry.rows;
+        if !update.is_full_snapshot
+            || update.cols as usize != cols
+            || update.rows as usize != rows
+            || update.changed_rows.len() != rows
+        {
+            return false;
+        }
+
+        let mut bytes = Vec::with_capacity(cols * rows * 2);
+        if alt_screen {
+            bytes.extend_from_slice(b"\x1b[?1049h");
+        }
+        bytes.extend_from_slice(b"\x1b[H\x1b[2J");
+
+        let mut sorted: Vec<&ChangedRow> = update.changed_rows.iter().collect();
+        sorted.sort_by_key(|row| row.y);
+        for row in sorted {
+            if row.y as usize >= rows || row.cells.len() != cols {
+                return false;
+            }
+            let mut previous: Option<&GridCell> = None;
+            for (x, cell) in row.cells.iter().enumerate() {
+                // The initial clear already produced true blank cells;
+                // leaving them untouched keeps sparse checkpoints cheap.
+                if *cell == GridCell::BLANK {
+                    continue;
+                }
+                bytes.extend_from_slice(format!("\x1b[{};{}H", row.y + 1, x + 1).as_bytes());
+                if previous.is_none_or(|prev| {
+                    prev.fg != cell.fg || prev.bg != cell.bg || prev.style != cell.style
+                }) {
+                    bytes.extend_from_slice(sgr(cell).as_bytes());
+                }
+                match char::from_u32(cell.scalar) {
+                    Some(glyph) if cell.scalar != 0 => {
+                        let mut buffer = [0u8; 4];
+                        bytes.extend_from_slice(glyph.encode_utf8(&mut buffer).as_bytes());
+                    }
+                    _ => bytes.push(b' '),
+                }
+                previous = Some(cell);
+            }
+        }
+
+        bytes.extend_from_slice(b"\x1b[0m");
+        if bracketed_paste {
+            bytes.extend_from_slice(b"\x1b[?2004h");
+        }
+        if mouse_reporting {
+            bytes.extend_from_slice(b"\x1b[?1000h\x1b[?1006h");
+        }
+        bytes.extend_from_slice(if update.cursor_visible {
+            b"\x1b[?25h"
+        } else {
+            b"\x1b[?25l"
+        });
+        bytes.extend_from_slice(
+            format!(
+                "\x1b[{};{}H",
+                (update.cursor_row as usize + 1).min(rows),
+                (update.cursor_col as usize + 1).min(cols)
+            )
+            .as_bytes(),
+        );
+        self.feed(&bytes);
+        // Force the next grid_update to be a full frame: the diff baseline
+        // predates the restore.
+        self.last_grid_cols = 0;
+        self.last_grid_rows = 0;
+        true
+    }
+
     /// Encodes a wheel event for the child, when it asked for mouse
     /// reporting. Returns the bytes to write to the PTY — empty means the
     /// child doesn't care and the client should scroll its own scrollback.
@@ -535,6 +622,59 @@ fn wire_style(flags: Flags) -> TermStyle {
     style
 }
 
+/// The SGR sequence that reproduces a cell's attributes, mirroring the Swift
+/// `HeadlessScreen.sgr(for:)`.
+fn sgr(cell: &GridCell) -> String {
+    let mut codes: Vec<String> = vec!["0".into()];
+    if cell.style.contains(TermStyle::BOLD) {
+        codes.push("1".into());
+    }
+    if cell.style.contains(TermStyle::DIM) {
+        codes.push("2".into());
+    }
+    if cell.style.contains(TermStyle::ITALIC) {
+        codes.push("3".into());
+    }
+    if cell.style.contains(TermStyle::UNDERLINE) {
+        codes.push("4".into());
+    }
+    if cell.style.contains(TermStyle::BLINK) {
+        codes.push("5".into());
+    }
+    if cell.style.contains(TermStyle::INVERSE) {
+        codes.push("7".into());
+    }
+    if cell.style.contains(TermStyle::INVISIBLE) {
+        codes.push("8".into());
+    }
+    if cell.style.contains(TermStyle::CROSSED_OUT) {
+        codes.push("9".into());
+    }
+    append_color(cell.fg, true, &mut codes);
+    append_color(cell.bg, false, &mut codes);
+    format!("\x1b[{}m", codes.join(";"))
+}
+
+fn append_color(color: TermColor, foreground: bool, codes: &mut Vec<String>) {
+    match color {
+        TermColor::Default | TermColor::DefaultInverted => {
+            codes.push(if foreground { "39" } else { "49" }.into());
+        }
+        TermColor::Ansi(value) => {
+            codes.push(if foreground { "38" } else { "48" }.into());
+            codes.push("5".into());
+            codes.push(value.to_string());
+        }
+        TermColor::Rgb(red, green, blue) => {
+            codes.push(if foreground { "38" } else { "48" }.into());
+            codes.push("2".into());
+            codes.push(red.to_string());
+            codes.push(green.to_string());
+            codes.push(blue.to_string());
+        }
+    }
+}
+
 fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() || haystack.len() < needle.len() {
         return None;
@@ -637,6 +777,41 @@ mod tests {
         screen.feed(b"hello\r\n");
         screen.resize(40, 10);
         assert_eq!(screen.lines(), vec!["hello"]);
+    }
+
+    #[test]
+    fn a_restored_snapshot_reproduces_the_screen_and_modes() {
+        let mut original = HeadlessScreen::new(40, 10);
+        original.feed(b"\x1b[?2004h\x1b[?1000h\x1b[?1006h");
+        original.feed(b"\x1b[1;31mred alert\x1b[0m\r\nplain line\r\n");
+        original.feed("wide: ▶ done\r\n".as_bytes());
+        let snapshot = original.full_snapshot();
+
+        let mut restored = HeadlessScreen::new(40, 10);
+        assert!(restored.restore(&snapshot, false, true, true), "restorable");
+        assert_eq!(restored.lines(), original.lines());
+        assert!(restored.bracketed_paste(), "bracketed paste mode carried");
+        assert!(restored.mouse_reporting(), "mouse mode carried");
+        assert!(!restored.is_alt_screen());
+        assert_eq!(restored.cursor(), original.cursor());
+        // Attribute fidelity, not just text: the restored grid's cells match.
+        assert_eq!(
+            restored.full_snapshot().changed_rows,
+            snapshot.changed_rows
+        );
+    }
+
+    #[test]
+    fn a_geometry_mismatch_refuses_to_restore() {
+        let mut original = HeadlessScreen::new(40, 10);
+        original.feed(b"hello\r\n");
+        let snapshot = original.full_snapshot();
+
+        let mut smaller = HeadlessScreen::new(39, 10);
+        assert!(
+            !smaller.restore(&snapshot, false, false, false),
+            "a checkpoint from another geometry is a cache miss"
+        );
     }
 
     #[test]

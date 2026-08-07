@@ -117,6 +117,11 @@ impl OutputLog {
         )
     }
 
+    /// Where this log lives on disk, for filesystem watchers.
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
     pub fn tail_offset(&self) -> u64 {
         self.tail_offset
     }

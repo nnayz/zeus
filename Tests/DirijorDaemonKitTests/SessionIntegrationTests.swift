@@ -315,11 +315,16 @@ final class CollectingSink: SessionOutputSink, @unchecked Sendable {
     try await waitUntil(timeout: .seconds(5)) {
         await restored.screenText().contains("after-restart")
     }
-    let resumedFrame = try #require(
-        sink.frames.compactMap(\.outputPayload).first {
-            String(decoding: $0.bytes, as: UTF8.self).contains("after-restart")
-        })
-    #expect(resumedFrame.offset >= firstOffset)
+    // Live delivery is grid frames (raw `.output` byte frames are no longer
+    // emitted): the resumed text must reach the sink through a grid update.
+    try await waitUntil(timeout: .seconds(5)) {
+        sink.frames.compactMap(\.gridPayload).contains { update in
+            update.changedRows.contains { row in
+                String(decoding: Data(row.cells.map { UInt8(clamping: $0.scalar) }), as: UTF8.self)
+                    .contains("after-restart")
+            }
+        }
+    }
     #expect(await restored.logTailOffset > firstOffset)
 
     try await restoredRegistry.kill(sessionID: record.id)

@@ -4,6 +4,11 @@ import Foundation
 public struct HolderClient: Sendable {
     public let socketPath: String
 
+    /// Coders are stateless after configuration; building fresh ones per
+    /// request put two allocations on every keystroke's write path.
+    private static let encoder = JSONEncoder()
+    private static let decoder = JSONDecoder()
+
     public init(socketPath: String) {
         self.socketPath = socketPath
     }
@@ -40,11 +45,11 @@ public struct HolderClient: Sendable {
     private func request(_ request: HolderRequest) throws -> HolderResponse {
         let fd = try UnixSocket.connect(path: socketPath)
         defer { Darwin.close(fd) }
-        var encoded = try JSONEncoder().encode(request)
+        var encoded = try Self.encoder.encode(request)
         encoded.append(0x0A)
         try UnixSocket.writeAll(fd: fd, data: encoded)
         let line = try UnixSocket.readLine(fd: fd)
-        let response = try JSONDecoder().decode(HolderResponse.self, from: line)
+        let response = try Self.decoder.decode(HolderResponse.self, from: line)
         guard response.ok else {
             throw HolderError.rejected(response.error ?? "unknown error")
         }

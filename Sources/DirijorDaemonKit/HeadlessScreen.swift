@@ -303,12 +303,19 @@ final class HeadlessScreen {
     /// Builds a `GridUpdate` from the current screen. When `full` is true (or the
     /// geometry changed) every row is included and the diff baseline resets;
     /// otherwise only rows that changed since the last call are included.
+    ///
+    /// Cell conversion (`getCharacter()` per cell) is the expensive part, so
+    /// only rows inside SwiftTerm's own dirty range are converted and diffed;
+    /// everything outside it is untouched by definition. HeadlessScreen is the
+    /// range's only consumer in the daemon.
     func gridUpdate(full: Bool) -> GridUpdate {
         #if DEBUG
         gridExtractionCount += 1
         #endif
         let cols = terminal.cols
         let rows = terminal.rows
+        let updateRange = terminal.getUpdateRange()
+        terminal.clearUpdateRange()
         let geometryChanged = lastRows != rows || lastCols != cols
         let forceFull = full || geometryChanged
         if geometryChanged {
@@ -320,8 +327,19 @@ final class HeadlessScreen {
             rowScratch = Array(repeating: .blank, count: cols)
         }
 
+        let scanRows: Range<Int>
+        if forceFull {
+            scanRows = 0..<rows
+        } else if let range = updateRange {
+            scanRows = max(0, range.startY)..<min(rows, range.endY + 1)
+        } else {
+            // No screen mutation since the last flush; the frame still carries
+            // cursor state, which is all a cursor-only movement needs.
+            scanRows = 0..<0
+        }
+
         var changed: [(y: Int, cells: [GridCell])] = []
-        for y in 0..<rows {
+        for y in scanRows {
             fillRow(y: y, cols: cols, into: &rowScratch)
             let base = y * cols
             var rowChanged = forceFull
@@ -505,67 +523,87 @@ struct HeadlessTerminalInputFilter {
     private enum State {
         case text
         case escape
-        case csi(prefix: [UInt8], body: [UInt8])
+        case csi
     }
 
+    private static let csiPrefix: [UInt8] = [0x1B, 0x5B]
+
     private var state: State = .text
+    /// Stored (not carried inside `State`) so appending never copy-on-writes:
+    /// an enum payload keeps a second reference alive during mutation, which
+    /// made every CSI byte a fresh malloc + memcpy.
+    private var csiBody: [UInt8] = []
 
     mutating func filter(_ data: Data) -> Data {
         var output = Data()
         output.reserveCapacity(data.count)
-        for byte in data {
-            consume(byte, into: &output)
+        data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+            guard let base = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
+            let count = raw.count
+            var index = 0
+            while index < count {
+                let byte = base[index]
+                switch state {
+                case .text:
+                    // Plain output is nearly all of the stream: copy the whole
+                    // run up to the next ESC in one append instead of a byte
+                    // at a time.
+                    var end = index
+                    while end < count, base[end] != 0x1B { end += 1 }
+                    if end > index {
+                        output.append(base.advanced(by: index), count: end - index)
+                    }
+                    if end < count {
+                        state = .escape
+                        index = end + 1
+                    } else {
+                        index = end
+                    }
+                    continue
+
+                case .escape:
+                    if byte == 0x5B { // '['
+                        state = .csi
+                        csiBody.removeAll(keepingCapacity: true)
+                    } else {
+                        output.append(0x1B)
+                        state = .text
+                        // Reprocess this byte as text.
+                        continue
+                    }
+
+                case .csi:
+                    csiBody.append(byte)
+                    if (0x40...0x7E).contains(byte) {
+                        emitCSI(body: csiBody, into: &output)
+                        state = .text
+                    } else if csiBody.count > 1_024 {
+                        // Malformed/unbounded CSI: stop buffering and pass it
+                        // through.
+                        output.append(contentsOf: Self.csiPrefix)
+                        output.append(contentsOf: csiBody)
+                        state = .text
+                    }
+                }
+                index += 1
+            }
         }
         return output
     }
 
-    private mutating func consume(_ byte: UInt8, into output: inout Data) {
-        switch state {
-        case .text:
-            if byte == 0x1B {
-                state = .escape
-            } else {
-                output.append(byte)
-            }
-
-        case .escape:
-            if byte == 0x5B { // '['
-                state = .csi(prefix: [0x1B, 0x5B], body: [])
-            } else {
-                output.append(0x1B)
-                state = .text
-                consume(byte, into: &output)
-            }
-
-        case .csi(let prefix, var body):
-            body.append(byte)
-            if (0x40...0x7E).contains(byte) {
-                emitCSI(prefix: prefix, body: body, into: &output)
-                state = .text
-            } else if body.count > 1_024 {
-                // Malformed/unbounded CSI: stop buffering and pass it through.
-                output.append(contentsOf: prefix)
-                output.append(contentsOf: body)
-                state = .text
-            } else {
-                state = .csi(prefix: prefix, body: body)
-            }
-        }
-    }
-
-    private func emitCSI(prefix: [UInt8], body: [UInt8], into output: inout Data) {
+    private func emitCSI(body: [UInt8], into output: inout Data) {
         guard let final = body.last,
             final == UInt8(ascii: "h") || final == UInt8(ascii: "l"),
             body.first == UInt8(ascii: "?")
         else {
-            output.append(contentsOf: prefix)
+            output.append(contentsOf: Self.csiPrefix)
             output.append(contentsOf: body)
             return
         }
 
         let parameterBytes = body.dropFirst().dropLast()
         guard let parameterText = String(bytes: parameterBytes, encoding: .ascii) else {
-            output.append(contentsOf: prefix)
+            output.append(contentsOf: Self.csiPrefix)
             output.append(contentsOf: body)
             return
         }
@@ -573,14 +611,14 @@ struct HeadlessTerminalInputFilter {
         guard parameters.allSatisfy({ !$0.isEmpty && $0.allSatisfy(\.isNumber) }),
             parameters.contains("2026")
         else {
-            output.append(contentsOf: prefix)
+            output.append(contentsOf: Self.csiPrefix)
             output.append(contentsOf: body)
             return
         }
 
         let kept = parameters.filter { $0 != "2026" }
         guard !kept.isEmpty else { return }
-        output.append(contentsOf: prefix)
+        output.append(contentsOf: Self.csiPrefix)
         output.append(UInt8(ascii: "?"))
         output.append(contentsOf: kept.joined(separator: ";").utf8)
         output.append(final)

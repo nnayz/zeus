@@ -109,16 +109,40 @@ public actor AgentSession {
     /// `claude` launched by hand inside a shell tab gets recognized. Reads the
     /// foreground process group from holder stat and matches its leader's (or
     /// a direct child's) executable name.
+    ///
+    /// Returns the last probed value and refreshes it in the background: the
+    /// probe is a blocking holder round-trip plus libproc walks, and it used
+    /// to run inline inside the status engine's serial tick loop, where one
+    /// slow holder stalled status for every session. Callers poll on a ~2s
+    /// cadence, so a one-probe lag is invisible.
     public func foregroundAgentKind() -> AgentKind? {
-        guard let holder, exitInfo == nil, !isHibernated,
-            let fg = try? holder.stat().foregroundPID
-        else { return nil }
-        guard fg > 0 else { return nil }
+        guard let holder, exitInfo == nil, !isHibernated else { return nil }
+        if !foregroundProbeRunning {
+            foregroundProbeRunning = true
+            let ownPid = pid
+            Task.detached(priority: .utility) { [weak self] in
+                let kind = Self.probeForegroundAgent(holder: holder, ownPid: ownPid)
+                await self?.storeForegroundProbe(kind)
+            }
+        }
+        return cachedForegroundAgent
+    }
+
+    private var cachedForegroundAgent: AgentKind?
+    private var foregroundProbeRunning = false
+
+    private func storeForegroundProbe(_ kind: AgentKind?) {
+        cachedForegroundAgent = kind
+        foregroundProbeRunning = false
+    }
+
+    private static func probeForegroundAgent(holder: HolderClient, ownPid: pid_t) -> AgentKind? {
+        guard let fg = try? holder.stat().foregroundPID, fg > 0 else { return nil }
         // Don't re-report the session's own spawned agent.
-        var candidates: [pid_t] = fg == pid ? [] : [fg]
+        var candidates: [pid_t] = fg == ownPid ? [] : [fg]
         candidates.append(contentsOf: ProcessTree.childPids(fg))
         for candidate in candidates {
-            if let kind = Self.agentKind(forExecutableOf: candidate) { return kind }
+            if let kind = agentKind(forExecutableOf: candidate) { return kind }
         }
         return nil
     }
@@ -131,9 +155,33 @@ public actor AgentSession {
     /// — that's the one that chdir'd — searching the session leader, its children,
     /// and the foreground group; falls back to the foreground leader (a manual
     /// `cd` in a shell tab) and finally the session leader.
+    ///
+    /// Cached and refreshed off-actor for the same reason as
+    /// `foregroundAgentKind()`; the branch monitor polls every 5s and tolerates
+    /// one probe of lag.
     public func agentWorkingDir() -> String? {
         guard pid > 0, exitInfo == nil, !isHibernated else { return nil }
+        if !cwdProbeRunning {
+            cwdProbeRunning = true
+            let ownPid = pid
+            let holderClient = holder
+            Task.detached(priority: .utility) { [weak self] in
+                let cwd = Self.probeAgentWorkingDir(pid: ownPid, holder: holderClient)
+                await self?.storeCwdProbe(cwd)
+            }
+        }
+        return cachedAgentCwd
+    }
 
+    private var cachedAgentCwd: String?
+    private var cwdProbeRunning = false
+
+    private func storeCwdProbe(_ cwd: String?) {
+        cachedAgentCwd = cwd
+        cwdProbeRunning = false
+    }
+
+    private static func probeAgentWorkingDir(pid: pid_t, holder: HolderClient?) -> String? {
         var candidates: [pid_t] = [pid]
         candidates.append(contentsOf: ProcessTree.childPids(pid))
         var foreground: pid_t = -1
@@ -142,7 +190,7 @@ public actor AgentSession {
             candidates.append(fg)
             candidates.append(contentsOf: ProcessTree.childPids(fg))
         }
-        for candidate in candidates where Self.agentKind(forExecutableOf: candidate) != nil {
+        for candidate in candidates where agentKind(forExecutableOf: candidate) != nil {
             if let cwd = ProcessTree.currentWorkingDir(candidate) { return cwd }
         }
         // No agent process (plain shell) or its cwd was unreadable: track the
@@ -461,8 +509,33 @@ public actor AgentSession {
         return true
     }
 
+    /// Everything a checkpoint's content is a function of. Grid and cursor
+    /// state derive from fed log bytes (tracked by `logOffset` and the screen's
+    /// `contentSeq`), so equal keys mean a byte-identical checkpoint.
+    private struct CheckpointKey: Equatable {
+        var logOffset: UInt64
+        var contentSeq: UInt64
+        var markerBytes: Int
+        var altScreen: Bool
+        var bracketedPaste: Bool
+        var mouseReporting: Bool
+    }
+
+    private var lastCheckpointKey: CheckpointKey?
+
     private func persistScreenCheckpoint() {
         checkpointTask = nil
+        let key = CheckpointKey(
+            logOffset: logReadOffset,
+            contentSeq: screen.contentSeq,
+            markerBytes: logMarkerBuffer.count,
+            altScreen: screen.isAltScreen,
+            bracketedPaste: screen.bracketedPasteActive,
+            mouseReporting: screen.mouseReporting)
+        // A settle poll after e.g. a cursor blink or a re-delivered quiet
+        // interval would otherwise serialize and rewrite the whole grid for
+        // identical content.
+        if key == lastCheckpointKey { return }
         let checkpoint = ScreenCheckpoint(
             logOffset: logReadOffset,
             grid: screen.fullSnapshot(),
@@ -472,6 +545,7 @@ public actor AgentSession {
             mouseReporting: screen.mouseReporting)
         do {
             try checkpoint.writeAtomically(to: checkpointURL)
+            lastCheckpointKey = key
         } catch {
             DaemonLog.shared.log("screen checkpoint \(id) failed: \(error)")
         }
@@ -527,20 +601,15 @@ public actor AgentSession {
                 break
             }
             logReadOffset = offset + UInt64(data.count)
-            let bufferedBefore = logMarkerBuffer.count
             logMarkerBuffer.append(data)
             let drained = HolderExitMarker.drain(&logMarkerBuffer)
             if !drained.output.isEmpty {
                 fedOutput = true
-                if !replaying {
-                    let outputOffset =
-                        offset >= UInt64(bufferedBefore)
-                        ? offset - UInt64(bufferedBefore) : offset
-                    let frame = Frame.output(offset: outputOffset, bytes: drained.output)
-                    for (_, sink) in sinks where sink.pendingBytes < Self.sinkPendingWatermark {
-                        sink.deliver(frame)
-                    }
-                }
+                // No raw-byte `.output` frame here: the GPUI client renders
+                // from grid frames and discards byte replay, so building and
+                // sending a copy of every chunk per sink was pure overhead
+                // that also pushed real grid frames toward the backpressure
+                // watermark.
                 let responses = screen.feed(drained.output)
                 if !replaying, !responses.isEmpty { writeRaw(responses) }
                 scheduleGridFlush()
@@ -626,7 +695,29 @@ public actor AgentSession {
         // while any sink is still backpressured so the repair isn't starved.
         resyncGridSinks()
         broadcastModesIfChanged()
-        if !gridDesyncedSinks.isEmpty { scheduleGridFlush() }
+        // A still-backpressured sink is repaired on its own slower timer: at
+        // flush cadence the retry would recompute a full snapshot per sink,
+        // 60 times a second, precisely while the client is already too slow.
+        if !gridDesyncedSinks.isEmpty { scheduleDesyncRetry() }
+    }
+
+    private var desyncRetryScheduled = false
+    private static let desyncRetryInterval: Duration = .milliseconds(250)
+
+    private func scheduleDesyncRetry() {
+        guard !desyncRetryScheduled else { return }
+        desyncRetryScheduled = true
+        Task { [weak self] in
+            try? await Task.sleep(for: Self.desyncRetryInterval)
+            await self?.retryDesyncedSinks()
+        }
+    }
+
+    private func retryDesyncedSinks() {
+        desyncRetryScheduled = false
+        guard !sinks.isEmpty, !gridDesyncedSinks.isEmpty else { return }
+        resyncGridSinks()
+        if !gridDesyncedSinks.isEmpty { scheduleDesyncRetry() }
     }
 
     /// Emits a `.modes` frame to every sink when alt-screen / mouse-reporting
@@ -661,15 +752,28 @@ public actor AgentSession {
     /// The ResourceGovernor pulls this on its scan and patches the record.
     public private(set) var artifacts: [SessionArtifact] = []
     private var lastArtifactScanAt: Date?
+    private var lastArtifactScanSeq: UInt64?
 
     /// Rescan the visible screen for artifact URLs, at most every ~2s. Rides
     /// the already-coalesced grid flush so it only runs while output flows.
+    /// Detached sessions still scan — background agents' PR links must land —
+    /// but an unchanged screen, and a screen that cannot contain an artifact,
+    /// skip the extraction and regex passes entirely.
     private func scanArtifactsIfDue() {
         let now = Date()
         if let last = lastArtifactScanAt, now.timeIntervalSince(last) < 2.0 { return }
         lastArtifactScanAt = now
+        let seq = screen.contentSeq
+        if lastArtifactScanSeq == seq { return }
+        lastArtifactScanSeq = seq
         let text = screen.captureVisibleLines().joined(separator: "\n")
         guard !text.isEmpty else { return }
+        // Every scanner rule requires one of these substrings; most screens
+        // have none of them.
+        guard
+            text.contains("http") || text.contains("github.com")
+                || text.contains("linear.app")
+        else { return }
         artifacts = ArtifactScanner.scan(text, existing: artifacts, now: now)
     }
 
@@ -974,8 +1078,19 @@ public actor AgentSession {
             return
         }
         // The holder owns the EAGAIN-safe loop because it owns the master fd.
-        try? holder.write(data)
+        // Each holder request is a blocking connect + round-trip; running it
+        // on the serial write queue keeps keystrokes ordered while the actor
+        // stays free to drain output.
+        Self.holderWriteQueue.async {
+            try? holder.write(data)
+        }
     }
+
+    /// One serial queue for all sessions' PTY writes: ordering per holder is
+    /// preserved by serial dispatch, and the writes themselves are tiny
+    /// round-trips that never accumulate.
+    private static let holderWriteQueue = DispatchQueue(
+        label: "diri.holder.write", qos: .userInteractive)
 
     /// A client asks to resize the shared PTY. Geometry follows ownership: when a
     /// phone owns the session (`remoteActive`), the mobile size drives the PTY and
@@ -1060,8 +1175,12 @@ public actor AgentSession {
         // Resize both the PTY (→ SIGWINCH, the program repaints) and our
         // authoritative emulator, then paint a fresh full snapshot at the new
         // geometry so the client is immediately correct; the program's repaint
-        // then streams in as diffs.
-        try? holder.resize(cols: UInt16(cols), rows: UInt16(rows))
+        // then streams in as diffs. The holder round-trip rides the serial
+        // write queue: a live drag steps at frame cadence, and blocking the
+        // actor per step stalled output draining.
+        Self.holderWriteQueue.async {
+            try? holder.resize(cols: UInt16(cols), rows: UInt16(rows))
+        }
         screen.resize(cols: cols, rows: rows, historyBudget: interactive ? .trimOnly : .full)
         if interactive {
             // `screen.resize` already reset the diff baseline, so the next

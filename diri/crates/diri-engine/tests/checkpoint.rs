@@ -55,6 +55,7 @@ fn shell_spec(
         authority: diri_engine::Authority::ProcessOnly,
         logs_dir: logs.to_path_buf(),
         holder,
+        defer_launch: false,
     }
 }
 

@@ -68,8 +68,8 @@ Remaining gaps in `dirijord-rs` (all answer clean errors):
   unreachable until both land together.
 - **Port forwarding**: the data-channel `ForwardRequest` mode (phone preview
   tunnels) is unported — same mobile stack.
-- **Polish, not parity blockers**: deferred launch at first client size,
-  readiness-verified initial-prompt injection (heuristic wait today).
+- **Polish, not parity blockers**: readiness-verified initial-prompt
+  injection (heuristic wait today).
 
 Holder-port notes, for whoever wires the daemon:
 
@@ -87,10 +87,12 @@ Holder-port notes, for whoever wires the daemon:
   anything stale, malformed, or geometry-mismatched. A Rust daemon adopting
   a Swift-spawned fleet therefore seeds from Swift's checkpoints, and a
   rollback reads ours.
-- **Deferred launch is not ported.** The Swift daemon delays exec until the
-  first client resize so TUI banners render at the settled width; the Rust
-  engine spawns at the spec size. Worth revisiting when the app moves to this
-  engine.
+- **Deferred launch is ported** (2026-08-07). `SessionSpec.defer_launch`
+  (set on every daemon spawn path, not on adoption) holds the exec until the
+  first client size settles — 120ms debounce per proposal, 400ms fallback
+  for viewless spawns — so TUI banners render at the real width. Input
+  typed before the exec queues and flushes right after it, and a kill
+  inside the window means the child never exists.
 - **A markerless holder death** (SIGKILL of the holder itself) is caught by a
   ~2s liveness probe in the held pump, so a session cannot look alive forever.
 

@@ -54,6 +54,7 @@ fn shell_spec(id: &str, script: &str, logs: &Path, holder: Option<HolderConfig>)
         authority: Authority::ProcessOnly,
         logs_dir: logs.to_path_buf(),
         holder,
+        defer_launch: false,
     }
 }
 

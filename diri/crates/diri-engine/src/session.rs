@@ -57,6 +57,17 @@ const REPLAY_BUDGET: usize = 256 << 10;
 /// write; an idle screen is checkpointed within about a second.
 const CHECKPOINT_SETTLE: Duration = Duration::from_secs(1);
 
+/// How long a deferred spawn waits for the first client size before
+/// launching at the estimated size anyway — an MCP-spawned agent may never
+/// get a view. The Swift daemon's 400ms fallback window.
+const LAUNCH_FALLBACK: Duration = Duration::from_millis(400);
+
+/// While unlaunched, each client resize pushes the exec back this far, so
+/// the agent starts at the SETTLED viewport rather than a transient
+/// first-layout size — otherwise its one-shot banner bakes at the wrong
+/// width. The Swift daemon's `scheduleDebouncedLaunch` delay.
+const LAUNCH_DEBOUNCE: Duration = Duration::from_millis(120);
+
 /// Quiet time between holder liveness probes: a holder that died markerless
 /// (SIGKILL, machine issues) must not leave a forever-live session behind.
 /// Elapsed-based so the probe cadence is the same on fast and idle ticks.
@@ -167,6 +178,121 @@ pub struct Session {
     transport: Transport,
     pump: Option<JoinHandle<()>>,
     manifest_id: String,
+    /// Present while the exec is deferred to the first settled client size.
+    deferred: Option<Arc<DeferredLaunch>>,
+}
+
+/// Deferred-launch state: the agent is not exec'd until the attaching client
+/// reports its real terminal size, so a TUI's one-shot banner renders at the
+/// exact width (no post-spawn reflow). Ported from the Swift daemon's
+/// `scheduleDebouncedLaunch`.
+struct DeferredLaunch {
+    state: Mutex<DeferredState>,
+    cond: std::sync::Condvar,
+}
+
+/// What [`DeferredLaunch::finish_launch`] hands back: the input queued while
+/// unlaunched, and a size proposed after the launch size was taken.
+struct LaunchHandoff {
+    queued_input: Vec<u8>,
+    late_size: Option<(u16, u16)>,
+}
+
+struct DeferredState {
+    /// The latest client-proposed size, if any arrived before launch.
+    pending: Option<(u16, u16)>,
+    /// When the launch fires: pushed back by each new size proposal.
+    deadline: Instant,
+    /// Input typed before the child exists, flushed right after exec.
+    queued_input: Vec<u8>,
+    launched: bool,
+    cancelled: bool,
+}
+
+impl DeferredLaunch {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(DeferredState {
+                pending: None,
+                deadline: Instant::now() + LAUNCH_FALLBACK,
+                queued_input: Vec::new(),
+                launched: false,
+                cancelled: false,
+            }),
+            cond: std::sync::Condvar::new(),
+        }
+    }
+
+    /// Records a client size while unlaunched, pushing the exec back so the
+    /// viewport can settle. False once launched: resize the PTY instead.
+    fn propose_size(&self, cols: u16, rows: u16) -> bool {
+        let mut state = self.state.lock().expect("deferred");
+        if state.launched {
+            return false;
+        }
+        state.pending = Some((cols, rows));
+        state.deadline = Instant::now() + LAUNCH_DEBOUNCE;
+        self.cond.notify_all();
+        true
+    }
+
+    /// Queues input while unlaunched. False once launched: write through.
+    fn queue_input(&self, bytes: &[u8]) -> bool {
+        let mut state = self.state.lock().expect("deferred");
+        if state.launched {
+            return false;
+        }
+        state.queued_input.extend_from_slice(bytes);
+        true
+    }
+
+    /// Blocks until the debounce window closes and returns the launch size;
+    /// `None` when the session was cancelled before ever launching.
+    fn wait_for_launch_size(&self, fallback: (u16, u16)) -> Option<(u16, u16)> {
+        let mut state = self.state.lock().expect("deferred");
+        loop {
+            if state.cancelled {
+                return None;
+            }
+            let now = Instant::now();
+            if now >= state.deadline {
+                return Some(state.pending.unwrap_or(fallback));
+            }
+            let wait = state.deadline - now;
+            state = self
+                .cond
+                .wait_timeout(state, wait)
+                .expect("deferred")
+                .0;
+        }
+    }
+
+    /// Marks the launch complete, handing back input queued meanwhile and a
+    /// size proposed after `chosen` was taken (to apply as a normal resize).
+    /// `None` when a cancel raced the launch: the caller owns the cleanup of
+    /// the child it just started.
+    fn finish_launch(&self, chosen: (u16, u16)) -> Option<LaunchHandoff> {
+        let mut state = self.state.lock().expect("deferred");
+        if state.cancelled {
+            return None;
+        }
+        state.launched = true;
+        Some(LaunchHandoff {
+            queued_input: std::mem::take(&mut state.queued_input),
+            late_size: state.pending.filter(|pending| *pending != chosen),
+        })
+    }
+
+    /// True when cancellation happened before launch — there is no child.
+    fn cancel(&self) -> bool {
+        let mut state = self.state.lock().expect("deferred");
+        if state.launched {
+            return false;
+        }
+        state.cancelled = true;
+        self.cond.notify_all();
+        true
+    }
 }
 
 /// Where holders live and what binary hosts them. Present on a spec, it makes
@@ -187,6 +313,9 @@ pub struct SessionSpec {
     pub logs_dir: PathBuf,
     /// `Some` spawns through a holder so the child survives this process.
     pub holder: Option<HolderConfig>,
+    /// Defer the exec until the first client size settles (holder spawns
+    /// only), so the agent's banner renders at the real viewport width.
+    pub defer_launch: bool,
 }
 
 impl Session {
@@ -194,6 +323,9 @@ impl Session {
     /// spec carries a [`HolderConfig`], directly otherwise.
     pub fn spawn(spec: SessionSpec, engine: Arc<ManifestEngine>) -> std::io::Result<Self> {
         match spec.holder.clone() {
+            Some(holder) if spec.defer_launch => {
+                Self::spawn_held_deferred(spec, &holder, engine)
+            }
             Some(holder) => Self::spawn_held(spec, &holder, engine),
             None => Self::spawn_direct(spec, engine),
         }
@@ -225,6 +357,7 @@ impl Session {
             transport: Transport::Direct(pty),
             pump: Some(pump),
             manifest_id: spec.manifest_id,
+            deferred: None,
         })
     }
 
@@ -265,6 +398,112 @@ impl Session {
         let floor = wait_for_holder(&client, &spec.logs_dir, &spec.id, pre_spawn_tail)
             .map_err(holder_io_error)?;
         Self::attach(spec, client, floor, engine)
+    }
+
+    /// Spawns through a holder, but not yet: the exec waits for the first
+    /// client size to settle ([`LAUNCH_DEBOUNCE`] after each proposal, at
+    /// most [`LAUNCH_FALLBACK`] total without one), so the agent's one-shot
+    /// banner renders at the real viewport width. Until then input queues
+    /// and the session presents an empty screen at the estimated size.
+    fn spawn_held_deferred(
+        spec: SessionSpec,
+        holder: &HolderConfig,
+        engine: Arc<ManifestEngine>,
+    ) -> std::io::Result<Self> {
+        let paths = HolderPaths::new(&holder.holders_dir, &spec.id);
+        let client = HolderClient::new(paths.socket());
+        let log = OutputLog::reader(&spec.logs_dir, &spec.id)?;
+        let shared = new_shared(&spec, log);
+        let deferred = Arc::new(DeferredLaunch::new());
+
+        let pump = {
+            let shared = Arc::clone(&shared);
+            let engine = Arc::clone(&engine);
+            let client = client.clone();
+            let deferred = Arc::clone(&deferred);
+            let holder = holder.clone();
+            let manifest_id = spec.manifest_id.clone();
+            let logs_dir = spec.logs_dir.clone();
+            let id = spec.id.clone();
+            let mut pty = spec.pty.clone();
+            std::thread::Builder::new()
+                .name(format!("diri-session-{}", spec.id))
+                .spawn(move || {
+                    let Some((cols, rows)) =
+                        deferred.wait_for_launch_size((pty.cols, pty.rows))
+                    else {
+                        return; // cancelled before ever launching
+                    };
+                    pty.cols = cols.max(2);
+                    pty.rows = rows.max(2);
+                    shared
+                        .screen
+                        .lock()
+                        .expect("screen")
+                        .resize(pty.cols as usize, pty.rows as usize);
+
+                    let pre_spawn_tail = {
+                        let mut log = shared.log.lock().expect("log");
+                        log.refresh_from_disk();
+                        log.tail_offset()
+                    };
+                    let launch = HolderLaunchSpec {
+                        session_id: id.clone(),
+                        socket_path: paths.socket().to_string_lossy().into_owned(),
+                        pid_file_path: paths.pid_file().to_string_lossy().into_owned(),
+                        log_file_path: logs_dir
+                            .join(format!("{id}.bin"))
+                            .to_string_lossy()
+                            .into_owned(),
+                        argv: pty.argv.clone(),
+                        cwd: pty.cwd.to_string_lossy().into_owned(),
+                        environment: pty.env.iter().cloned().collect(),
+                        cols: pty.cols,
+                        rows: pty.rows,
+                        disk_capacity: crate::holder::protocol::DEFAULT_DISK_CAPACITY,
+                    };
+                    if HolderLauncher::launch(&holder.executable, &paths, &launch).is_err() {
+                        mark_launch_failed(&shared);
+                        return;
+                    }
+                    let Ok(floor) = wait_for_holder(&client, &logs_dir, &id, pre_spawn_tail)
+                    else {
+                        mark_launch_failed(&shared);
+                        return;
+                    };
+                    if let Ok(stat) = client.stat() {
+                        shared.child_pid.store(stat.child_pid, Ordering::SeqCst);
+                    }
+                    let Some(handoff) = deferred.finish_launch((cols, rows)) else {
+                        // A terminate raced the launch and believes there is
+                        // no child; there is one now, so it goes with us.
+                        let _ = client.kill_tree();
+                        return;
+                    };
+                    if !handoff.queued_input.is_empty() {
+                        let _ = client.write(&handoff.queued_input);
+                    }
+                    if let Some((cols, rows)) = handoff.late_size {
+                        // A size proposed while the exec was in flight: apply
+                        // as an ordinary resize now that the PTY exists.
+                        let _ = client.resize(cols.max(2), rows.max(2));
+                        shared
+                            .screen
+                            .lock()
+                            .expect("screen")
+                            .resize(cols.max(2) as usize, rows.max(2) as usize);
+                    }
+                    pump_held(shared, engine, client, floor, manifest_id)
+                })?
+        };
+
+        Ok(Self {
+            shared,
+            transport: Transport::Held(client),
+            pump: Some(pump),
+            manifest_id: spec.manifest_id,
+            deferred: Some(deferred),
+        })
     }
 
     /// Reconstitutes a live session owned by a holder a previous daemon
@@ -339,6 +578,7 @@ impl Session {
             transport: Transport::Held(client),
             pump: Some(pump),
             manifest_id: spec.manifest_id,
+            deferred: None,
         })
     }
 
@@ -514,6 +754,13 @@ impl Session {
     }
 
     fn write_raw(&self, bytes: &[u8]) -> std::io::Result<()> {
+        // Before the deferred exec there is no PTY: queue for the launch
+        // flush, exactly like the Swift daemon's `queuedLaunchInput`.
+        if let Some(deferred) = &self.deferred
+            && deferred.queue_input(bytes)
+        {
+            return Ok(());
+        }
         if self.shared.hibernated.load(Ordering::SeqCst) {
             self.shared
                 .queued_input
@@ -560,6 +807,14 @@ impl Session {
         // Input means someone is interacting: keep the pump on its fast tick
         // so the echo renders promptly.
         self.shared.note_hot();
+        // Typed before the deferred exec: queue for the launch flush, and
+        // still count as a keystroke for the reducer.
+        if let Some(deferred) = &self.deferred
+            && deferred.queue_input(bytes)
+        {
+            self.feed_signal(StatusSignal::UserKeystroke);
+            return Ok(());
+        }
         if self.shared.hibernated.load(Ordering::SeqCst) {
             // Never write into a stopped tree's PTY (nobody drains the slave;
             // the buffer fills and writes wedge) — queue for the wake flush.
@@ -585,6 +840,14 @@ impl Session {
     }
 
     pub fn resize(&self, cols: u16, rows: u16) -> std::io::Result<()> {
+        // Before the deferred exec, the FIRST client size decides the launch
+        // geometry — record it and push the exec back so the viewport can
+        // settle; the emulator is resized at launch, not per proposal.
+        if let Some(deferred) = &self.deferred
+            && deferred.propose_size(cols, rows)
+        {
+            return Ok(());
+        }
         match &self.transport {
             Transport::Direct(pty) => pty.lock().expect("pty").resize(cols, rows)?,
             Transport::Held(client) => client.resize(cols, rows).map_err(holder_io_error)?,
@@ -616,6 +879,19 @@ impl Session {
 
     /// Ends the session, killing the child's whole tree.
     pub fn terminate(&mut self, grace: Duration) -> std::io::Result<Exit> {
+        // Killed before the deferred exec: there is no child. Cancel wakes
+        // the launcher (which double-checks under the same lock, killing a
+        // child it raced into existence), and the session records a kill.
+        if let Some(deferred) = &self.deferred
+            && deferred.cancel()
+        {
+            self.shared.stop.store(true, Ordering::SeqCst);
+            if let Some(pump) = self.pump.take() {
+                let _ = pump.join();
+            }
+            self.shared.exited.store(true, Ordering::SeqCst);
+            return Ok(Exit::Signal(libc::SIGKILL));
+        }
         let exit = match &self.transport {
             Transport::Direct(pty) => pty.lock().expect("pty").terminate(grace)?,
             Transport::Held(client) => {
@@ -658,6 +934,11 @@ impl Drop for Session {
     /// [`Session::adopt`].
     fn drop(&mut self) {
         self.shared.stop.store(true, Ordering::SeqCst);
+        // A drop while the exec is still deferred wakes the launcher so the
+        // join below is prompt; the child was never spawned.
+        if let Some(deferred) = &self.deferred {
+            let _ = deferred.cancel();
+        }
         if let Transport::Direct(pty) = &self.transport
             && !self.shared.exited.load(Ordering::SeqCst)
             && let Ok(pty) = pty.lock()
@@ -1168,6 +1449,21 @@ fn pump_held(
         SystemTime::now(),
     );
     apply(&shared, &outcome);
+    shared.exited.store(true, Ordering::SeqCst);
+}
+
+/// Records a deferred launch that never produced a child: the session
+/// reports exit 127, the spawn-failure convention the app already knows.
+fn mark_launch_failed(shared: &Shared) {
+    *shared.exit.lock().expect("exit") = Some(Exit::Code(127));
+    let outcome = shared.reducer.lock().expect("reducer").reduce(
+        StatusSignal::ProcessExit {
+            code: Some(127),
+            signal: None,
+        },
+        SystemTime::now(),
+    );
+    apply(shared, &outcome);
     shared.exited.store(true, Ordering::SeqCst);
 }
 

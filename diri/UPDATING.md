@@ -87,7 +87,22 @@ tests, builds a universal binary, bundles the Swift daemon, signs it,
 **notarizes and staples the .app first**, then builds and notarizes the DMG
 from that stapled bundle, produces the update zip, rebuilds `appcast.json` from
 the currently published feed, and creates the GitHub Release with all three
-attached.
+attached. It then updates, commits, **pushes, and reads back** the Homebrew cask;
+the release does not report success until the remote cask checksum matches the
+published DMG.
+
+Published asset bytes are immutable. If a rebuilt artifact differs from an
+asset already attached to that version, cut a new patch version instead; the
+script refuses to replace it under the old tag. If only the cask publish failed,
+recover without rebuilding the release:
+
+```sh
+diri/scripts/publish-homebrew-cask.sh \
+  0.4.1 diri/dist/diri-0.4.1-universal.dmg ../homebrew-diri
+```
+
+That recovery command accepts the DMG only if its checksum matches GitHub,
+pushes the tap branch, and reads the remote cask back before succeeding.
 
 Release notes come from `dist/notes-<version>.md`. The script writes a default
 one if it is missing, so writing that file first — and re-running — is how you
@@ -121,6 +136,8 @@ bundle itself, which then goes into both the DMG and the update zip.
 - `DIRI_SIGN_IDENTITY` — Developer ID identity (default: auto-detected).
 - `NOTARY_PROFILE` — notarytool profile (default `dirijor-notary`).
 - `GH_REPO` — repository to publish to (default `cristicretu/diri`).
+- `TAP_DIR` — clean Homebrew tap checkout (default `../../homebrew-diri`).
+- `SKIP_CASK=1` — explicitly publish without offering the release via Homebrew.
 - `SKIP_GATES=1` — skip clippy/tests when re-running a failed publish.
 
 ## Verifying a release

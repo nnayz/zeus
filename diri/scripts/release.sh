@@ -8,7 +8,7 @@
 #   NOTARY_PROFILE      notarytool keychain profile (default: dirijor-notary)
 #   GH_REPO             GitHub repo to publish to (default: cristicretu/diri)
 #   TAP_DIR             Homebrew tap checkout (default: ../../homebrew-diri)
-#   SKIP_CASK=1         don't bump the Homebrew cask
+#   SKIP_CASK=1         explicitly publish without updating the Homebrew cask
 #   SKIP_GATES=1        skip cargo test/clippy (for re-running a failed publish)
 #   SKIP_PERF_GATE=1   skip packaged app memory/idle-CPU probe
 #
@@ -87,6 +87,16 @@ echo "    Publishing to : $GH_REPO"
 
 if ! command -v gh >/dev/null 2>&1; then
     echo "error: the GitHub CLI (gh) is required to publish" >&2
+    exit 1
+fi
+if [ "${SKIP_CASK:-0}" != "1" ] && [ ! -f "$TAP_DIR/Casks/diri.rb" ]; then
+    cat >&2 <<EOF
+error: Homebrew tap checkout is missing Casks/diri.rb: $TAP_DIR
+
+Set TAP_DIR to a clean cristicretu/homebrew-diri checkout. The release cannot
+claim success unless its cask is pushed and verified. Use SKIP_CASK=1 only when
+you intentionally do not want this release offered through Homebrew.
+EOF
     exit 1
 fi
 
@@ -173,6 +183,7 @@ fi
 BASE_URL="https://github.com/$GH_REPO/releases/download/$TAG"
 SIZE="$(stat -f%z "$ZIP")"
 SHA256="$(shasum -a 256 "$ZIP" | awk '{print $1}')"
+DMG_SHA256="$(shasum -a 256 "$DMG" | awk '{print $1}')"
 PUBLISHED="$(date -u +%Y-%m-%d)"
 
 # Start from the published feed so releases people skipped stay offerable.
@@ -249,50 +260,24 @@ NOTES
 fi
 
 echo "==> Publishing $TAG to $GH_REPO"
-if gh release view "$TAG" --repo "$GH_REPO" >/dev/null 2>&1; then
-    echo "    release exists — replacing its assets"
-    gh release upload "$TAG" "$DMG" "$ZIP" "$FEED" --repo "$GH_REPO" --clobber
-else
-    gh release create "$TAG" "$DMG" "$ZIP" "$FEED" \
-        --repo "$GH_REPO" \
-        --title "diri $VERSION" \
-        --notes-file "$NOTES_FILE"
-fi
+GH_REPO="$GH_REPO" \
+    "$WORKSPACE/scripts/publish-github-release.sh" \
+    "$VERSION" "$NOTES_FILE" "$DMG" "$ZIP" "$FEED"
 
 # ----------------------------------------------------------------------------
 # 6. Bump the Homebrew cask
 # ----------------------------------------------------------------------------
-# The cask pins the DMG's sha256, so it is wrong the moment a release ships and
-# has to move in lockstep. Skipped silently when the tap is not checked out —
-# a missing tap must not fail a release that already published.
-CASK_FILE="$TAP_DIR/Casks/diri.rb"
+# The cask pins the DMG's sha256, so it has to move in lockstep. The publisher
+# verifies the local DMG against GitHub first, pushes even if the correct commit
+# already existed locally, then reads the remote branch back to prove the cask
+# users receive matches the immutable release asset.
 if [ "${SKIP_CASK:-0}" = "1" ]; then
     echo "==> Skipping the Homebrew cask (SKIP_CASK=1)"
-elif [ ! -f "$CASK_FILE" ]; then
-    echo "    (no cask at $CASK_FILE — skipping the Homebrew bump)"
 else
-    # The cask downloads the DMG; the feed's SHA256 is the zip's.
-    DMG_SHA256="$(shasum -a 256 "$DMG" | awk '{print $1}')"
-    echo "==> Bumping the Homebrew cask to $VERSION"
-    /usr/bin/sed -i '' -E \
-        -e "s|^  version \".*\"$|  version \"$VERSION\"|" \
-        -e "s|^  sha256 \".*\"$|  sha256 \"$DMG_SHA256\"|" \
-        "$CASK_FILE"
-
-    # Prove the edit produced what we intended rather than trusting sed.
-    if ! grep -q "^  version \"$VERSION\"$" "$CASK_FILE" \
-        || ! grep -q "^  sha256 \"$DMG_SHA256\"$" "$CASK_FILE"; then
-        echo "error: the cask bump did not apply cleanly; fix $CASK_FILE by hand" >&2
-        exit 1
-    fi
-
-    if git -C "$TAP_DIR" diff --quiet -- Casks/diri.rb; then
-        echo "    cask already at $VERSION"
-    else
-        git -C "$TAP_DIR" add Casks/diri.rb
-        git -C "$TAP_DIR" commit -q -m "diri $VERSION"
-        echo "    committed (push with: git -C \"$TAP_DIR\" push)"
-    fi
+    echo "==> Publishing the Homebrew cask for $VERSION"
+    GH_REPO="$GH_REPO" \
+        "$WORKSPACE/scripts/publish-homebrew-cask.sh" \
+        "$VERSION" "$DMG" "$TAP_DIR"
 fi
 
 cat <<EOF
@@ -302,7 +287,8 @@ cat <<EOF
 ============================================================
   DMG        : $DMG
   Update zip : $ZIP
-  sha256     : $SHA256
+  DMG sha256 : $DMG_SHA256
+  ZIP sha256 : $SHA256
   Release    : https://github.com/$GH_REPO/releases/tag/$TAG
   Feed       : https://github.com/$GH_REPO/releases/latest/download/appcast.json
 

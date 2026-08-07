@@ -255,4 +255,13 @@ case "$scenario" in
         ;;
 esac
 
+# Interactive latency rides the same gate: two regressions shipped in one week
+# (paced grid flush, poll-paced held pump) that idle memory/CPU budgets could
+# not see. Boots the packaged daemon against a private App Support; never
+# touches the real fleet. SKIP_LATENCY_PROBE=1 is the escape hatch for hosts
+# that cannot spawn a shell.
+if [[ "${SKIP_LATENCY_PROBE:-0}" != "1" ]]; then
+    "$(dirname "$0")/latency-probe.sh" --app "$app_path"
+fi
+
 echo "PASS: packaged diri is within memory and idle-CPU budgets"

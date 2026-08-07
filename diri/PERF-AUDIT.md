@@ -6,8 +6,17 @@ B3 scoped to static coders + off-actor writes/probes (a persistent holder
 connection needs a protocol migration old live holders would not survive —
 deliberately not done); C1, C2 (adaptive tick + attach-driven hot signal, not
 kqueue), C3, C4, C5, C7, C10, and the direct pump's 8KiB→64KiB buffer. Plus
-`[profile.release]` thin LTO + codegen-units=1. Still open: A8 (mostly defused
-by A1), A9, A11–A14, B5, B8, B10–B12, C6, C8, C9.
+`[profile.release]` thin LTO + codegen-units=1.
+
+**Second pass (2026-08-07):** instant session switching landed — evicted
+sessions park their last-known grid (bounded MRU, ~100KB each) and re-selection
+paints it on the first frame while the attach round-trips. Also fixed: A12
+(pane events drain per burst, one main-thread hop), A13 (live path paints
+straight from the row cache — zero clones on unchanged frames), A11's scan cost
+(shared char scratch + exact-match fast path; moving the scan off the main
+thread remains open), and A9's record clone (Arc). Still open: A8 (mostly
+defused by A1), A11's background-spawn half, A14, B5, B8, B10–B12 (all made
+moot if the dirijord-rs flip sticks), C6, C8, C9.
 
 Three parallel deep audits: the GPUI client, the Swift daemon (still what ships),
 and the Rust engine (the future daemon). Findings ranked per area; file:line

@@ -258,6 +258,9 @@ fn build_matches(query: &str, snapshot: &FindSnapshot, live: &GridBuffer) -> Vec
         return Vec::new();
     }
     let mut matches = Vec::new();
+    // One char scratch reused across every scanned line: a rescan walks the
+    // whole scrollback, and a fresh Vec per line dominated the scan.
+    let mut scratch: Vec<char> = Vec::new();
 
     if !snapshot.is_alt_screen {
         for (index, line) in snapshot.lines.iter().enumerate() {
@@ -267,7 +270,7 @@ fn build_matches(query: &str, snapshot: &FindSnapshot, live: &GridBuffer) -> Vec
             if absolute_row >= snapshot.visible_start_row {
                 continue;
             }
-            append_matches(line, None, absolute_row, &needle, &mut matches);
+            append_matches(line, None, absolute_row, &needle, &mut scratch, &mut matches);
             if matches.len() >= MATCH_CAP {
                 matches.truncate(MATCH_CAP);
                 return matches;
@@ -289,6 +292,7 @@ fn build_matches(query: &str, snapshot: &FindSnapshot, live: &GridBuffer) -> Vec
                 .visible_start_row
                 .saturating_add(i64::try_from(row).unwrap_or(i64::MAX)),
             &needle,
+            &mut scratch,
             &mut matches,
         );
         if matches.len() >= MATCH_CAP {
@@ -306,9 +310,12 @@ fn append_matches(
     columns: Option<&[usize]>,
     absolute_row: i64,
     needle: &[char],
+    scratch: &mut Vec<char>,
     output: &mut Vec<FindMatch>,
 ) {
-    let haystack: Vec<char> = line.chars().collect();
+    scratch.clear();
+    scratch.extend(line.chars());
+    let haystack: &[char] = scratch;
     if haystack.len() < needle.len() {
         return;
     }
@@ -331,10 +338,11 @@ fn append_matches(
 }
 
 fn chars_equal_ci(haystack: &[char], needle: &[char]) -> bool {
-    haystack
-        .iter()
-        .zip(needle)
-        .all(|(left, right)| left.to_lowercase().eq(right.to_lowercase()))
+    haystack.iter().zip(needle).all(|(left, right)| {
+        // Exact match first: it skips the case-fold on the overwhelmingly
+        // common path, including every mismatching position the scan visits.
+        left == right || left.to_lowercase().eq(right.to_lowercase())
+    })
 }
 
 fn column_for(index: usize, columns: Option<&[usize]>) -> usize {

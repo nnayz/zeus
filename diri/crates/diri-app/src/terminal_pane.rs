@@ -87,6 +87,11 @@ const REFLOW_HOLD: Duration = Duration::from_millis(140);
 /// Slack added to a bottom-anchored grid's height so layout rounding can never
 /// shave its last row off. See `TerminalPane::grid_row_overflow`.
 const ANCHOR_SLACK: f32 = 1.0;
+/// How many evicted sessions keep their last-known grid parked for instant
+/// re-selection. Cells only (~100KB each) — elements, channels, and shape
+/// caches are rebuilt on promotion — so the ceiling is a memory bound, not a
+/// residency one.
+const PARKED_GRID_CAP: usize = 12;
 actions!(
     diri_terminal,
     [
@@ -483,6 +488,12 @@ pub struct TerminalPane {
     _tokio_owner: Arc<tokio::runtime::Runtime>,
     tokio: Handle,
     residents: HashMap<SessionId, ResidentTerminal>,
+    /// Last-known grids of recently evicted sessions, most recent last.
+    /// Selecting a session paints its parked grid on the very first frame
+    /// while the fresh attachment round-trips; the attach's full snapshot
+    /// then overwrites the same buffer in place. This is what makes session
+    /// switching read as instant with a residency of one.
+    parked_grids: Vec<(SessionId, SharedGridBuffer)>,
     pane_tx: mpsc::UnboundedSender<PaneEvent>,
     focus: FocusHandle,
     glyphs: HashMap<SessionId, Entity<StatusGlyph>>,
@@ -566,10 +577,21 @@ impl TerminalPane {
         }
         let (pane_tx, mut pane_rx) = mpsc::unbounded_channel();
         let pane_events = cx.spawn_in(window, async move |this, cx| {
+            let mut batch = Vec::new();
             while let Some(event) = pane_rx.recv().await {
+                // Drain whatever else has queued and cross to the main thread
+                // once per burst, not once per frame: with several attached
+                // sessions streaming, per-event hops made the UI thread wake
+                // at frame-rate × session-count.
+                batch.push(event);
+                while let Ok(next) = pane_rx.try_recv() {
+                    batch.push(next);
+                }
                 if this
                     .update_in(cx, |this, window, cx| {
-                        this.handle_pane_event(event, window, cx);
+                        for event in batch.drain(..) {
+                            this.handle_pane_event(event, window, cx);
+                        }
                     })
                     .is_err()
                 {
@@ -613,6 +635,7 @@ impl TerminalPane {
             _tokio_owner: tokio_owner,
             tokio,
             residents: HashMap::new(),
+            parked_grids: Vec::new(),
             pane_tx,
             focus,
             glyphs: HashMap::new(),
@@ -656,7 +679,26 @@ impl TerminalPane {
             }
             SessionSource::Fixed(_) => HashSet::new(),
         };
+        // A parked grid for a session the store no longer lists is dead
+        // weight; one for a session that just became resident is superseded
+        // below by promotion.
+        self.parked_grids
+            .retain(|(id, _)| store.sessions().contains_key(id));
         drop(store);
+        // Park the last-known grid of every session about to be evicted, so
+        // re-selecting it paints instantly instead of flashing blank while
+        // the fresh attachment round-trips.
+        for (id, resident) in &self.residents {
+            if resident_ids.contains(id) {
+                continue;
+            }
+            self.parked_grids.retain(|(parked, _)| parked != id);
+            self.parked_grids.push((id.clone(), resident.element.buffer()));
+        }
+        if self.parked_grids.len() > PARKED_GRID_CAP {
+            let excess = self.parked_grids.len() - PARKED_GRID_CAP;
+            self.parked_grids.drain(..excess);
+        }
         self.residents.retain(|id, _| resident_ids.contains(id));
         // A hold outliving its resident would park frames belonging to a
         // session id that has been re-attached since, and paint them into a
@@ -677,9 +719,20 @@ impl TerminalPane {
                 "STIX Two Math".to_owned(),
                 "Apple Color Emoji".to_owned(),
             ]));
-            let element = TerminalElement::with_buffer(GridBuffer::default())
-                .font(mono)
-                .focus_handle(self.focus.clone());
+            let parked = self
+                .parked_grids
+                .iter()
+                .position(|(parked, _)| parked == &id)
+                .map(|index| self.parked_grids.remove(index).1);
+            let element = match parked {
+                // The parked cells paint on the first frame; the attach's
+                // full snapshot overwrites the same shared buffer moments
+                // later, so stale content lives for one round-trip at most.
+                Some(buffer) => TerminalElement::new(buffer),
+                None => TerminalElement::with_buffer(GridBuffer::default()),
+            }
+            .font(mono)
+            .focus_handle(self.focus.clone());
             let attachment = spawn_attachment(
                 &self.tokio,
                 socket.clone(),
@@ -1031,7 +1084,7 @@ impl TerminalPane {
         }
     }
 
-    fn selected_session(&self) -> Option<SessionRecord> {
+    fn selected_session(&self) -> Option<Arc<SessionRecord>> {
         let id = self.selected_id()?;
         self.runtime
             .store
@@ -1039,7 +1092,7 @@ impl TerminalPane {
             .expect("session store lock poisoned")
             .sessions()
             .get(&id)
-            .map(|session| session.as_ref().clone())
+            .map(Arc::clone)
     }
 
     fn open_find(&mut self, _: &OpenFind, window: &mut Window, cx: &mut Context<Self>) {
@@ -1646,7 +1699,7 @@ impl TerminalPane {
                     self.pending_resizes.remove(&session.id);
                     resident.attachment.resize(size.0, size.1);
                     if should_hold_reflow(previous, size, since_sent) {
-                        self.hold_reflow(session.id, window, cx);
+                        self.hold_reflow(session.id.clone(), window, cx);
                     }
                     return;
                 }

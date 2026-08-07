@@ -138,6 +138,9 @@ pub struct TerminalPrepaintState {
     cursor: Option<CursorPaint>,
     cache_hits: u64,
     cache_misses: u64,
+    /// Live path: paint straight out of the shared row cache instead of
+    /// composed copies, so an unchanged frame clones nothing.
+    paint_from_cache: bool,
 }
 
 struct CursorPaint {
@@ -611,6 +614,7 @@ impl Element for TerminalElement {
                 cursor: None,
                 cache_hits: 0,
                 cache_misses: 0,
+                paint_from_cache: false,
             };
         }
 
@@ -631,6 +635,7 @@ impl Element for TerminalElement {
                 cursor: None,
                 cache_hits: 0,
                 cache_misses: 0,
+                paint_from_cache: false,
             };
         }
 
@@ -651,6 +656,7 @@ impl Element for TerminalElement {
         let cursor;
         let cache_hits;
         let cache_misses;
+        let mut paint_from_cache = false;
 
         if viewport.view_offset() > 0 {
             // History browsing composes owned rows per frame; quads are cheap
@@ -752,12 +758,11 @@ impl Element for TerminalElement {
                     window,
                 ));
             }
-            for (row_index, prepared) in cache.iter().enumerate() {
-                let prepared = prepared.as_ref().expect("visible row cache was seeded");
-                background_quads.extend(prepared.background_quads.iter().cloned());
-                decoration_quads.extend(prepared.decoration_quads.iter().cloned());
-                lines.push((row_index as u16, prepared.line.clone()));
-            }
+            // No composed copies: paint reads the row cache directly (see
+            // `paint_from_cache`), so a frame with zero changed rows clones
+            // nothing — previously every prepaint re-cloned all rows' quads
+            // and shaped lines even on a 100% cache hit.
+            paint_from_cache = true;
         }
 
         let selection =
@@ -828,6 +833,7 @@ impl Element for TerminalElement {
             cursor,
             cache_hits,
             cache_misses,
+            paint_from_cache,
         }
     }
 
@@ -850,8 +856,61 @@ impl Element for TerminalElement {
                 window.paint_quad(quad);
             }
 
+            // Live path: rows come straight from the shared cache. Quads are
+            // plain structs (a stack copy each) and `ShapedLine::paint` takes
+            // a reference, so nothing per-row is heap-cloned per frame.
+            let cache = prepaint
+                .paint_from_cache
+                .then(|| mutex_lock(&self.shared.row_cache));
+
+            if let Some(cache) = &cache {
+                for prepared in cache.iter().flatten() {
+                    for quad in &prepared.background_quads {
+                        window.paint_quad(quad.clone());
+                    }
+                }
+            }
+
             for quad in prepaint.overlay_quads.drain(..) {
                 window.paint_quad(quad);
+            }
+
+            if let Some(cache) = &cache {
+                for (row_index, prepared) in cache.iter().enumerate() {
+                    let Some(prepared) = prepared else { continue };
+                    let row = row_index as u16;
+                    let origin = point(bounds.left(), bounds.top() + metrics.y_for_row(row));
+                    if prepaint
+                        .cursor
+                        .as_ref()
+                        .is_some_and(|cursor| cursor.row == row)
+                    {
+                        let cursor = prepaint.cursor.as_ref().unwrap();
+                        paint_line_around_cursor(
+                            &prepared.line,
+                            origin,
+                            bounds,
+                            metrics,
+                            cursor.col,
+                            window,
+                            cx,
+                        );
+                    } else {
+                        let _ = prepared.line.paint(
+                            origin,
+                            metrics.line_height,
+                            TextAlign::Left,
+                            None,
+                            window,
+                            cx,
+                        );
+                    }
+                }
+                for prepared in cache.iter().flatten() {
+                    for quad in &prepared.decoration_quads {
+                        window.paint_quad(quad.clone());
+                    }
+                }
             }
 
             for (row, line) in &prepaint.lines {

@@ -188,7 +188,7 @@ impl AgentDescriptor {
 /// Absolute path of `binary` searched across a colon-separated `path`, or
 /// `None` when nothing executable matches (the spawn then fails with its
 /// honest error instead of a misleading one).
-fn resolve_on_path(binary: &str, path: &str) -> Option<String> {
+pub(crate) fn resolve_on_path(binary: &str, path: &str) -> Option<String> {
     for dir in path.split(':').filter(|dir| !dir.is_empty()) {
         let candidate = std::path::Path::new(dir).join(binary);
         #[cfg(unix)]

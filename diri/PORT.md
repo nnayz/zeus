@@ -68,8 +68,9 @@ Remaining gaps in `dirijord-rs` (all answer clean errors):
   unreachable until both land together.
 - **Port forwarding**: the data-channel `ForwardRequest` mode (phone preview
   tunnels) is unported — same mobile stack.
-- **Polish, not parity blockers**: readiness-verified initial-prompt
-  injection (heuristic wait today).
+- ~~Polish, not parity blockers~~ — the polish trio (screen-checkpoint
+  restore, deferred launch, verified prompt injection) is ported; see the
+  holder notes below.
 
 Holder-port notes, for whoever wires the daemon:
 
@@ -95,6 +96,12 @@ Holder-port notes, for whoever wires the daemon:
   inside the window means the child never exists.
 - **A markerless holder death** (SIGKILL of the holder itself) is caught by a
   ~2s liveness probe in the held pump, so a session cannot look alive forever.
+- **Initial-prompt injection is verified** (2026-08-07), porting Swift's
+  `injectInitialPrompt`: readiness-gated (bracketed-paste is the composer
+  tell, screen-stability the fallback), then up to three attempts, each
+  checked on screen — retried only when the screen shows no evidence at all
+  that input landed, so a swallowed prompt is rescued and a delivered one is
+  never duplicated.
 
 ## What the risky parts turned out to be
 

@@ -15,6 +15,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use diri_proto::control::MAX_CONTROL_LINE_BYTES;
 use diri_proto::{ControlError, ControlMessage, JsonValue, Method, WIRE_VERSION};
@@ -584,35 +585,16 @@ impl ControlServer {
         let _ = registry.persist();
         self.publish_updated(&registry, &id);
 
-        // An initial prompt is typed once the TUI has painted something,
-        // then submitted — a blind fixed delay raced Claude Code's boot.
+        // An initial prompt is typed once the TUI can actually receive input,
+        // and verified on screen afterward — ported from the Swift
+        // `injectInitialPrompt`, which replaced a blind fixed delay that
+        // raced Claude Code's boot and lost keystrokes into a composer that
+        // did not exist yet.
         if let Some(prompt) = p.initial_prompt.clone().filter(|prompt| !prompt.is_empty()) {
             let registry = Arc::clone(&self.registry);
             let session_id = id.clone();
             std::thread::spawn(move || {
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-                loop {
-                    std::thread::sleep(std::time::Duration::from_millis(250));
-                    let ready = registry
-                        .lock()
-                        .ok()
-                        .and_then(|guard| {
-                            guard.get(&session_id).map(|session| {
-                                !session.screen_lines().is_empty()
-                            })
-                        });
-                    match ready {
-                        Some(true) => break,
-                        Some(false) if std::time::Instant::now() < deadline => continue,
-                        _ => break,
-                    }
-                }
-                std::thread::sleep(std::time::Duration::from_millis(500));
-                if let Ok(guard) = registry.lock()
-                    && let Some(session) = guard.get(&session_id)
-                {
-                    let _ = session.send_text(&prompt, true);
-                }
+                inject_initial_prompt(&registry, &session_id, &prompt);
             });
         }
 
@@ -1806,6 +1788,147 @@ fn worktree_to_wire(info: crate::git::WorktreeInfo) -> diri_proto::WorktreeInfo 
         is_detached: info.is_detached,
         is_prunable: info.is_prunable,
     }
+}
+
+/// Reads one fact about a live session under a short registry lock; `None`
+/// once the session is gone. The injection thread must never hold the lock
+/// across its sleeps.
+fn with_session<T>(
+    registry: &Arc<Mutex<Registry>>,
+    session_id: &str,
+    read: impl FnOnce(&crate::session::Session) -> T,
+) -> Option<T> {
+    registry
+        .lock()
+        .ok()
+        .and_then(|guard| guard.get(session_id).map(read))
+}
+
+/// Types an initial prompt into a freshly spawned agent, gated on the TUI
+/// actually being ready and verified afterward. Ported from the Swift
+/// `AgentSession.injectInitialPrompt`: up to three attempts, each abandoned
+/// only when the screen shows no evidence at all that input landed — a
+/// changed screen means it did, and a second submit would duplicate it.
+fn inject_initial_prompt(registry: &Arc<Mutex<Registry>>, session_id: &str, prompt: &str) {
+    if !wait_until_ready(registry, session_id) {
+        return;
+    }
+    let probe = verification_probe(prompt);
+    for _attempt in 0..3 {
+        let Some(view) = with_session(registry, session_id, |session| session.view()) else {
+            return;
+        };
+        if view.exited {
+            return;
+        }
+        let Some(before) =
+            with_session(registry, session_id, |session| session.screen_lines().join("\n"))
+        else {
+            return;
+        };
+        let sent = with_session(registry, session_id, |session| {
+            session.send_text(prompt, true)
+        });
+        if sent.is_none() {
+            return;
+        }
+        if prompt_settled(registry, session_id, &probe, &before) {
+            return;
+        }
+    }
+}
+
+/// Waits until the agent can actually receive typed input. First for the
+/// exec (a deferred launch fires within its fallback window), then for the
+/// input line to come alive — bracketed-paste mode is the tell across
+/// Claude/Codex/Cursor/Gemini. Falls back to "screen non-blank and settled"
+/// for agents that never enable paste mode, and hard-caps the wait. False
+/// means stop: the session exited or vanished.
+fn wait_until_ready(registry: &Arc<Mutex<Registry>>, session_id: &str) -> bool {
+    for _ in 0..40 {
+        // ≤ ~4s for the PTY to be spawned (deferred launch included).
+        match with_session(registry, session_id, |session| {
+            (session.view().exited, session.child_pid())
+        }) {
+            None | Some((true, _)) => return false,
+            Some((false, pid)) if pid > 0 => break,
+            Some(_) => std::thread::sleep(Duration::from_millis(100)),
+        }
+    }
+    let mut last_text = String::new();
+    let mut stable_ticks = 0;
+    for tick in 0..200 {
+        // ≤ ~20s hard cap; Claude's first paint can be slow.
+        let Some((exited, paste, text)) = with_session(registry, session_id, |session| {
+            (
+                session.view().exited,
+                session.bracketed_paste(),
+                session.screen_lines().join("\n"),
+            )
+        }) else {
+            return false;
+        };
+        if exited {
+            return false;
+        }
+        if paste {
+            // One more frame so the composer finishes painting.
+            std::thread::sleep(Duration::from_millis(80));
+            return true;
+        }
+        if !text.trim().is_empty() && text == last_text {
+            stable_ticks += 1;
+            if stable_ticks >= 6 && tick >= 10 {
+                return true; // ~600ms stable, at least ~1s in
+            }
+        } else {
+            stable_ticks = 0;
+            last_text = text;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    true
+}
+
+/// Polls the screen (≤ ~2s) for evidence the prompt was received. True as
+/// soon as the probe is visible OR the screen diverged from `before` —
+/// either means input landed, and a retry would duplicate the prompt. Only
+/// an entirely unchanged screen returns false → safe to retype.
+fn prompt_settled(
+    registry: &Arc<Mutex<Registry>>,
+    session_id: &str,
+    probe: &str,
+    before: &str,
+) -> bool {
+    for _ in 0..20 {
+        std::thread::sleep(Duration::from_millis(100));
+        let Some((exited, now)) = with_session(registry, session_id, |session| {
+            (session.view().exited, session.screen_lines().join("\n"))
+        }) else {
+            return true; // session gone: don't retype into it
+        };
+        if exited {
+            return true; // dead pty: don't retype into it
+        }
+        if !probe.is_empty() && now.contains(probe) {
+            return true;
+        }
+        if now != before {
+            return true;
+        }
+    }
+    false
+}
+
+/// A distinctive slice of the prompt to look for on screen: the first
+/// non-empty line, trimmed and capped short enough to survive composer
+/// wrapping or a transcript truncating a long prompt when it echoes back.
+fn verification_probe(prompt: &str) -> String {
+    let first_line = prompt
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or(prompt);
+    first_line.trim().chars().take(24).collect()
 }
 
 #[cfg(test)]

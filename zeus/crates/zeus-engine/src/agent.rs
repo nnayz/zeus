@@ -155,15 +155,35 @@ impl AgentDescriptor {
             spec.env.retain(|(existing, _)| existing != key);
             spec.env.push((key.clone(), value.clone()));
         }
-        // Resolve a bare binary name to an absolute path against the spec's
-        // own PATH, the way the Swift daemon's LoginEnvironment.resolve did.
-        // The process that finally execs this argv may be a long-lived holder
-        // manager whose launchd-minimal environment predates this daemon —
-        // posix_spawnp searches the *caller's* PATH, not the child's, so a
-        // bare "claude" exits 127 there no matter what env the spec carries.
-        if let Some(first) = spec.argv.first_mut()
+        if self.return_to_login_shell {
+            // Keep the shell as the PTY's session leader. When the agent exits
+            // (notably after Codex updates itself), the command re-enters that
+            // shell and leaves a usable prompt instead of ending the session.
+            // The agent binary deliberately stays bare: the fresh interactive
+            // login shell re-sources nvm/mise/Homebrew config and resolves the
+            // version selected *now*, not when the daemon started.
+            let shell = spec
+                .env
+                .iter()
+                .rev()
+                .find(|(key, value)| key == "SHELL" && !value.is_empty())
+                .map(|(_, value)| value.clone())
+                .unwrap_or_else(|| "/bin/sh".to_string());
+            let mut command = spec
+                .argv
+                .iter()
+                .map(|argument| shell_quote(argument))
+                .collect::<Vec<_>>()
+                .join(" ");
+            command.push_str(&format!("; exec {} -i -l", shell_quote(&shell)));
+            spec.argv = vec![shell, "-i".into(), "-l".into(), "-c".into(), command];
+        } else if let Some(first) = spec.argv.first_mut()
             && !first.contains('/')
         {
+            // Bare launches still need an absolute executable. The process
+            // that finally execs this argv may be a long-lived holder manager
+            // whose launchd-minimal environment predates this daemon —
+            // posix_spawnp searches the *caller's* PATH, not the child's.
             let path = spec
                 .env
                 .iter()
@@ -183,6 +203,10 @@ impl AgentDescriptor {
             .iter()
             .any(|prefix| key.starts_with(prefix))
     }
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r"'\''"))
 }
 
 /// Absolute path of `binary` searched across a colon-separated `path`, or
@@ -304,9 +328,10 @@ mod tests {
         );
         assert_eq!(resolve_on_path("no-such-binary-anywhere", "/usr/bin"), None);
 
-        // End to end through spawn_spec: a stub `claude` on the spec's PATH.
+        // End to end through spawn_spec: a bare-launch agent is resolved on
+        // the spec's PATH before it reaches the holder.
         let bin_dir = tempfile::tempdir().expect("temp dir");
-        let stub = bin_dir.path().join("claude");
+        let stub = bin_dir.path().join("gemini");
         std::fs::write(&stub, "#!/bin/sh\n").expect("stub");
         #[cfg(unix)]
         {
@@ -314,18 +339,93 @@ mod tests {
             std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))
                 .expect("chmod");
         }
-        let claude = descriptor("claude-code");
+        let gemini = descriptor("gemini");
         let inherited = [(
             "PATH".to_string(),
             bin_dir.path().to_string_lossy().into_owned(),
         )];
-        let spec = claude
+        let spec = gemini
             .spawn_spec(Path::new("/tmp"), inherited, &[])
-            .expect("claude has a binary");
+            .expect("gemini has a binary");
         assert_eq!(
             spec.argv[0],
             stub.to_string_lossy(),
             "argv[0] must leave the daemon already absolute"
+        );
+    }
+
+    #[test]
+    fn return_to_login_shell_keeps_the_session_alive_after_the_agent_exits() {
+        let codex = descriptor("codex");
+        let spec = codex
+            .spawn_spec(
+                Path::new("/tmp"),
+                [
+                    ("PATH".to_string(), "/usr/bin:/bin".to_string()),
+                    ("SHELL".to_string(), "/bin/sh".to_string()),
+                ],
+                &["--version".to_string()],
+            )
+            .expect("codex has a binary");
+
+        assert_eq!(
+            &spec.argv[..4],
+            &["/bin/sh", "-i", "-l", "-c"],
+            "the login shell must remain the PTY's top-level process"
+        );
+        let command = &spec.argv[4];
+        assert!(
+            command.starts_with("'codex' '--version'"),
+            "the agent should run inside the shell: {command}"
+        );
+        assert!(
+            command.ends_with("; exec '/bin/sh' -i -l"),
+            "exiting the agent should land at an interactive prompt: {command}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wrapped_agent_really_accepts_shell_input_after_the_agent_finishes() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        let wrapped = AgentDescriptor {
+            binary: Some("/bin/sh".into()),
+            return_to_login_shell: true,
+            ..Default::default()
+        };
+        let spec = wrapped
+            .spawn_spec(
+                Path::new("/tmp"),
+                [("SHELL".to_string(), "/bin/sh".to_string())],
+                &["-c".into(), "printf 'agent-finished\\n'".into()],
+            )
+            .expect("spec");
+
+        let mut child = Command::new(&spec.argv[0])
+            .args(&spec.argv[1..])
+            .current_dir(&spec.cwd)
+            .envs(spec.env.iter().cloned())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("launch wrapped agent");
+        child
+            .stdin
+            .as_mut()
+            .expect("stdin")
+            .write_all(b"printf 'shell-ready\\n'\nexit\n")
+            .expect("type after agent exit");
+        let output = child.wait_with_output().expect("wait");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+
+        assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+        assert!(stdout.contains("agent-finished"), "agent did not run: {stdout:?}");
+        assert!(
+            stdout.contains("shell-ready"),
+            "the session did not accept shell input after agent exit: {stdout:?}"
         );
     }
 

@@ -510,6 +510,10 @@ impl RegistryHost {
             authority,
             logs_dir: self.logs_dir.clone(),
             holder: self.holder.clone(),
+            // A remote spawn runs inside the host's tmux, whose geometry has
+            // its own lifecycle: there is no attaching client size to wait
+            // for here.
+            defer_launch: false,
         };
         registry
             .spawn(spec, record)

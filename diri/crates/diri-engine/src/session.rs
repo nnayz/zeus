@@ -264,6 +264,20 @@ impl Session {
         stat: &HolderStat,
         engine: Arc<ManifestEngine>,
     ) -> std::io::Result<Self> {
+        Self::adopt_with_status(spec, holder, stat, engine, None)
+    }
+
+    /// Adopt, seeding the visible status from the persisted record: a fresh
+    /// reducer starts at Starting, and without evidence (a hook, a screen
+    /// change) an adopted idle Claude would sit "starting" forever — the
+    /// restart would rewrite history the record already knows.
+    pub fn adopt_with_status(
+        spec: SessionSpec,
+        holder: &HolderConfig,
+        stat: &HolderStat,
+        engine: Arc<ManifestEngine>,
+        initial_status: Option<(SessionStatus, Option<NeedsInputDetail>)>,
+    ) -> std::io::Result<Self> {
         let paths = HolderPaths::new(&holder.holders_dir, &spec.id);
         let client = HolderClient::new(paths.socket());
         // Exit markers below the adopted holder's epoch were written by prior
@@ -275,7 +289,12 @@ impl Session {
             spec.pty.cols = cols;
             spec.pty.rows = rows;
         }
-        Self::attach(spec, client, floor, engine)
+        let session = Self::attach(spec, client, floor, engine)?;
+        if let Some((status, needs_input)) = initial_status {
+            *session.shared.status.lock().expect("status") = status;
+            *session.shared.needs_input.lock().expect("needs input") = needs_input;
+        }
+        Ok(session)
     }
 
     /// The held-transport core: a read-only log tail drives the screen and

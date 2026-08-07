@@ -44,6 +44,14 @@ fn main() {
         env!("CARGO_PKG_VERSION")
     );
 
+    // The app launches us with launchd's minimal PATH; agents and tools
+    // (claude, gh, node) live in the user's login PATH. Resolve it the way
+    // the Swift daemon's LoginEnvironment did: ask the login shell once.
+    if let Some(path) = login_path() {
+        // SAFETY: single-threaded startup, before any spawn.
+        unsafe { std::env::set_var("PATH", &path) };
+    }
+
     let app_support = app_support_dir();
     for dir in ["logs", "holders", "inject", "bin"] {
         let _ = std::fs::create_dir_all(app_support.join(dir));
@@ -175,6 +183,22 @@ fn main() {
             }
         }
     }
+}
+
+#[cfg(unix)]
+fn login_path() -> Option<String> {
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+    let output = std::process::Command::new(&shell)
+        .args(["-l", "-c", "echo __DIRI_PATH__=$PATH"])
+        .output()
+        .ok()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let path = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("__DIRI_PATH__="))?
+        .trim()
+        .to_string();
+    (!path.is_empty()).then_some(path)
 }
 
 #[cfg(unix)]

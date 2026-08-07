@@ -233,6 +233,8 @@ impl Registry {
                 continue;
             }
             let manifest_id = record.kind.id().to_string();
+            let record_status = record.status.clone();
+            let record_needs_input = record.needs_input.clone();
             let spec = SessionSpec {
                 id: session_id.clone(),
                 // The holder owns the real spec; this one only shapes the
@@ -243,7 +245,10 @@ impl Registry {
                 logs_dir: logs_dir.to_path_buf(),
                 holder: Some(holder.clone()),
             };
-            match Session::adopt(spec, holder, &stat, Arc::clone(&self.engine)) {
+            let seeded = (!matches!(record_status, SessionStatus::Exited(_)))
+                .then(|| (record_status.clone(), record_needs_input.clone()));
+            match Session::adopt_with_status(spec, holder, &stat, Arc::clone(&self.engine), seeded)
+            {
                 Ok(session) => {
                     self.sessions.insert(session_id.clone(), session);
                     adopted.push(session_id);

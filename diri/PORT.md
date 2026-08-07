@@ -59,6 +59,14 @@ with transcript shuttle, prepare flow tested against two local checkouts),
 `worktree.overview`, and the Playwright browser pool (`test.run` /
 `browser.act` via the node sidecar).
 
+Third pass (2026-08-07, retirement checklist): wake-on-input is now proven
+end to end — `tests/wake.rs` freezes a real held session and shows that the
+only triggers the app actually uses (control `send_text`, a bare data-channel
+attach) SIGCONT the tree, deliver the input, and clear the hibernation
+record; the app never calls `session.wake` itself. The polish trio landed the
+same day: screen-checkpoint restore, deferred launch at the settled client
+size, and verified initial-prompt injection (notes below).
+
 Remaining gaps in `dirijord-rs` (all answer clean errors):
 
 - **Mobile companion stack**: the remote TCP listener + token gate, and
@@ -68,9 +76,9 @@ Remaining gaps in `dirijord-rs` (all answer clean errors):
   unreachable until both land together.
 - **Port forwarding**: the data-channel `ForwardRequest` mode (phone preview
   tunnels) is unported — same mobile stack.
-- **Polish, not parity blockers**: screen-checkpoint restore on adoption
-  (bounded raw-tail replay instead), deferred launch at first client size,
-  readiness-verified initial-prompt injection (heuristic wait today).
+- ~~Polish, not parity blockers~~ — the polish trio (screen-checkpoint
+  restore, deferred launch, verified prompt injection) is ported; see the
+  holder notes below.
 
 Holder-port notes, for whoever wires the daemon:
 
@@ -80,16 +88,28 @@ Holder-port notes, for whoever wires the daemon:
   binary) and a Swift daemon would adopt Rust-spawned ones. The reverse
   direction has no automated test — it only matters for a rollback, and would
   need Swift-side test infrastructure.
-- **Screen checkpoints are not ported.** The Swift daemon restores adopted
-  sessions from `<id>.screen.plist` when fresh enough; the Rust held pump
-  replays a bounded raw tail (256 KiB, same budget) through the emulator
-  instead. Same bound on startup work, slightly more of it.
-- **Deferred launch is not ported.** The Swift daemon delays exec until the
-  first client resize so TUI banners render at the settled width; the Rust
-  engine spawns at the spec size. Worth revisiting when the app moves to this
-  engine.
+- **Screen checkpoints are ported** (2026-08-07). The held pump writes
+  `<id>.screen.plist` after a 1s output settle — same binary-plist format
+  and keys as `ScreenCheckpoint.swift`, proven against Apple's own parser
+  (`plutil`) in both directions — and adoption restores from a fresh-enough
+  checkpoint, falling back to the bounded raw-tail replay (256 KiB) for
+  anything stale, malformed, or geometry-mismatched. A Rust daemon adopting
+  a Swift-spawned fleet therefore seeds from Swift's checkpoints, and a
+  rollback reads ours.
+- **Deferred launch is ported** (2026-08-07). `SessionSpec.defer_launch`
+  (set on every daemon spawn path, not on adoption) holds the exec until the
+  first client size settles — 120ms debounce per proposal, 400ms fallback
+  for viewless spawns — so TUI banners render at the real width. Input
+  typed before the exec queues and flushes right after it, and a kill
+  inside the window means the child never exists.
 - **A markerless holder death** (SIGKILL of the holder itself) is caught by a
   ~2s liveness probe in the held pump, so a session cannot look alive forever.
+- **Initial-prompt injection is verified** (2026-08-07), porting Swift's
+  `injectInitialPrompt`: readiness-gated (bracketed-paste is the composer
+  tell, screen-stability the fallback), then up to three attempts, each
+  checked on screen — retried only when the screen shows no evidence at all
+  that input landed, so a swallowed prompt is rescued and a delivered one is
+  never duplicated.
 
 ## What the risky parts turned out to be
 

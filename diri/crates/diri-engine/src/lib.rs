@@ -22,6 +22,7 @@ pub mod agent;
 pub mod artifacts;
 pub mod attach;
 pub mod browser;
+pub mod checkpoint;
 pub mod control;
 pub mod detect;
 pub mod events;

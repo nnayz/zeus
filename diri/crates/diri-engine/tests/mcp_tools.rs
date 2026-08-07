@@ -78,6 +78,7 @@ fn spec(id: &str, script: &str, logs: &Path) -> SessionSpec {
         authority: Authority::ProcessOnly,
         logs_dir: logs.to_path_buf(),
         holder: None,
+        defer_launch: false,
     }
 }
 

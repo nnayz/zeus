@@ -364,6 +364,7 @@ impl RegistryHost {
             authority,
             logs_dir: self.logs_dir.clone(),
             holder: self.holder.clone(),
+            defer_launch: true,
         };
         registry
             .spawn(spec, record)

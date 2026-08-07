@@ -3,7 +3,33 @@
 For first-party VPS execution, per-node Claude/Codex accounts, fleet usage,
 and transactional local↔cloud handoff, see [NODE.md](NODE.md).
 
-`diri` is the Rust + GPUI desktop app. The workspace holds the protocol/client core, terminal renderer, shared design system, session store, usage accounting, and window/sidebar shell. [`PLAN.md`](PLAN.md) is the historical record of the port from the retired Swift client, kept for its architecture and coexistence notes.
+`diri` is the Rust + GPUI desktop app, shipped self-contained: the app bundle
+carries the daemon (`dirijord`), the session holders that keep agents alive
+across daemon restarts and upgrades, the `dirijor` CLI, and the MCP proxy. The
+workspace holds the protocol/client core, the session engine, terminal
+renderer, shared design system, session store, usage accounting, and
+window/sidebar shell. [`PLAN.md`](PLAN.md) is the historical record of the
+port from the retired Swift client, kept for its architecture and coexistence
+notes.
+
+## Engine
+
+Sessions are owned by *holder* processes, not the daemon: the daemon can
+crash, upgrade, or be swapped out and every live agent keeps running, to be
+adopted by whatever daemon starts next.
+
+Two daemons ship in the bundle. `dirijord` (Swift) is the default.
+`dirijord-rs` is the cross-platform Rust engine
+([`crates/diri-engine`](crates/diri-engine)) — same socket, same wire
+protocol, same on-disk state, same holders, so flipping between them never
+loses a session. Opt a machine in with:
+
+```sh
+DIRIJORD_PATH=/Applications/diri.app/Contents/Resources/bin/dirijord-rs open -a diri
+```
+
+[`PORT.md`](PORT.md) tracks the port layer by layer, including the remaining
+gaps that keep the Swift daemon the default for now.
 
 ## Install
 
@@ -88,4 +114,11 @@ Removing the file leaves the app in local-only mode.
 
 ## Coexistence
 
-`diri` is a client of the installed Dirijor daemon. It never replaces or automatically restarts `dirijord`; the sole explicit exception is Settings → Remote, where changing iPhone companion access asks the daemon to reload `remote.json`. Until the protocol gains multi-desktop geometry arbitration, do not focus the same session in Dirijor and `diri` at different terminal sizes; both desktop clients would resize the same PTY. Input sent from both apps is interleaved.
+`diri` launches the daemon bundled beside it when none is running, and
+otherwise talks to whichever daemon owns the socket — it never kills or
+automatically restarts a live `dirijord`; the sole explicit exception is
+Settings → Remote, where changing iPhone companion access asks the daemon to
+reload `remote.json`. Until the protocol gains multi-desktop geometry
+arbitration, do not focus the same session in two desktop clients at different
+terminal sizes; both would resize the same PTY, and input sent from both is
+interleaved.

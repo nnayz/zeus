@@ -35,6 +35,7 @@ pub struct ControlServer {
     attach: crate::attach::AttachHub,
     injection: Option<InjectionConfig>,
     governor: std::sync::Arc<Mutex<crate::governor::GovernorConfig>>,
+    browser: std::sync::OnceLock<crate::browser::BrowserPool>,
 }
 
 /// Where injection files live and which CLI they point at. Present, spawns
@@ -63,6 +64,7 @@ impl ControlServer {
             governor: std::sync::Arc::new(Mutex::new(
                 crate::governor::GovernorConfig::default(),
             )),
+            browser: std::sync::OnceLock::new(),
         }
     }
 
@@ -371,6 +373,9 @@ impl ControlServer {
             Method::WORKTREE_CREATE => self.worktree_create(params),
             Method::WORKTREE_LIST => self.worktree_list(params),
             Method::WORKTREE_REMOVE => self.worktree_remove(params),
+            Method::WORKTREE_OVERVIEW => self.worktree_overview(),
+            Method::TEST_RUN => self.browser_call("run", params),
+            "browser.act" => self.browser_call("browser", params),
             Method::EVENTS_WAIT => self.events_wait(params),
             Method::HOST_SYNC_PREFS => self.host_sync_prefs(params),
             Method::SESSION_MIGRATE => self.session_migrate(params),
@@ -767,6 +772,141 @@ impl ControlServer {
             .find(|current| current.id.0 == record.id.0)
             .ok_or_else(|| ControlError::internal("the resumed session vanished"))?;
         serde_json::to_value(&record).map_err(|error| ControlError::internal(error.to_string()))
+    }
+
+    /// `test.run` / `browser.act`: the Playwright sidecar, launched lazily.
+    fn browser_call(
+        &self,
+        method: &str,
+        params: Option<JsonValue>,
+    ) -> Result<JsonValue, ControlError> {
+        let params = params.ok_or_else(|| ControlError::bad_request("params are required"))?;
+        let pool = self
+            .browser
+            .get_or_init(|| crate::browser::BrowserPool::new(&self.logs_dir));
+        let result = if method == "run" {
+            pool.run(params)
+        } else {
+            pool.browse(params)
+        };
+        result.map_err(|error| ControlError {
+            code: "browser_pool".into(),
+            message: error,
+        })
+    }
+
+    /// The aggregated staleness view: every worktree of every project,
+    /// joined with the session (live wins) occupying it, its dirtiness,
+    /// merged-ness into the default branch, and age — plus the "safe to
+    /// clean up" suggestion.
+    fn worktree_overview(&self) -> Result<JsonValue, ControlError> {
+        let (records, mut roots) = {
+            let registry = self.registry.lock().map_err(poisoned)?;
+            let roots: Vec<String> = registry
+                .projects_raw()
+                .iter()
+                .filter_map(|project| project.get("root").and_then(|value| value.as_str()))
+                .map(str::to_string)
+                .collect();
+            (registry.records(), roots)
+        };
+        roots.sort();
+
+        // Join sessions by worktree path (fallback cwd); a live session wins
+        // over an exited one sharing the path.
+        let mut session_by_path: std::collections::HashMap<String, &diri_proto::SessionRecord> =
+            std::collections::HashMap::new();
+        let running = |record: &diri_proto::SessionRecord| {
+            !matches!(
+                record.status,
+                diri_proto::SessionStatus::Exited(_) | diri_proto::SessionStatus::Unknown
+            )
+        };
+        for record in &records {
+            let path = record.worktree_path.clone().unwrap_or_else(|| record.cwd.clone());
+            match session_by_path.get(&path) {
+                Some(existing) if running(existing) || !running(record) => {}
+                _ => {
+                    session_by_path.insert(path, record);
+                }
+            }
+        }
+
+        let run_git = |args: &[&str], dir: &str| -> Option<String> {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .ok()?;
+            output.status.success().then(|| {
+                String::from_utf8_lossy(&output.stdout).trim().to_string()
+            })
+        };
+
+        let mut entries = Vec::new();
+        let mut seen_paths = std::collections::HashSet::new();
+        for root in roots {
+            if !crate::git::is_repository(Path::new(&root)) {
+                continue;
+            }
+            let Ok(worktrees) = crate::git::list_worktrees(Path::new(&root)) else {
+                continue;
+            };
+            // Repo's default branch: origin/HEAD symbolic ref, else "main".
+            let default_branch = run_git(
+                &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+                &root,
+            )
+            .and_then(|full| full.rsplit('/').next().map(str::to_string))
+            .filter(|short| !short.is_empty())
+            .unwrap_or_else(|| "main".into());
+            let merged_branches: std::collections::HashSet<String> = run_git(
+                &[
+                    "branch",
+                    "--merged",
+                    &default_branch,
+                    "--format=%(refname:short)",
+                ],
+                &root,
+            )
+            .map(|output| output.lines().map(str::to_string).collect())
+            .unwrap_or_default();
+
+            for worktree in worktrees {
+                if worktree.is_bare || !seen_paths.insert(worktree.path.clone()) {
+                    continue;
+                }
+                let is_main = worktree.path == root;
+                let dirty = run_git(&["status", "--porcelain"], &worktree.path)
+                    .is_some_and(|output| !output.is_empty());
+                let merged = worktree
+                    .branch
+                    .as_ref()
+                    .is_some_and(|branch| {
+                        branch != &default_branch && merged_branches.contains(branch)
+                    });
+                let age_days = std::fs::metadata(&worktree.path)
+                    .ok()
+                    .and_then(|meta| meta.created().or_else(|_| meta.modified()).ok())
+                    .and_then(|at| at.elapsed().ok())
+                    .map(|elapsed| (elapsed.as_secs() / 86_400) as i64)
+                    .unwrap_or(0);
+                let record = session_by_path.get(&worktree.path);
+                let session_alive = record.is_some_and(|record| running(record));
+                entries.push(diri_proto::WorktreeOverviewEntry {
+                    path: worktree.path.clone(),
+                    branch: worktree.branch.clone(),
+                    project_root: root.clone(),
+                    session_id: record.map(|record| record.id.clone()),
+                    session_status: record.map(|record| record.status.clone()),
+                    dirty,
+                    merged,
+                    age_days,
+                    stale_suggestion: !is_main && !session_alive && merged && !dirty && age_days > 7,
+                });
+            }
+        }
+        encode(&diri_proto::WorktreeOverviewResult { entries })
     }
 
     /// One-click handoff of a live Claude session between hosts: WIP commit
@@ -1824,7 +1964,7 @@ mod tests {
         // get a clean error, the same as an older daemon would give.
         let temp = tempfile::tempdir().expect("temp");
         let server = server(temp.path());
-        let error = err_of(call(&server, "test.run", Some(json!({}))));
+        let error = err_of(call(&server, "session.never_implemented", Some(json!({}))));
         assert_eq!(error.code, "not_found");
     }
 

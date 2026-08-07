@@ -51,21 +51,26 @@ This is the record of replacing it with `crates/diri-engine`.
 | Rust daemon binary | **done** | `dirijord-rs`: same socket, lock singleton, state file, boot-log stamp, holder adoption, manifest bundle + overrides loading. Ships in `Resources/bin` beside the Swift daemon; opt in per machine with `DIRIJORD_PATH=…/Resources/bin/dirijord-rs`. Verified live: the Swift `dirijor` CLI spawned, typed into, read, waited on, and archived a session served entirely by the Rust engine |
 | Swift daemon retirement | in soak | Opt-in flag exists; flip the default (and delete `Sources/`) once the Rust daemon has parity on the remaining gaps below and soak time under real use |
 
-Remaining gaps in `dirijord-rs` (all answer clean errors; the Swift daemon
-stays the default until they land):
+Since ported into `dirijord-rs` (2026-08-07 second pass): artifacts scanning
++ PR enrichment + listening ports, the full resource governor with all three
+auto-hibernation policies, spawn-on-host + remote revive over ssh+tmux,
+`host.sync_prefs`, `host.locate_repo`, `session.migrate` (WIP-commit handoff
+with transcript shuttle, prepare flow tested against two local checkouts),
+`worktree.overview`, and the Playwright browser pool (`test.run` /
+`browser.act` via the node sidecar).
 
-- **Remote hosts**: spawn-on-host over ssh+tmux (`remote.rs` has the argv
-  building; the spawn path rejects `host` for now), `session.migrate`,
-  `host.sync_prefs`, `host.locate_repo`, the remote TCP listener + token gate.
-- **Mobile ownership**: `session.set_owner` / role-based geometry arbitration
-  are accepted no-ops; a phone attach behaves like a second desktop sink.
-- **Resource governor**: `governor.configure` is accepted but nothing samples
-  memory or auto-hibernates; `session.resources` events are not emitted.
-- **Artifacts**: PR/port/preview scanning (`ArtifactScanner`,
-  `PullRequestMonitor`, `PortForwarder` forward channel) is unported.
-- **Browser pool**: `test.run` / `browser.act` are unported.
-- **Worktree overview**: `worktree.overview` (the aggregated staleness view)
-  is unported; create/list/remove work.
+Remaining gaps in `dirijord-rs` (all answer clean errors):
+
+- **Mobile companion stack**: the remote TCP listener + token gate, and
+  role-based geometry arbitration (`session.set_owner` is an accepted no-op;
+  a phone attach behaves like a second desktop sink). One stack — without
+  the listener the phone can't reach this daemon, so the arbitration is
+  unreachable until both land together.
+- **Port forwarding**: the data-channel `ForwardRequest` mode (phone preview
+  tunnels) is unported — same mobile stack.
+- **Polish, not parity blockers**: screen-checkpoint restore on adoption
+  (bounded raw-tail replay instead), deferred launch at first client size,
+  readiness-verified initial-prompt injection (heuristic wait today).
 
 Holder-port notes, for whoever wires the daemon:
 

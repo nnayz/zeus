@@ -29,10 +29,12 @@ pub mod governor;
 pub mod history;
 #[cfg(unix)]
 pub mod holder;
+pub mod hosts;
 pub mod hooks;
 pub mod inject;
 pub mod log;
 pub mod mcp;
+pub mod migrate;
 pub mod pr_monitor;
 pub mod pty;
 pub mod registry;

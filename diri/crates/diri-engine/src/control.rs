@@ -372,6 +372,9 @@ impl ControlServer {
             Method::WORKTREE_LIST => self.worktree_list(params),
             Method::WORKTREE_REMOVE => self.worktree_remove(params),
             Method::EVENTS_WAIT => self.events_wait(params),
+            Method::HOST_SYNC_PREFS => self.host_sync_prefs(params),
+            Method::SESSION_MIGRATE => self.session_migrate(params),
+            Method::HOST_LOCATE_REPO => self.host_locate_repo(params),
             Method::HOOK_REPORT => self.hook_report(params),
             Method::SESSION_RESUME => self.session_resume(params),
             Method::SESSION_RESUME_FROM_HISTORY => self.session_resume_from_history(params),
@@ -436,10 +439,8 @@ impl ControlServer {
             })
             .unwrap_or_default();
         let p: diri_proto::SessionSpawnParams = decode(Some(raw))?;
-        if p.host.is_some() {
-            return Err(ControlError::bad_request(
-                "remote-host spawning is not supported by this engine yet",
-            ));
+        if let Some(host_id) = &p.host {
+            return self.session_spawn_remote(&p, host_id);
         }
         let kind = p.kind.id().to_string();
         // A generic kind carries the user's command line inside itself.
@@ -617,6 +618,385 @@ impl ControlServer {
         // SessionSpawnResult is the record itself, as the Swift daemon
         // answers — not wrapped.
         serde_json::to_value(&record).map_err(|error| ControlError::internal(error.to_string()))
+    }
+
+    /// Spawn on a remote host: the local PTY runs ssh, which runs tmux on the
+    /// host — tmux is what keeps the agent alive across SSH drops, and the
+    /// `-A` reattach semantics make respawn, reconnect, and resume one path.
+    fn session_spawn_remote(
+        &self,
+        p: &diri_proto::SessionSpawnParams,
+        host_id: &str,
+    ) -> Result<JsonValue, ControlError> {
+        let entry = self.resolve_host(host_id)?;
+        let kind = p.kind.id().to_string();
+        let registry_engine = {
+            let registry = self.registry.lock().map_err(poisoned)?;
+            registry.engine()
+        };
+        let manifest = registry_engine
+            .manifest(&kind)
+            .ok_or_else(|| ControlError::not_found(format!("no manifest for agent {kind}")))?;
+        let descriptor = manifest.agent.clone().unwrap_or_default();
+        let authority = descriptor.authority();
+
+        let remote_cwd = if p.cwd.is_empty() {
+            entry.default_cwd.clone().unwrap_or_else(|| "~".into())
+        } else {
+            p.cwd.clone()
+        };
+        let id = next_session_id();
+        // Only agents that accept a caller-minted id get one; for the rest
+        // the remote conversation id never reaches us.
+        let agent_session_id = descriptor
+            .session_id_flag
+            .is_some()
+            .then(crate::inject::uuid_v4);
+        let argv = crate::remote::remote_argv(
+            &kind,
+            &descriptor,
+            &id,
+            &entry,
+            &remote_cwd,
+            agent_session_id.as_deref(),
+            false,
+        );
+
+        // The local PTY runs ssh from home; hooks and MCP flags reference
+        // local paths that don't exist on the other machine, so none are
+        // injected — but the DIRIJOR env triplet stays local-side.
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
+        let mut pty = crate::pty::PtySpec::new(argv, &home);
+        pty.env = std::env::vars().collect();
+        pty.env.retain(|(key, _)| key != "NO_COLOR");
+        if let (Some(cols), Some(rows)) = (p.initial_cols, p.initial_rows) {
+            pty.cols = cols.clamp(2, u16::MAX as i64) as u16;
+            pty.rows = rows.clamp(2, u16::MAX as i64) as u16;
+        }
+        if let Some(injection) = &self.injection {
+            pty.env
+                .push((crate::inject::SESSION_ID_ENV.into(), id.clone()));
+            pty.env.push((
+                crate::inject::SOCKET_ENV.into(),
+                self.socket_path.to_string_lossy().into_owned(),
+            ));
+            pty.env.push((
+                crate::inject::CLI_ENV.into(),
+                injection.cli_path.to_string_lossy().into_owned(),
+            ));
+        }
+
+        let mut record = new_record(&id, &kind, &remote_cwd);
+        record.host = Some(entry.id.clone());
+        record.agent_session_id = agent_session_id;
+        if let Some(title) = &p.title {
+            record.title = title.clone();
+            record.title_source = diri_proto::TitleSource::DirijorAssigned;
+        }
+        record.parent = p.parent.clone();
+
+        let spec = crate::session::SessionSpec {
+            id: id.clone(),
+            pty,
+            manifest_id: kind,
+            authority,
+            logs_dir: self.logs_dir.clone(),
+            holder: self.holder.clone(),
+        };
+        let mut registry = self.registry.lock().map_err(poisoned)?;
+        registry
+            .spawn(spec, record)
+            .map_err(|error| ControlError::internal(error.to_string()))?;
+        let _ = registry.persist();
+        self.publish_updated(&registry, &id);
+        let record = registry
+            .records()
+            .into_iter()
+            .find(|record| record.id.0 == id)
+            .ok_or_else(|| ControlError::internal("the new session vanished"))?;
+        serde_json::to_value(&record).map_err(|error| ControlError::internal(error.to_string()))
+    }
+
+    /// Revives a remote session under its existing record: ssh + `tmux
+    /// new-session -A` reattaches or restarts, resuming the conversation.
+    fn session_resume_remote(
+        &self,
+        record: &diri_proto::SessionRecord,
+        host_id: &str,
+    ) -> Result<JsonValue, ControlError> {
+        let entry = self.resolve_host(host_id)?;
+        let kind = record.kind.id().to_string();
+        let registry_engine = {
+            let registry = self.registry.lock().map_err(poisoned)?;
+            registry.engine()
+        };
+        let manifest = registry_engine
+            .manifest(&kind)
+            .ok_or_else(|| ControlError::not_found(format!("no manifest for agent {kind}")))?;
+        let descriptor = manifest.agent.clone().unwrap_or_default();
+        let argv = crate::remote::remote_argv(
+            &kind,
+            &descriptor,
+            &record.id.0,
+            &entry,
+            &record.cwd,
+            record.agent_session_id.as_deref(),
+            true,
+        );
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
+        let mut pty = crate::pty::PtySpec::new(argv, &home);
+        pty.env = std::env::vars().collect();
+        pty.env.retain(|(key, _)| key != "NO_COLOR");
+        let spec = crate::session::SessionSpec {
+            id: record.id.0.clone(),
+            pty,
+            manifest_id: kind,
+            authority: descriptor.authority(),
+            logs_dir: self.logs_dir.clone(),
+            holder: self.holder.clone(),
+        };
+        let mut registry = self.registry.lock().map_err(poisoned)?;
+        registry
+            .respawn(spec)
+            .map_err(|error| ControlError::internal(error.to_string()))?;
+        let _ = registry.persist();
+        self.publish_updated(&registry, &record.id.0);
+        let record = registry
+            .records()
+            .into_iter()
+            .find(|current| current.id.0 == record.id.0)
+            .ok_or_else(|| ControlError::internal("the resumed session vanished"))?;
+        serde_json::to_value(&record).map_err(|error| ControlError::internal(error.to_string()))
+    }
+
+    /// One-click handoff of a live Claude session between hosts: WIP commit
+    /// plus push plus hard-sync of the target checkout (phase 1, retryable),
+    /// stop the source, shuttle the transcript, rewrite the record in place,
+    /// and revive on the target through the normal resume path.
+    fn session_migrate(&self, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
+        let p: diri_proto::SessionMigrateParams = decode(params)?;
+        let id = p.session_id.0.clone();
+        let record = {
+            let registry = self.registry.lock().map_err(poisoned)?;
+            registry
+                .records()
+                .into_iter()
+                .find(|record| record.id.0 == id)
+                .ok_or_else(|| ControlError::not_found(id.clone()))?
+        };
+        if record.kind.id() != diri_proto::AgentKind::CLAUDE_CODE_ID {
+            return Err(ControlError::bad_request(
+                "only Claude Code sessions can move between hosts",
+            ));
+        }
+        if record.host == p.target_host {
+            return Err(ControlError::bad_request(match &p.target_host {
+                Some(host) => format!("session is already on {host}"),
+                None => "session is already local".to_string(),
+            }));
+        }
+        let source_host = record
+            .host
+            .as_deref()
+            .map(|host| self.resolve_host(host))
+            .transpose()?;
+        let target_host = p
+            .target_host
+            .as_deref()
+            .map(|host| self.resolve_host(host))
+            .transpose()?;
+        let home = std::env::var("HOME")
+            .map(PathBuf::from)
+            .map_err(|_| ControlError::internal("HOME is not set"))?;
+
+        // Locate the target checkout by origin (shared with host.locate_repo).
+        let origin = crate::hosts::origin_of_cwd(&record.cwd, source_host.as_ref())
+            .ok_or_else(|| {
+                ControlError::bad_request(format!(
+                    "session cwd is not inside a git repository with an 'origin' remote: {}",
+                    record.cwd
+                ))
+            })?;
+        let local_roots: Vec<String> = {
+            let registry = self.registry.lock().map_err(poisoned)?;
+            registry
+                .projects_raw()
+                .iter()
+                .filter_map(|project| project.get("root").and_then(|value| value.as_str()))
+                .map(str::to_string)
+                .collect()
+        };
+        let target_repo = crate::hosts::locate(&origin, target_host.as_ref(), &local_roots)
+            .ok_or_else(|| match &target_host {
+                Some(host) => ControlError::bad_request(format!(
+                    "repo not cloned on {} — clone {origin} under {} first",
+                    host.display_name(),
+                    host.default_cwd.as_deref().unwrap_or("~")
+                )),
+                None => ControlError::bad_request(format!(
+                    "repo not cloned locally — no known project has origin {origin}"
+                )),
+            })?;
+
+        // Phase 1 (source agent still alive, everything retryable).
+        let prepared = crate::migrate::prepare(
+            &record.cwd,
+            source_host.as_ref(),
+            target_host.as_ref(),
+            &target_repo,
+            target_host
+                .as_ref()
+                .map(|host| host.display_name())
+                .unwrap_or("local"),
+        )
+        .map_err(migrate_control_error)?;
+
+        // Point of no return: stop the source agent.
+        let mut warnings: Vec<String> = Vec::new();
+        {
+            let mut registry = self.registry.lock().map_err(poisoned)?;
+            let _ = registry.terminate(&id, std::time::Duration::from_secs(3));
+        }
+        if let Some(source) = &source_host
+            && let Some(warning) = crate::migrate::kill_remote_tmux(source, &id)
+        {
+            warnings.push(warning);
+        }
+
+        // Phase 2: transcript shuttle (source stopped ⇒ the jsonl is final).
+        let shuttle = crate::migrate::shuttle_transcript(
+            &record.cwd,
+            record.transcript_path.as_deref(),
+            record.agent_session_id.as_deref(),
+            source_host.as_ref(),
+            target_host.as_ref(),
+            &prepared,
+            &home,
+        );
+        if let Some(warning) = shuttle.warning.clone() {
+            warnings.push(warning);
+        }
+
+        // Rewrite the record in place: same id/title/sidebar position, new
+        // host + cwd.
+        {
+            let mut registry = self.registry.lock().map_err(poisoned)?;
+            let target_id = target_host.as_ref().map(|host| host.id.clone());
+            let branch = prepared.branch.clone();
+            let cwd = prepared.target_repo_root.clone();
+            let transcript = shuttle.local_target_path.clone();
+            let local = target_host.is_none();
+            registry.update_record(&id, |record| {
+                record.host = target_id;
+                record.cwd = cwd;
+                record.worktree_path = None;
+                record.git_branch = Some(branch);
+                record.transcript_path = if local { transcript } else { None };
+                record.status = diri_proto::SessionStatus::Exited(diri_proto::ExitInfo {
+                    reason: diri_proto::ExitReason::Exited,
+                    code: Some(0),
+                    signal: None,
+                });
+                record.needs_input = None;
+                record.hibernation = None;
+                record.memory_bytes = None;
+                record.listening_ports = None;
+                record.resumability = diri_proto::Resumability::Resumable;
+            });
+            let _ = registry.persist();
+            self.publish_updated(&registry, &id);
+        }
+
+        // Cutover: the normal resume path revives the conversation on the
+        // target; without a transcript there is nothing to resume, so the
+        // record is left revivable and the client's next open resumes fresh.
+        let revived = self.session_resume(Some(json!({ "sessionID": id })))?;
+        let session: diri_proto::SessionRecord = serde_json::from_value(revived)
+            .map_err(|error| ControlError::internal(error.to_string()))?;
+        encode(&diri_proto::SessionMigrateResult {
+            session,
+            transcript_migrated: shuttle.migrated,
+            warning: (!warnings.is_empty()).then(|| warnings.join("; ")),
+        })
+    }
+
+    /// `host.sync_prefs`: push the local agent preferences to a host so
+    /// agents there behave like local ones. Additive rsync, fixed include
+    /// list, per-tool reporting.
+    fn host_sync_prefs(&self, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
+        let p: diri_proto::HostSyncPrefsParams = decode(params)?;
+        let entry = self.resolve_host(&p.host)?;
+        let home = std::env::var("HOME")
+            .map(PathBuf::from)
+            .map_err(|_| ControlError::internal("HOME is not set"))?;
+        encode(&crate::hosts::sync_prefs(&entry, &home))
+    }
+
+    /// `host.locate_repo`: find a checkout by origin URL (given directly, or
+    /// derived from a session's cwd + host).
+    fn host_locate_repo(&self, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
+        let p: diri_proto::HostLocateRepoParams = decode(params)?;
+        let target = p.host.as_deref().map(|id| self.resolve_host(id)).transpose()?;
+
+        let mut origin = p.origin_url.clone();
+        if origin.is_none()
+            && let Some(session_id) = &p.session_id
+        {
+            let (cwd, source_host) = {
+                let registry = self.registry.lock().map_err(poisoned)?;
+                let record = registry
+                    .records()
+                    .into_iter()
+                    .find(|record| record.id.0 == session_id.0)
+                    .ok_or_else(|| ControlError::not_found(session_id.0.clone()))?;
+                (record.cwd, record.host)
+            };
+            let source = source_host
+                .as_deref()
+                .map(|id| self.resolve_host(id))
+                .transpose()?;
+            origin = crate::hosts::origin_of_cwd(&cwd, source.as_ref());
+        }
+        let Some(origin) = origin else {
+            return encode(&diri_proto::HostLocateRepoResult {
+                path: None,
+                origin_url: None,
+            });
+        };
+
+        let local_roots: Vec<String> = {
+            let registry = self.registry.lock().map_err(poisoned)?;
+            registry
+                .projects_raw()
+                .iter()
+                .filter_map(|project| project.get("root").and_then(|value| value.as_str()))
+                .map(str::to_string)
+                .collect()
+        };
+        let path = crate::hosts::locate(&origin, target.as_ref(), &local_roots);
+        encode(&diri_proto::HostLocateRepoResult {
+            path,
+            origin_url: Some(origin),
+        })
+    }
+
+    /// Resolves a host id against `hosts.json`, read fresh each call so
+    /// Settings edits apply without a daemon restart.
+    fn resolve_host(&self, host_id: &str) -> Result<diri_proto::HostEntry, ControlError> {
+        diri_proto::HostsConfig::load(self.hosts_file())
+            .hosts
+            .into_iter()
+            .find(|entry| entry.id == host_id)
+            .ok_or_else(|| {
+                ControlError::bad_request(format!("unknown host {host_id:?}; check hosts.json"))
+            })
+    }
+
+    fn hosts_file(&self) -> PathBuf {
+        self.socket_path
+            .parent()
+            .map(|parent| parent.join("hosts.json"))
+            .unwrap_or_else(|| PathBuf::from("hosts.json"))
     }
 
     /// `session.list` and `state.snapshot` are the same view: every record
@@ -808,6 +1188,13 @@ impl ControlServer {
             // Already live: resuming is a no-op, not an error.
             return serde_json::to_value(&record)
                 .map_err(|error| ControlError::internal(error.to_string()));
+        }
+        if let Some(host_id) = record.host.clone() {
+            // Remote revive: the same tmux name reattaches the live remote
+            // session when it survived, else a fresh agent resumes the
+            // conversation from the remote-side transcript.
+            drop(registry);
+            return self.session_resume_remote(&record, &host_id);
         }
         let spec = self.resume_spec(
             &registry,
@@ -1239,6 +1626,13 @@ fn resolve_on_path(binary: &str) -> Option<String> {
     None
 }
 
+fn migrate_control_error(error: crate::migrate::MigrateError) -> ControlError {
+    match error {
+        crate::migrate::MigrateError::BadRequest(message) => ControlError::bad_request(message),
+        crate::migrate::MigrateError::Internal(message) => ControlError::internal(message),
+    }
+}
+
 fn io_control_error(error: std::io::Error) -> ControlError {
     match error.kind() {
         std::io::ErrorKind::NotFound => ControlError::not_found(error.to_string()),
@@ -1430,7 +1824,7 @@ mod tests {
         // get a clean error, the same as an older daemon would give.
         let temp = tempfile::tempdir().expect("temp");
         let server = server(temp.path());
-        let error = err_of(call(&server, "session.migrate", Some(json!({}))));
+        let error = err_of(call(&server, "test.run", Some(json!({}))));
         assert_eq!(error.code, "not_found");
     }
 

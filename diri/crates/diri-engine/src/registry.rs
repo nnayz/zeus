@@ -536,6 +536,14 @@ impl Registry {
         true
     }
 
+    /// Applies an arbitrary record mutation (migrate's in-place rewrite).
+    pub fn update_record(&mut self, id: &str, mutate: impl FnOnce(&mut SessionRecord)) {
+        if let Some(record) = self.records.get_mut(id) {
+            mutate(record);
+            record.updated_at = DateMillis::from(std::time::SystemTime::now());
+        }
+    }
+
     pub fn set_hibernation(&mut self, id: &str, info: Option<diri_proto::HibernationInfo>) {
         if let Some(record) = self.records.get_mut(id) {
             record.hibernation = info;

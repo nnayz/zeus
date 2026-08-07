@@ -182,6 +182,7 @@ impl NativeMenuBar {
             header_divider,
             body,
             _target: target,
+            last_fingerprint: None,
         };
         menu_bar.set_attention(AttentionLevel::None);
         Some(menu_bar)
@@ -208,6 +209,17 @@ impl NativeMenuBar {
             .count();
         let total_sessions = active_session_count(snapshot);
         let remaining = total_sessions.saturating_sub(visible_sessions);
+        let fingerprint = panel_fingerprint(
+            &rows,
+            remaining,
+            total_sessions,
+            snapshot.selected_session_id.as_ref(),
+            snapshot.global_attention,
+        );
+        if self.last_fingerprint == Some(fingerprint) {
+            return;
+        }
+        self.last_fingerprint = Some(fingerprint);
         let body_height = if rows.is_empty() {
             EMPTY_BODY_HEIGHT
         } else {
@@ -561,6 +573,45 @@ enum MenuBodyRow<'a> {
     Session(&'a SessionRecord),
 }
 
+/// Hashes everything the panel body and header display, so an identical
+/// publish never pays NSView teardown.
+fn panel_fingerprint(
+    rows: &[MenuBodyRow<'_>],
+    remaining: usize,
+    total_sessions: usize,
+    selected: Option<&SessionId>,
+    global_attention: AttentionLevel,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for row in rows {
+        match row {
+            MenuBodyRow::Project { name, count } => {
+                0u8.hash(&mut hasher);
+                name.hash(&mut hasher);
+                count.hash(&mut hasher);
+            }
+            MenuBodyRow::Session(session) => {
+                1u8.hash(&mut hasher);
+                session.id.0.hash(&mut hasher);
+                display_title(session).hash(&mut hasher);
+                std::mem::discriminant(&session.attention()).hash(&mut hasher);
+                session.effective_kind().id().hash(&mut hasher);
+                session.hibernation.is_some().hash(&mut hasher);
+                if let Some(detail) = &session.needs_input {
+                    detail.summary.hash(&mut hasher);
+                    std::mem::discriminant(&detail.risk_hint).hash(&mut hasher);
+                }
+            }
+        }
+    }
+    remaining.hash(&mut hasher);
+    total_sessions.hash(&mut hasher);
+    selected.map(|id| id.0.as_str()).hash(&mut hasher);
+    std::mem::discriminant(&global_attention).hash(&mut hasher);
+    hasher.finish()
+}
+
 fn menu_rows(snapshot: &StoreSnapshot) -> Vec<MenuBodyRow<'_>> {
     let mut rows = Vec::new();
     for project in &snapshot.projects {
@@ -577,7 +628,7 @@ fn menu_rows(snapshot: &StoreSnapshot) -> Vec<MenuBodyRow<'_>> {
             count: sessions.len(),
         });
         for session in sessions {
-            rows.push(MenuBodyRow::Session(session));
+            rows.push(MenuBodyRow::Session(session.as_ref()));
         }
     }
 
@@ -825,6 +876,14 @@ define_class!(
                 panel.orderOut(None);
                 return;
             }
+
+            // Updates are skipped while the panel is hidden; ask for one
+            // fresh snapshot so the first visible frame shows current rows.
+            self.ivars()
+                .store
+                .write()
+                .expect("session store lock poisoned")
+                .request_snapshot_publish();
 
             if let Some(window) = self.ivars().button.window() {
                 let button_rect = self

@@ -59,6 +59,14 @@ with transcript shuttle, prepare flow tested against two local checkouts),
 `worktree.overview`, and the Playwright browser pool (`test.run` /
 `browser.act` via the node sidecar).
 
+Third pass (2026-08-07, retirement checklist): wake-on-input is now proven
+end to end — `tests/wake.rs` freezes a real held session and shows that the
+only triggers the app actually uses (control `send_text`, a bare data-channel
+attach) SIGCONT the tree, deliver the input, and clear the hibernation
+record; the app never calls `session.wake` itself. The polish trio landed the
+same day: screen-checkpoint restore, deferred launch at the settled client
+size, and verified initial-prompt injection (notes below).
+
 Remaining gaps in `dirijord-rs` (all answer clean errors):
 
 - **Mobile companion stack**: the remote TCP listener + token gate, and

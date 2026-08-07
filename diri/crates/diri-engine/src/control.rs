@@ -34,6 +34,7 @@ pub struct ControlServer {
     holder: Option<crate::session::HolderConfig>,
     events: crate::events::EventBus,
     attach: crate::attach::AttachHub,
+    pr_monitor_wake: crate::pr_monitor::PrMonitorWake,
     injection: Option<InjectionConfig>,
     governor: std::sync::Arc<Mutex<crate::governor::GovernorConfig>>,
     browser: std::sync::OnceLock<crate::browser::BrowserPool>,
@@ -61,6 +62,7 @@ impl ControlServer {
             holder: None,
             events: crate::events::EventBus::new(),
             attach: crate::attach::AttachHub::new(),
+            pr_monitor_wake: crate::pr_monitor::PrMonitorWake::default(),
             injection: None,
             governor: std::sync::Arc::new(Mutex::new(
                 crate::governor::GovernorConfig::default(),
@@ -88,6 +90,12 @@ impl ControlServer {
     /// The attach hub, for the resource governor's attached-session checks.
     pub fn attach_hub(&self) -> crate::attach::AttachHub {
         self.attach.clone()
+    }
+
+    /// Event-driven invalidation shared by selection/focus, artifact
+    /// discovery, and the background PR monitor.
+    pub fn pr_monitor_wake(&self) -> crate::pr_monitor::PrMonitorWake {
+        self.pr_monitor_wake.clone()
     }
 
     /// The governor tunables `governor.configure` updates in place.
@@ -174,6 +182,16 @@ impl ControlServer {
                 if let Ok(attach) =
                     serde_json::from_slice::<diri_proto::AttachRequest>(&line)
                 {
+                    // Attaching means this session is visible. Record that
+                    // before waking the PR monitor so its immediate pass sees
+                    // the session as foreground/recent even if registration
+                    // has not completed yet.
+                    if let Ok(mut registry) = self.registry.lock() {
+                        let _ = registry.mark_seen(&attach.attach.0);
+                        let _ = registry.persist();
+                        self.publish_updated(&registry, &attach.attach.0);
+                    }
+                    self.pr_monitor_wake.wake_session(attach.attach.0.clone());
                     // Bytes the line reader buffered past the attach line are
                     // already binary frames; hand them over.
                     let buffered = reader.buffer().to_vec();
@@ -393,10 +411,10 @@ impl ControlServer {
             Method::DAEMON_PREPARE_SHUTDOWN => self.daemon_prepare_shutdown(),
             Method::DAEMON_SHUTDOWN => self.daemon_shutdown(),
             Method::GOVERNOR_CONFIGURE => self.governor_configure(params),
-            // Ownership arbitration and the active-client hinting are
-            // desktop/mobile features this engine does not model yet;
-            // accepting them keeps clients on their happy path.
-            Method::SESSION_SET_OWNER | Method::CLIENT_SET_ACTIVE => Ok(json!({})),
+            Method::CLIENT_SET_ACTIVE => self.client_set_active(params),
+            // Ownership arbitration is a desktop/mobile feature this engine
+            // does not model yet; accepting it keeps clients on their happy path.
+            Method::SESSION_SET_OWNER => Ok(json!({})),
             other => Err(ControlError::not_found(format!(
                 "method {other:?} is not implemented by this engine yet"
             ))),
@@ -496,8 +514,31 @@ impl ControlServer {
         let descriptor = manifest.agent.clone().unwrap_or_default();
         let authority = descriptor.authority();
 
+        let id = next_session_id();
+        // Build the complete agent argv before `spawn_spec`: agents declaring
+        // `returnToLoginShell` need every manifest and injection argument
+        // quoted inside the shell's `-c` command.
+        let mut launch_args = argv.clone();
+        let mut agent_session_id = None;
+        if descriptor.binary.is_some() {
+            launch_args.extend(descriptor.spawn_args.iter().cloned());
+            agent_session_id = descriptor.session_id_flag.as_ref().map(|flag| {
+                let uuid = crate::inject::uuid_v4();
+                launch_args.push(flag.clone());
+                launch_args.push(uuid.clone());
+                uuid
+            });
+            if let Some(injection) = &self.injection {
+                launch_args.extend(crate::inject::injection_args(
+                    &descriptor.injection,
+                    &injection.inject_dir,
+                    &injection.cli_path,
+                ));
+            }
+        }
+
         let inherited: Vec<(String, String)> = std::env::vars().collect();
-        let mut pty = match descriptor.spawn_spec(&cwd_path, inherited.clone(), &argv) {
+        let mut pty = match descriptor.spawn_spec(&cwd_path, inherited.clone(), &launch_args) {
             Some(spec) => spec,
             // No binary in the manifest: the caller has to say what to run.
             None if !argv.is_empty() => {
@@ -513,7 +554,6 @@ impl ControlServer {
             }
         };
 
-        let id = next_session_id();
         let mut record = new_record(&id, &kind, &cwd);
         if let Some(title) = &p.title {
             record.title = title.clone();
@@ -527,17 +567,10 @@ impl ControlServer {
             pty.rows = rows.clamp(2, u16::MAX as i64) as u16;
         }
 
-        // Injection: manifest spawn args, a caller-minted conversation UUID
-        // (what makes resume possible later), the Dirijor env triplet, and
-        // the hook/MCP shim flags the manifest opted into.
+        // Injection environment and the caller-minted conversation UUID. The
+        // argv side was assembled before `spawn_spec` so its shell wrapper
+        // contains the complete command.
         if descriptor.binary.is_some() {
-            pty.argv.extend(descriptor.spawn_args.iter().cloned());
-            let agent_session_id = descriptor.session_id_flag.as_ref().map(|flag| {
-                let uuid = crate::inject::uuid_v4();
-                pty.argv.push(flag.clone());
-                pty.argv.push(uuid.clone());
-                uuid
-            });
             if let Some(injection) = &self.injection {
                 pty.env.push((
                     crate::inject::SESSION_ID_ENV.into(),
@@ -550,11 +583,6 @@ impl ControlServer {
                 pty.env.push((
                     crate::inject::CLI_ENV.into(),
                     injection.cli_path.to_string_lossy().into_owned(),
-                ));
-                pty.argv.extend(crate::inject::injection_args(
-                    &descriptor.injection,
-                    &injection.inject_dir,
-                    &injection.cli_path,
                 ));
             }
             if let Some(uuid) = &agent_session_id {
@@ -1250,6 +1278,13 @@ impl ControlServer {
             .map_err(io_control_error)?;
         let _ = registry.persist();
         self.publish_updated(&registry, &p.session_id.0);
+        self.pr_monitor_wake.wake_session(p.session_id.0);
+        Ok(json!({}))
+    }
+
+    fn client_set_active(&self, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
+        let p: diri_proto::ClientActiveParams = decode(params)?;
+        self.pr_monitor_wake.set_foreground_active(p.active);
         Ok(json!({}))
     }
 
@@ -1394,20 +1429,35 @@ impl ControlServer {
             .manifest(kind)
             .ok_or_else(|| ControlError::not_found(format!("no manifest for agent {kind}")))?;
         let descriptor = manifest.agent.clone().unwrap_or_default();
-        let binary = descriptor.binary.clone().ok_or_else(|| {
+        descriptor.binary.as_ref().ok_or_else(|| {
             ControlError::bad_request(format!("agent {kind} declares no binary"))
         })?;
         let tail = descriptor.resume_args(agent_session_id).ok_or_else(|| {
             ControlError::bad_request(format!("agent {kind} does not support resume"))
         })?;
 
+        let mut launch_args = descriptor.spawn_args.clone();
+        launch_args.extend(tail);
+        if let Some(injection) = &self.injection {
+            // Only the appendable flag mechanisms replay on resume, exactly
+            // as in Swift: Codex's global `-c` overrides must precede the
+            // resume SUBCOMMAND and are deliberately not replayed.
+            let claude_only = crate::agent::InjectionSpec {
+                claude_hooks: descriptor.injection.claude_hooks,
+                claude_mcp: descriptor.injection.claude_mcp,
+                ..Default::default()
+            };
+            launch_args.extend(crate::inject::injection_args(
+                &claude_only,
+                &injection.inject_dir,
+                &injection.cli_path,
+            ));
+        }
+
         let inherited: Vec<(String, String)> = std::env::vars().collect();
         let mut pty = descriptor
-            .spawn_spec(Path::new(cwd), inherited, &[])
+            .spawn_spec(Path::new(cwd), inherited, &launch_args)
             .ok_or_else(|| ControlError::internal("resume spec without a binary"))?;
-        pty.argv = vec![binary];
-        pty.argv.extend(descriptor.spawn_args.iter().cloned());
-        pty.argv.extend(tail);
         if let Some(injection) = &self.injection {
             pty.env
                 .push((crate::inject::SESSION_ID_ENV.into(), id.to_string()));
@@ -1418,19 +1468,6 @@ impl ControlServer {
             pty.env.push((
                 crate::inject::CLI_ENV.into(),
                 injection.cli_path.to_string_lossy().into_owned(),
-            ));
-            // Only the appendable flag mechanisms replay on resume, exactly
-            // as in Swift: Codex's global `-c` overrides must precede the
-            // resume SUBCOMMAND and are deliberately not replayed.
-            let claude_only = crate::agent::InjectionSpec {
-                claude_hooks: descriptor.injection.claude_hooks,
-                claude_mcp: descriptor.injection.claude_mcp,
-                ..Default::default()
-            };
-            pty.argv.extend(crate::inject::injection_args(
-                &claude_only,
-                &injection.inject_dir,
-                &injection.cli_path,
             ));
         }
         Ok(crate::session::SessionSpec {
@@ -2079,6 +2116,20 @@ mod tests {
     }
 
     #[test]
+    fn client_activity_drives_pr_monitor_visibility() {
+        let temp = tempfile::tempdir().expect("temp");
+        let server = server(temp.path());
+        assert!(server.pr_monitor_wake().foreground_active());
+
+        let _ = ok_of(call(
+            &server,
+            diri_proto::Method::CLIENT_SET_ACTIVE,
+            Some(json!({ "active": false })),
+        ));
+        assert!(!server.pr_monitor_wake().foreground_active());
+    }
+
+    #[test]
     fn a_client_on_another_protocol_is_told_so() {
         let temp = tempfile::tempdir().expect("temp");
         let server = server(temp.path());
@@ -2107,6 +2158,30 @@ mod tests {
             codex_descriptor.injection.codex_notify || codex_descriptor.injection.codex_mcp,
             "codex opts into at least one shim"
         );
+    }
+
+    #[test]
+    fn resuming_an_agent_keeps_the_login_shell_as_session_leader() {
+        let temp = tempfile::tempdir().expect("temp");
+        let registry = Registry::new(engine(), temp.path().join("state.json"));
+        let server = ControlServer::new(
+            Arc::new(Mutex::new(Registry::new(
+                engine(),
+                temp.path().join("server-state.json"),
+            ))),
+            temp.path().join("daemon.sock"),
+        );
+
+        let spec = server
+            .resume_spec(&registry, "s_resume", "claude-code", "/tmp", Some("uuid-1"))
+            .expect("resume spec");
+        assert_eq!(&spec.pty.argv[1..4], &["-i", "-l", "-c"]);
+        let command = &spec.pty.argv[4];
+        assert!(
+            command.contains("'claude' '--resume' 'uuid-1'"),
+            "the complete resume command must run inside the shell: {command}"
+        );
+        assert!(command.contains("; exec "), "the shell must survive: {command}");
     }
 
     #[test]

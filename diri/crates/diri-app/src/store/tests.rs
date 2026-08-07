@@ -116,6 +116,23 @@ fn switcher_store_integration_commits_only_on_control_release() {
 }
 
 #[test]
+fn selecting_a_session_wakes_its_artifact_refresh_even_when_already_seen() {
+    let (mut store, mut effects) = hydrated(
+        vec![session("one", "a", 2.0), session("two", "a", 1.0)],
+        vec![project("a", "A")],
+        Prefs::default(),
+    );
+    drain(&mut effects);
+
+    store.select(id("two"));
+    assert!(
+        drain(&mut effects)
+            .into_iter()
+            .any(|effect| matches!(effect, StoreEffect::MarkSeen(session) if session == id("two")))
+    );
+}
+
+#[test]
 fn hydrate_restores_the_last_selected_session_instead_of_the_first() {
     let prefs = Prefs {
         last_selected_session: Some(id("two")),

@@ -58,6 +58,7 @@ pub fn spawn_governor(
     registry: Arc<Mutex<Registry>>,
     events: EventBus,
     attach: AttachHub,
+    pr_monitor_wake: crate::pr_monitor::PrMonitorWake,
     config: Arc<Mutex<GovernorConfig>>,
     stop: Arc<AtomicBool>,
 ) -> std::thread::JoinHandle<()> {
@@ -77,7 +78,7 @@ pub fn spawn_governor(
                     std::thread::sleep(Duration::from_millis(250));
                 }
                 tick += 1;
-                sweep(&registry, &events, &attach, &config, tick);
+                sweep(&registry, &events, &attach, &pr_monitor_wake, &config, tick);
             }
         })
         .expect("spawn governor")
@@ -87,6 +88,7 @@ fn sweep(
     registry: &Arc<Mutex<Registry>>,
     events: &EventBus,
     attach: &AttachHub,
+    pr_monitor_wake: &crate::pr_monitor::PrMonitorWake,
     config: &Arc<Mutex<GovernorConfig>>,
     tick: u64,
 ) {
@@ -107,7 +109,15 @@ fn sweep(
             if tick.is_multiple_of(config.hibernated_sample_every) {
                 let footprint = footprint_of(&hibernation.tree_pids);
                 total_footprint = total_footprint.wrapping_add(footprint);
-                apply_sample(registry, events, &id, Some(footprint), None, None);
+                apply_sample(
+                    registry,
+                    events,
+                    pr_monitor_wake,
+                    &id,
+                    Some(footprint),
+                    None,
+                    None,
+                );
             } else {
                 total_footprint =
                     total_footprint.wrapping_add(record.memory_bytes.unwrap_or(0));
@@ -139,6 +149,7 @@ fn sweep(
         apply_sample(
             registry,
             events,
+            pr_monitor_wake,
             &id,
             Some(footprint),
             ports,
@@ -194,6 +205,7 @@ fn sweep(
 fn apply_sample(
     registry: &Arc<Mutex<Registry>>,
     events: &EventBus,
+    pr_monitor_wake: &crate::pr_monitor::PrMonitorWake,
     id: &str,
     memory: Option<u64>,
     ports: Option<Vec<PortInfo>>,
@@ -204,6 +216,9 @@ fn apply_sample(
         guard.apply_resource_sample(id, memory, ports, artifacts)
     };
     if let Some(event) = event {
+        if event.artifacts.is_some() {
+            pr_monitor_wake.wake_session(id.to_owned());
+        }
         events.publish_encoded(diri_proto::EventName::SESSION_RESOURCES, &event, Some(id));
     }
 }

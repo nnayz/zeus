@@ -44,10 +44,14 @@ fn main() {
         env!("CARGO_PKG_VERSION")
     );
 
-    // The app launches us with launchd's minimal PATH; agents and tools
-    // (claude, gh, node) live in the user's login PATH. Resolve it the way
-    // the Swift daemon's LoginEnvironment did: ask the login shell once.
-    if let Some(path) = login_path() {
+    // The app launches us with launchd's generic SHELL and minimal PATH.
+    // Normalize both from the user's account before any session snapshots the
+    // inherited environment: wrapped agents must return to the user's actual
+    // shell (fish/zsh/…), and that shell owns the current tool PATH.
+    let user_shell = login_shell();
+    // SAFETY: single-threaded startup, before any spawn.
+    unsafe { std::env::set_var("SHELL", &user_shell) };
+    if let Some(path) = login_path(&user_shell) {
         // SAFETY: single-threaded startup, before any spawn.
         unsafe { std::env::set_var("PATH", &path) };
     }
@@ -144,10 +148,12 @@ fn main() {
         server.events(),
         Arc::new(AtomicBool::new(false)),
     );
+    let pr_monitor_wake = server.pr_monitor_wake();
     let _governor = diri_engine::governor::spawn_governor(
         Arc::clone(&registry),
         server.events(),
         server.attach_hub(),
+        pr_monitor_wake.clone(),
         server.governor_config(),
         Arc::new(AtomicBool::new(false)),
     );
@@ -155,6 +161,7 @@ fn main() {
         Arc::clone(&registry),
         server.events(),
         server.attach_hub(),
+        pr_monitor_wake,
         Arc::new(AtomicBool::new(false)),
     );
     let _persist_flusher = diri_engine::registry::spawn_persist_flusher(
@@ -214,12 +221,12 @@ fn login_shell() -> String {
 /// sources both interactive and login files, which is where agent PATHs are
 /// actually configured.
 #[cfg(unix)]
-fn login_path() -> Option<String> {
+fn login_path(shell: &str) -> Option<String> {
     let fallback = || {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
         format!("{home}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
     };
-    let output = std::process::Command::new(login_shell())
+    let output = std::process::Command::new(shell)
         .args(["-i", "-l", "-c", "printenv PATH"])
         .output()
         .ok()?;

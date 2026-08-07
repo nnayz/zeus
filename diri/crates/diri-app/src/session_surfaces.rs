@@ -14,12 +14,13 @@ use diri_proto::{
 };
 use diri_term::element::{SharedGridBuffer, TerminalElement};
 use diri_ui::{
-    AgentKind, AgentLogo, Ink, Palette, Radius, SemanticColors, StatusGlyph, StatusState,
+    AgentKind, AgentLogo, HairlineDivider, Ink, Palette, Radius, SemanticColors, StatusGlyph,
+    StatusState,
 };
 use gpui::{
     AnyElement, BoxShadow, ClickEvent, Context, Entity, FocusHandle, FontWeight, KeyDownEvent,
-    KeyUpEvent, ModifiersChangedEvent, MouseButton, Render, SharedString, Task, Window, div, point,
-    prelude::*, px, rgba,
+    KeyUpEvent, ModifiersChangedEvent, MouseButton, Render, ScrollHandle, SharedString, Task,
+    Window, div, point, prelude::*, px, rgba,
 };
 
 pub struct SessionSurfaces {
@@ -27,6 +28,9 @@ pub struct SessionSurfaces {
     focus_handle: FocusHandle,
     resident_previews: HashMap<SessionId, TerminalElement>,
     status_glyphs: HashMap<(SessionId, u16, diri_ui::AgentKind), Entity<StatusGlyph>>,
+    overview_board_scroll: ScrollHandle,
+    overview_lane_scrolls: HashMap<OverviewLane, ScrollHandle>,
+    overview_list_scroll: ScrollHandle,
     /// This view is `.cached()` in RootView, so ambient window redraws no
     /// longer reach it: store changes must notify it directly.
     _store_changes: Task<()>,
@@ -52,6 +56,12 @@ impl SessionSurfaces {
             focus_handle: cx.focus_handle(),
             resident_previews: HashMap::new(),
             status_glyphs: HashMap::new(),
+            overview_board_scroll: ScrollHandle::new(),
+            overview_lane_scrolls: OverviewLane::ALL
+                .into_iter()
+                .map(|lane| (lane, ScrollHandle::new()))
+                .collect(),
+            overview_list_scroll: ScrollHandle::new(),
             _store_changes: store_changes,
         }
     }
@@ -122,6 +132,11 @@ impl Render for SessionSurfaces {
         let root = div()
             .id("session-surfaces")
             .absolute()
+            // Cached entity roots are laid out independently. Insets alone do
+            // not give this absolute root a definite size, which previously
+            // collapsed the overview hitbox/background to its 42 pt top inset
+            // while every child visibly overflowed into the window.
+            .size_full()
             .track_focus(&self.focus_handle)
             .capture_key_down(cx.listener(Self::handle_key_down))
             .capture_key_up(cx.listener(Self::handle_key_up))
@@ -461,22 +476,35 @@ impl SessionSurfaces {
             if project_count == 1 { "" } else { "s" }
         );
 
-        let header = div()
+        let mode_selector = div()
             .flex()
             .items_center()
+            .gap(px(2.0))
+            .p(px(2.0))
+            .rounded(px(Radius::ROW))
+            .bg(colors.primary.alpha(0.045))
+            .border_1()
+            .border_color(colors.primary.alpha(0.07))
+            .child(self.mode_button(OverviewMode::Board, state.mode(), "Board", cx))
+            .child(self.mode_button(OverviewMode::List, state.mode(), "List", cx));
+
+        let header = div()
+            .flex()
+            .flex_none()
+            .items_center()
             .gap(px(10.0))
-            .px(px(24.0))
-            .py(px(14.0))
+            .h(px(50.0))
+            .px(px(20.0))
             .child(
                 div()
-                    .text_size(px(15.0))
+                    .text_size(px(16.0))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(colors.primary)
                     .child("All Sessions"),
             )
             .child(
                 div()
-                    .text_size(px(11.0))
+                    .text_size(px(12.0))
                     .text_color(colors.tertiary)
                     .child(summary),
             )
@@ -485,19 +513,20 @@ impl SessionSurfaces {
                 div()
                     .text_size(px(11.0))
                     .text_color(colors.tertiary)
-                    .child("⌘-click to select"),
+                    .child("⌘ click to select"),
             )
-            .child(self.mode_button(OverviewMode::Board, state.mode(), "Board", cx))
-            .child(self.mode_button(OverviewMode::List, state.mode(), "List", cx))
+            .child(mode_selector)
             .child(
                 div()
                     .id("close-overview")
                     .flex()
                     .items_center()
                     .justify_center()
-                    .size(px(24.0))
+                    .size(px(26.0))
                     .rounded_full()
-                    .bg(colors.primary.alpha(0.06))
+                    .bg(colors.primary.alpha(0.045))
+                    .border_1()
+                    .border_color(colors.primary.alpha(0.07))
                     .text_size(px(11.0))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(colors.secondary)
@@ -519,11 +548,14 @@ impl SessionSurfaces {
             );
 
         let mut filters = div()
+            .id("overview-filters")
             .flex()
+            .flex_none()
             .items_center()
             .gap(px(6.0))
-            .px(px(24.0))
-            .pb(px(12.0));
+            .h(px(38.0))
+            .px(px(20.0))
+            .overflow_x_scroll();
         filters = filters.child(self.filter_chip(
             OverviewFilter::All,
             "All",
@@ -550,6 +582,7 @@ impl SessionSurfaces {
             filters = filters.child(
                 div()
                     .flex()
+                    .flex_none()
                     .items_center()
                     .gap(px(5.0))
                     .h(px(22.0))
@@ -575,16 +608,28 @@ impl SessionSurfaces {
             self.overview_list(&sessions, &state, colors, window, cx)
         };
 
+        let chrome = div()
+            .flex()
+            .flex_none()
+            .flex_col()
+            .bg(rgba(0x171921ff))
+            .child(header)
+            .child(filters)
+            .child(HairlineDivider::horizontal(colors));
+
         let content = div()
+            .debug_selector(|| "OVERVIEW_CONTENT".into())
             .absolute()
             .inset_0()
+            .size_full()
             .flex()
             .flex_col()
             .pt(px(42.0))
             .bg(colors.background)
+            .overflow_hidden()
+            .occlude()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .child(header)
-            .child(filters)
+            .child(chrome)
             .child(body)
             .when(!state.selection().is_empty(), |content| {
                 content.child(self.bulk_close_bar(state.selection().len(), visible_count, cx))
@@ -594,7 +639,10 @@ impl SessionSurfaces {
             .id("overview-scrim")
             .absolute()
             .inset_0()
+            .size_full()
             .bg(rgba(0x000000ff))
+            .occlude()
+            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(|this, _, _, cx| {
                 this.store
                     .write()
@@ -617,12 +665,13 @@ impl SessionSurfaces {
         let colors = SemanticColors::dark();
         div()
             .id(SharedString::from(format!("overview-mode-{label}")))
+            .flex_none()
             .h(px(24.0))
-            .px(px(8.0))
+            .px(px(10.0))
             .flex()
             .items_center()
             .rounded(px(Radius::BADGE))
-            .bg(colors.primary.alpha(if active { 0.10 } else { 0.04 }))
+            .bg(colors.primary.alpha(if active { 0.10 } else { 0.0 }))
             .text_size(px(11.0))
             .text_color(if active {
                 colors.primary
@@ -630,6 +679,7 @@ impl SessionSurfaces {
                 colors.secondary
             })
             .cursor_pointer()
+            .hover(|style| style.bg(colors.primary.alpha(if active { 0.12 } else { 0.055 })))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.store
                     .write()
@@ -654,6 +704,7 @@ impl SessionSurfaces {
         div()
             .id(SharedString::from(format!("overview-filter-{label}")))
             .flex()
+            .flex_none()
             .items_center()
             .gap(px(5.0))
             .h(px(22.0))
@@ -669,6 +720,7 @@ impl SessionSurfaces {
                 colors.secondary
             })
             .cursor_pointer()
+            .hover(|style| style.bg(colors.primary.alpha(if active { 0.12 } else { 0.05 })))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.store
                     .write()
@@ -732,29 +784,55 @@ impl SessionSurfaces {
             OverviewFilter::All => OverviewLane::ALL.to_vec(),
             OverviewFilter::Lane(lane) => vec![lane],
         };
+        let bottom_padding = if state.selection().is_empty() {
+            18.0
+        } else {
+            82.0
+        };
         let mut board = div()
             .id("overview-board")
+            .debug_selector(|| "OVERVIEW_BOARD".into())
             .flex()
             .flex_1()
-            .gap(px(14.0))
-            .px(px(24.0))
-            .pb(px(88.0))
+            .min_w_0()
+            .min_h_0()
+            .items_stretch()
+            .gap(px(12.0))
+            .px(px(20.0))
+            .pt(px(14.0))
+            .pb(px(bottom_padding))
+            .track_scroll(&self.overview_board_scroll)
             .overflow_x_scroll();
+        // Do not reinterpret a vertical wheel as horizontal board movement;
+        // the lane under the pointer owns that axis.
+        board.style().restrict_scroll_to_axis = Some(true);
         for lane in lanes {
             let lane_sessions = state.lane_sessions(lane, sessions);
+            let count = lane_sessions.len();
+            let lane_scroll = self
+                .overview_lane_scrolls
+                .get(&lane)
+                .expect("every overview lane has a scroll handle")
+                .clone();
             let mut cards = div()
                 .id(SharedString::from(format!(
                     "overview-lane-{}",
                     lane.label()
                 )))
+                .debug_selector(|| format!("OVERVIEW_LANE_{}", lane.label().to_uppercase()))
                 .flex()
+                .flex_1()
                 .flex_col()
-                .gap(px(12.0))
+                .min_h_0()
+                .gap(px(10.0))
+                .p(px(10.0))
+                .pt(px(8.0))
+                .track_scroll(&lane_scroll)
                 .overflow_y_scroll();
+            cards.style().restrict_scroll_to_axis = Some(true);
             for session in lane_sessions {
                 cards = cards.child(self.overview_card(session, state, colors, window, cx));
             }
-            let count = state.lane_sessions(lane, sessions).len();
             board = board.child(
                 div()
                     .flex()
@@ -762,19 +840,39 @@ impl SessionSurfaces {
                     .flex_none()
                     .w(px(OVERVIEW_LANE_WIDTH))
                     .min_h_0()
-                    .gap(px(10.0))
+                    .overflow_hidden()
+                    .rounded(px(Radius::PANEL))
+                    .bg(colors.primary.alpha(0.026))
+                    .border_1()
+                    .border_color(colors.primary.alpha(0.065))
                     .child(
                         div()
                             .flex()
+                            .flex_none()
                             .items_center()
                             .gap(px(6.0))
-                            .px(px(2.0))
+                            .h(px(36.0))
+                            .px(px(11.0))
                             .text_size(px(11.0))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(colors.secondary)
                             .child(lane.label())
-                            .child(div().text_color(colors.tertiary).child(count.to_string())),
+                            .child(div().flex_1())
+                            .child(
+                                div()
+                                    .min_w(px(20.0))
+                                    .h(px(20.0))
+                                    .px(px(6.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_full()
+                                    .bg(colors.primary.alpha(0.055))
+                                    .text_color(colors.tertiary)
+                                    .child(count.to_string()),
+                            ),
                     )
+                    .child(HairlineDivider::horizontal(colors))
                     .child(cards),
             );
         }
@@ -790,15 +888,25 @@ impl SessionSurfaces {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let visible: Vec<_> = state.visible_sessions(sessions).cloned().collect();
+        let bottom_padding = if state.selection().is_empty() {
+            18.0
+        } else {
+            82.0
+        };
         let mut list = div()
             .id("overview-list")
+            .debug_selector(|| "OVERVIEW_LIST".into())
             .flex()
             .flex_1()
+            .min_h_0()
             .flex_col()
-            .gap(px(6.0))
-            .px(px(24.0))
-            .pb(px(88.0))
+            .gap(px(8.0))
+            .px(px(20.0))
+            .pt(px(14.0))
+            .pb(px(bottom_padding))
+            .track_scroll(&self.overview_list_scroll)
             .overflow_y_scroll();
+        list.style().restrict_scroll_to_axis = Some(true);
         for session in &visible {
             list = list.child(self.overview_list_row(session, state, colors, window, cx));
         }
@@ -824,17 +932,14 @@ impl SessionSurfaces {
         let mut thumbnail = div()
             .relative()
             .w_full()
-            .aspect_ratio(16.0 / 10.0)
-            .rounded(px(Radius::CARD))
+            .h(px(112.0))
+            .rounded(px(Radius::ROW))
             .overflow_hidden()
             .bg(colors.background)
             .border_1()
-            .border_color(if selected {
-                Palette::CLAY
-            } else if focused {
-                colors.primary.alpha(0.28)
-            } else {
-                colors.primary.alpha(0.10)
+            .border_color(colors.primary.alpha(0.075))
+            .when(session.hibernation.is_some(), |thumbnail| {
+                thumbnail.opacity(0.68)
             })
             .child(preview);
         if selected {
@@ -849,7 +954,12 @@ impl SessionSurfaces {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(sf_symbol("checkmark.circle.fill", 16.0, Palette::CLAY)),
+                    .child(sf_symbol_weighted(
+                        "checkmark",
+                        9.0,
+                        SymbolWeight::Bold,
+                        colors.primary,
+                    )),
             );
         } else if !has_selection {
             thumbnail = thumbnail.child(
@@ -889,12 +999,42 @@ impl SessionSurfaces {
 
         div()
             .id(SharedString::from(format!("overview-card-{}", &id.0)))
+            .debug_selector(|| format!("OVERVIEW_CARD_{}", &id.0))
             .group("overview-card")
             .flex()
+            .flex_none()
             .flex_col()
-            .gap(px(7.0))
+            .gap(px(8.0))
+            .p(px(8.0))
+            .rounded(px(Radius::CARD))
+            .bg(if selected {
+                Palette::CLAY.alpha(0.085)
+            } else if focused {
+                colors.primary.alpha(0.055)
+            } else {
+                colors.primary.alpha(0.032)
+            })
+            .border_1()
+            .border_color(if selected {
+                Palette::CLAY
+            } else if focused {
+                colors.primary.alpha(0.24)
+            } else {
+                colors.primary.alpha(0.06)
+            })
             .cursor_pointer()
-            .when(session.hibernation.is_some(), |card| card.opacity(0.65))
+            .hover(|style| {
+                if selected {
+                    style
+                        .bg(Palette::CLAY.alpha(0.105))
+                        .border_color(Palette::CLAY)
+                } else {
+                    style
+                        .bg(colors.primary.alpha(0.06))
+                        .border_color(colors.primary.alpha(0.12))
+                }
+            })
+            .active(|style| style.bg(colors.primary.alpha(0.075)))
             .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
                 if event.modifiers().platform {
                     this.store
@@ -916,6 +1056,7 @@ impl SessionSurfaces {
                     .items_center()
                     .gap(px(7.0))
                     .px(px(2.0))
+                    .pb(px(1.0))
                     .child(status)
                     .child(
                         div()
@@ -955,17 +1096,18 @@ impl SessionSurfaces {
         div()
             .id(SharedString::from(format!("overview-row-{}", &id.0)))
             .flex()
+            .flex_none()
             .items_center()
             .gap(px(10.0))
-            .h(px(66.0))
+            .h(px(68.0))
             .px(px(10.0))
             .rounded(px(Radius::ROW))
             .bg(colors.primary.alpha(if selected {
-                0.10
+                0.085
             } else if focused {
-                0.06
+                0.055
             } else {
-                0.025
+                0.028
             }))
             .border_1()
             .border_color(if selected {
@@ -974,6 +1116,16 @@ impl SessionSurfaces {
                 colors.primary.alpha(if focused { 0.18 } else { 0.06 })
             })
             .cursor_pointer()
+            .hover(|style| {
+                if selected {
+                    style
+                        .bg(colors.primary.alpha(0.10))
+                        .border_color(Palette::CLAY)
+                } else {
+                    style.bg(colors.primary.alpha(0.06))
+                }
+            })
+            .active(|style| style.bg(colors.primary.alpha(0.075)))
             .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
                 if event.modifiers().platform {
                     this.store
@@ -1017,8 +1169,11 @@ impl SessionSurfaces {
                     )
                     .child(
                         div()
+                            .min_w_0()
                             .text_size(px(11.0))
                             .text_color(colors.tertiary)
+                            .overflow_hidden()
+                            .text_ellipsis()
                             .child(session.cwd.clone()),
                     ),
             )
@@ -1308,5 +1463,186 @@ fn clamp_branch(branch: &str) -> String {
                 .iter()
                 .collect::<String>()
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use diri_proto::{
+        AgentKind as ProtoAgentKind, DateMillis, Project, ProjectId, Resumability,
+        SessionListResult, TitleSource,
+    };
+    use gpui::{ScrollDelta, ScrollWheelEvent, StyleRefinement, TestAppContext, size};
+
+    struct OverviewHarness {
+        surfaces: Entity<SessionSurfaces>,
+        background_scrolls: Arc<AtomicUsize>,
+    }
+
+    impl Render for OverviewHarness {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            let background_scrolls = Arc::clone(&self.background_scrolls);
+            div()
+                .size_full()
+                .child(div().absolute().inset_0().on_scroll_wheel(move |_, _, _| {
+                    background_scrolls.fetch_add(1, Ordering::Relaxed);
+                }))
+                .child(
+                    self.surfaces
+                        .clone()
+                        .cached(StyleRefinement::default().absolute().inset_0()),
+                )
+        }
+    }
+
+    fn session(index: usize) -> SessionRecord {
+        SessionRecord {
+            id: SessionId::new(format!("running-{index:02}")),
+            kind: ProtoAgentKind::CODEX,
+            cwd: "/work/overview".into(),
+            project_id: ProjectId::new("overview"),
+            worktree_path: None,
+            git_branch: Some(format!("feature/session-{index:02}")),
+            title: format!("Overflowing session {index:02}"),
+            title_source: TitleSource::AgentProvided,
+            agent_session_id: None,
+            transcript_path: None,
+            status: SessionStatus::Working,
+            needs_input: None,
+            resumability: Resumability::Live,
+            parent: None,
+            created_at: DateMillis(index as f64),
+            updated_at: DateMillis(index as f64),
+            last_turn_completed_at: None,
+            last_seen_at: None,
+            pinned: false,
+            archived_at: None,
+            remote_active: false,
+            host: None,
+            hibernation: None,
+            memory_bytes: None,
+            artifacts: None,
+            pull_requests: None,
+            listening_ports: None,
+            foreground_agent: None,
+        }
+    }
+
+    #[gpui::test]
+    fn overflowing_overview_lane_scrolls_without_reaching_the_background(cx: &mut TestAppContext) {
+        let runtime = Arc::new(StoreRuntime::inert());
+        runtime
+            .store
+            .write()
+            .expect("session store lock poisoned")
+            .hydrate(SessionListResult {
+                sessions: (0..18).map(session).collect(),
+                projects: vec![Project {
+                    id: ProjectId::new("overview"),
+                    root: "/work/overview".into(),
+                    name: "Overview".into(),
+                    pinned_order: None,
+                }],
+            });
+        runtime
+            .store
+            .write()
+            .expect("session store lock poisoned")
+            .toggle_overview();
+
+        let background_scrolls = Arc::new(AtomicUsize::new(0));
+        let background_probe = Arc::clone(&background_scrolls);
+        let (view, cx) = cx.add_window_view(move |_window, cx| OverviewHarness {
+            surfaces: cx.new(|cx| SessionSurfaces::new(runtime, cx)),
+            background_scrolls: background_probe,
+        });
+        cx.simulate_resize(size(px(1100.0), px(700.0)));
+
+        let surfaces = view.read_with(cx, |harness, _| harness.surfaces.clone());
+        let lane_bounds = cx
+            .debug_bounds("OVERVIEW_LANE_RUNNING")
+            .expect("running lane should render");
+        let board_bounds = cx
+            .debug_bounds("OVERVIEW_BOARD")
+            .expect("overview board should render");
+        let content_bounds = cx
+            .debug_bounds("OVERVIEW_CONTENT")
+            .expect("overview content should render");
+        assert_eq!(
+            content_bounds.size,
+            size(px(1100.0), px(700.0)),
+            "the opaque overview surface must cover the full cached viewport"
+        );
+        assert!(
+            lane_bounds.size.height > px(300.0),
+            "the lane viewport must receive the available window height"
+        );
+        let max_offset = surfaces.read_with(cx, |surfaces, _| {
+            surfaces
+                .overview_lane_scrolls
+                .get(&OverviewLane::Running)
+                .expect("running scroll handle")
+                .max_offset()
+        });
+        assert!(
+            max_offset.y > px(0.0),
+            "overflowing lane must have a bounded, scrollable viewport"
+        );
+        assert!(
+            surfaces
+                .read_with(cx, |surfaces, _| surfaces
+                    .overview_board_scroll
+                    .max_offset())
+                .x
+                > px(0.0),
+            "the five-lane board should expose horizontal overflow"
+        );
+
+        cx.simulate_event(ScrollWheelEvent {
+            position: lane_bounds.center(),
+            delta: ScrollDelta::Pixels(point(px(0.0), px(-80.0))),
+            ..ScrollWheelEvent::default()
+        });
+
+        let offset = surfaces.read_with(cx, |surfaces, _| {
+            surfaces
+                .overview_lane_scrolls
+                .get(&OverviewLane::Running)
+                .expect("running scroll handle")
+                .offset()
+        });
+        assert!(
+            offset.y < px(0.0),
+            "wheel input should move the overview lane (content: {content_bounds:?}, board: {board_bounds:?}, lane: {lane_bounds:?}, offset: {offset:?}, max: {max_offset:?}, background events: {})",
+            background_scrolls.load(Ordering::Relaxed),
+        );
+        assert_eq!(
+            surfaces
+                .read_with(cx, |surfaces, _| surfaces.overview_board_scroll.offset())
+                .x,
+            px(0.0),
+            "vertical lane scrolling must not shift the board sideways"
+        );
+
+        cx.simulate_event(ScrollWheelEvent {
+            position: lane_bounds.center(),
+            delta: ScrollDelta::Pixels(point(px(-80.0), px(0.0))),
+            ..ScrollWheelEvent::default()
+        });
+        assert!(
+            surfaces
+                .read_with(cx, |surfaces, _| surfaces.overview_board_scroll.offset())
+                .x
+                < px(0.0),
+            "horizontal trackpad input should move the lane board"
+        );
+        assert_eq!(
+            background_scrolls.load(Ordering::Relaxed),
+            0,
+            "overview wheel input must not leak to the terminal behind it"
+        );
     }
 }

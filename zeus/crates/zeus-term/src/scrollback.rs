@@ -183,7 +183,11 @@ impl ScrollbackViewport {
     #[must_use]
     pub fn max_offset(&self, visible_rows: usize) -> i64 {
         if self.geometry_known {
-            self.total_rows.max(0)
+            // The history the daemon actually retains ends where the live grid
+            // starts. Clamping to total_rows (history + visible) let the
+            // viewport scroll a full screen past the oldest retained row,
+            // which painted as a large blank region above real content.
+            self.live_start_row.max(0)
         } else {
             self.view_offset
                 .saturating_add(i64::try_from(visible_rows).unwrap_or(i64::MAX))
@@ -610,6 +614,22 @@ mod tests {
             Poll::Ready(output) => output,
             Poll::Pending => panic!("fake fetcher unexpectedly yielded"),
         }
+    }
+
+    #[test]
+    fn max_offset_stops_at_the_oldest_retained_row() {
+        // 546 retained history rows + 77 visible = 623 total. Clamping to
+        // total_rows let the viewport scroll a full screen past the oldest
+        // retained row, painting blank above real content.
+        let mut viewport = ScrollbackViewport::default();
+        viewport.apply_geometry(546, 623, 1, 77);
+        assert_eq!(viewport.max_offset(77), 546);
+        viewport.scroll_by(1_000, 77);
+        assert_eq!(
+            viewport.view_offset(),
+            546,
+            "scrolling clamps at the oldest retained row"
+        );
     }
 
     #[test]

@@ -90,6 +90,12 @@ struct Shared {
     last_hot: AtomicU64,
     /// URLs scanned off the visible screen (PRs, previews, links).
     artifacts: Mutex<Vec<diri_proto::SessionArtifact>>,
+    /// True while the child tree is SIGSTOPped. Writing into a stopped
+    /// tree's PTY wedges (nobody drains the slave; the buffer fills), so
+    /// input is queued instead and flushed right after SIGCONT.
+    hibernated: AtomicBool,
+    /// Input received while hibernated, in arrival order.
+    queued_input: Mutex<Vec<u8>>,
     /// The child's pid, for tree enumeration by the resource governor.
     child_pid: std::sync::atomic::AtomicI32,
 }
@@ -465,6 +471,25 @@ impl Session {
             .scrollback_cells(first_row, max_rows)
     }
 
+    /// Marks the session hibernated (input queues) or awake. On wake, the
+    /// queued input flushes in order — right after the caller's SIGCONT, as
+    /// the Swift daemon's wake() did.
+    pub fn set_hibernated(&self, hibernated: bool) -> std::io::Result<()> {
+        self.shared.hibernated.store(hibernated, Ordering::SeqCst);
+        if hibernated {
+            return Ok(());
+        }
+        let queued = std::mem::take(&mut *self.shared.queued_input.lock().expect("queued input"));
+        if queued.is_empty() {
+            return Ok(());
+        }
+        self.write_raw(&queued)
+    }
+
+    pub fn is_hibernated(&self) -> bool {
+        self.shared.hibernated.load(Ordering::SeqCst)
+    }
+
     /// Signals the whole child tree. For held sessions the holder walks the
     /// tree with pid-identity checks; a direct session signals its group.
     /// Returns the (pid, start-time) samples the holder observed, when held.
@@ -484,6 +509,14 @@ impl Session {
     }
 
     fn write_raw(&self, bytes: &[u8]) -> std::io::Result<()> {
+        if self.shared.hibernated.load(Ordering::SeqCst) {
+            self.shared
+                .queued_input
+                .lock()
+                .expect("queued input")
+                .extend_from_slice(bytes);
+            return Ok(());
+        }
         match &self.transport {
             Transport::Direct(pty) => {
                 use std::io::Write;
@@ -522,6 +555,17 @@ impl Session {
         // Input means someone is interacting: keep the pump on its fast tick
         // so the echo renders promptly.
         self.shared.note_hot();
+        if self.shared.hibernated.load(Ordering::SeqCst) {
+            // Never write into a stopped tree's PTY (nobody drains the slave;
+            // the buffer fills and writes wedge) — queue for the wake flush.
+            self.shared
+                .queued_input
+                .lock()
+                .expect("queued input")
+                .extend_from_slice(bytes);
+            self.feed_signal(StatusSignal::UserKeystroke);
+            return Ok(());
+        }
         match &self.transport {
             Transport::Direct(pty) => {
                 use std::io::Write;
@@ -639,6 +683,8 @@ fn new_shared(spec: &SessionSpec, log: OutputLog) -> Arc<Shared> {
         state_version: AtomicU64::new(0),
         last_hot: AtomicU64::new(unix_secs()),
         artifacts: Mutex::new(Vec::new()),
+        hibernated: AtomicBool::new(false),
+        queued_input: Mutex::new(Vec::new()),
         child_pid: std::sync::atomic::AtomicI32::new(0),
     })
 }

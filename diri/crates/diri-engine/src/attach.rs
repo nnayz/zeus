@@ -65,6 +65,13 @@ impl AttachHub {
         buffered: Vec<u8>,
         writer: Arc<Mutex<UnixStream>>,
     ) {
+        // Selecting a hibernated session revives it: the seed below paints
+        // instantly from the emulator, and the live program resumes
+        // underneath — the Swift attach() behavior.
+        {
+            let Ok(mut guard) = registry.lock() else { return };
+            let _ = guard.wake_session(session_id);
+        }
         // Seed before registering: the full snapshot must be the sink's first
         // frame, ahead of any diff the pump broadcasts.
         {
@@ -115,9 +122,14 @@ impl AttachHub {
         writer: &Arc<Mutex<UnixStream>>,
         frame: &Frame,
     ) -> bool {
-        let Ok(guard) = registry.lock() else {
+        let Ok(mut guard) = registry.lock() else {
             return false;
         };
+        if matches!(frame.frame_type, FrameType::Input) {
+            // Input to a frozen session wakes it; write_input's queue covers
+            // the race where the governor froze it mid-keystroke.
+            let _ = guard.wake_session(session_id);
+        }
         let Some(session) = guard.get(session_id) else {
             return true; // session ended; swallow input quietly, as Swift does
         };

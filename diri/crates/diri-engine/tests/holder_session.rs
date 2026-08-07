@@ -233,3 +233,60 @@ fn record(id: &str) -> diri_proto::SessionRecord {
         foreground_agent: None,
     }
 }
+
+/// The wake-on-input contract: typing into a SIGSTOPped session queues the
+/// bytes (never wedging the PTY), and waking flushes them in order — no
+/// keystroke lost, the reply arrives after SIGCONT.
+#[test]
+fn input_to_a_hibernated_session_queues_and_flushes_on_wake() {
+    let root = holders_dir("hib");
+    let logs = root.join("logs");
+    let holder = holder_config(&root);
+    let state_file = root.join("state.json");
+
+    let mut registry = Registry::new(engine(), &state_file);
+    registry
+        .spawn(
+            shell_spec("s_hib", "cat", &logs, Some(holder.clone())),
+            record("s_hib"),
+        )
+        .expect("spawn");
+    wait_until("cat is up", Duration::from_secs(5), || {
+        registry.get("s_hib").is_some_and(|s| s.child_pid() > 1)
+    });
+
+    registry
+        .hibernate("s_hib", diri_proto::HibernationReason::Manual)
+        .expect("hibernate");
+
+    // Typed while frozen: queued, not written — cat can't echo while stopped.
+    registry
+        .get("s_hib")
+        .expect("session")
+        .write_input(b"typed-while-frozen\n")
+        .expect("queued write");
+    std::thread::sleep(Duration::from_millis(600));
+    assert!(
+        !log_contains(&logs, "s_hib", b"typed-while-frozen"),
+        "a stopped tree must not echo"
+    );
+
+    // Wake: SIGCONT + flush; the echo lands and the record clears.
+    registry.wake_session("s_hib").expect("wake");
+    wait_until("queued input flushed", Duration::from_secs(5), || {
+        log_contains(&logs, "s_hib", b"typed-while-frozen")
+    });
+    assert!(
+        registry
+            .records()
+            .iter()
+            .find(|r| r.id.0 == "s_hib")
+            .expect("record")
+            .hibernation
+            .is_none()
+    );
+
+    registry
+        .terminate("s_hib", Duration::from_secs(2))
+        .expect("terminate");
+}

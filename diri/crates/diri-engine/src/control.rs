@@ -1152,7 +1152,11 @@ impl ControlServer {
 
     fn session_send_text(&self, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
         let p: diri_proto::SendTextParams = decode(params)?;
-        let registry = self.registry.lock().map_err(poisoned)?;
+        let mut registry = self.registry.lock().map_err(poisoned)?;
+        // Typing into a hibernated session wakes it; the text is queued and
+        // flushed after SIGCONT, so no keystroke is lost.
+        let _ = registry.wake_session(&p.session_id.0);
+        self.publish_updated(&registry, &p.session_id.0);
         let session = registry
             .get(&p.session_id.0)
             .ok_or_else(|| ControlError::not_found(p.session_id.0.clone()))?;
@@ -1541,15 +1545,9 @@ impl ControlServer {
     fn session_wake(&self, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
         let p: diri_proto::SessionIdParams = decode(params)?;
         let mut registry = self.registry.lock().map_err(poisoned)?;
-        {
-            let session = registry
-                .get(&p.session_id.0)
-                .ok_or_else(|| ControlError::not_found(p.session_id.0.clone()))?;
-            session
-                .signal_tree(libc::SIGCONT)
-                .map_err(|error| ControlError::internal(error.to_string()))?;
-        }
-        registry.set_hibernation(&p.session_id.0, None);
+        registry
+            .wake_session(&p.session_id.0)
+            .map_err(|error| ControlError::internal(error.to_string()))?;
         let _ = registry.persist();
         self.publish_updated(&registry, &p.session_id.0);
         Ok(json!({}))

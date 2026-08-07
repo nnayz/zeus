@@ -185,20 +185,63 @@ fn main() {
     }
 }
 
+/// The user's real login shell from the user database. Authoritative even
+/// under launchd, where the SHELL env var is often /bin/zsh regardless of the
+/// user's configured shell (a fish user's PATH lives in config.fish, which
+/// zsh would never source).
+#[cfg(unix)]
+fn login_shell() -> String {
+    // SAFETY: getpwuid returns a pointer to a static per-thread record; it is
+    // read immediately and never retained.
+    unsafe {
+        let record = libc::getpwuid(libc::getuid());
+        if !record.is_null() {
+            let shell = std::ffi::CStr::from_ptr((*record).pw_shell);
+            if let Ok(shell) = shell.to_str()
+                && !shell.is_empty()
+                && Path::new(shell).exists()
+            {
+                return shell.to_owned();
+            }
+        }
+    }
+    std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into())
+}
+
+/// Mirrors the Swift daemon's `LoginEnvironment`: `printenv PATH` prints the
+/// real colon-separated variable regardless of shell — fish stores $PATH as a
+/// space-separated list, so `echo $PATH` produces garbage there — and `-i -l`
+/// sources both interactive and login files, which is where agent PATHs are
+/// actually configured.
 #[cfg(unix)]
 fn login_path() -> Option<String> {
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
-    let output = std::process::Command::new(&shell)
-        .args(["-l", "-c", "echo __DIRI_PATH__=$PATH"])
+    let fallback = || {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+        format!("{home}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
+    };
+    let output = std::process::Command::new(login_shell())
+        .args(["-i", "-l", "-c", "printenv PATH"])
         .output()
         .ok()?;
     let stdout = String::from_utf8_lossy(&output.stdout);
+    // Interactive shells may print a greeting; take the last line that looks
+    // like a PATH.
     let path = stdout
         .lines()
-        .find_map(|line| line.strip_prefix("__DIRI_PATH__="))?
-        .trim()
-        .to_string();
-    (!path.is_empty()).then_some(path)
+        .rev()
+        .map(str::trim)
+        .find(|line| line.contains('/'))
+        .map(str::to_owned)?;
+    if path.is_empty() {
+        return Some(fallback());
+    }
+    // A single-entry answer smells like a broken profile: keep it, but append
+    // the standard locations so spawns still work.
+    Some(if path.contains(':') {
+        path
+    } else {
+        format!("{path}:{}", fallback())
+    })
 }
 
 #[cfg(unix)]

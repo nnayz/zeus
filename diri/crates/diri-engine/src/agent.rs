@@ -155,6 +155,26 @@ impl AgentDescriptor {
             spec.env.retain(|(existing, _)| existing != key);
             spec.env.push((key.clone(), value.clone()));
         }
+        // Resolve a bare binary name to an absolute path against the spec's
+        // own PATH, the way the Swift daemon's LoginEnvironment.resolve did.
+        // The process that finally execs this argv may be a long-lived holder
+        // manager whose launchd-minimal environment predates this daemon —
+        // posix_spawnp searches the *caller's* PATH, not the child's, so a
+        // bare "claude" exits 127 there no matter what env the spec carries.
+        if let Some(first) = spec.argv.first_mut()
+            && !first.contains('/')
+        {
+            let path = spec
+                .env
+                .iter()
+                .rev()
+                .find(|(key, _)| key == "PATH")
+                .map(|(_, value)| value.clone())
+                .or_else(|| std::env::var("PATH").ok());
+            if let Some(resolved) = path.as_deref().and_then(|path| resolve_on_path(first, path)) {
+                *first = resolved;
+            }
+        }
         Some(spec)
     }
 
@@ -163,7 +183,35 @@ impl AgentDescriptor {
             .iter()
             .any(|prefix| key.starts_with(prefix))
     }
+}
 
+/// Absolute path of `binary` searched across a colon-separated `path`, or
+/// `None` when nothing executable matches (the spawn then fails with its
+/// honest error instead of a misleading one).
+fn resolve_on_path(binary: &str, path: &str) -> Option<String> {
+    for dir in path.split(':').filter(|dir| !dir.is_empty()) {
+        let candidate = std::path::Path::new(dir).join(binary);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(metadata) = std::fs::metadata(&candidate)
+                && metadata.is_file()
+                && metadata.permissions().mode() & 0o111 != 0
+            {
+                return Some(candidate.to_string_lossy().into_owned());
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            if candidate.is_file() {
+                return Some(candidate.to_string_lossy().into_owned());
+            }
+        }
+    }
+    None
+}
+
+impl AgentDescriptor {
     /// The argv tail that resumes an existing conversation, if the agent can.
     pub fn resume_args(&self, agent_session_id: Option<&str>) -> Option<Vec<String>> {
         let resume = self.resume.as_ref()?;
@@ -242,6 +290,43 @@ mod tests {
             "inherited agent state must not leak: {keys:?}"
         );
         assert!(!keys.contains(&"CLAUDECODE"));
+    }
+
+    #[test]
+    fn bare_binaries_resolve_to_absolute_paths_for_foreign_executors() {
+        // The holder manager that execs the argv may carry a launchd-minimal
+        // PATH from a previous era; posix_spawnp searches the caller's PATH,
+        // so a bare name must leave the daemon already absolute. This is the
+        // "every ⌘T exits 127" failure.
+        assert_eq!(
+            resolve_on_path("true", "/nonexistent:/usr/bin"),
+            Some("/usr/bin/true".to_string())
+        );
+        assert_eq!(resolve_on_path("no-such-binary-anywhere", "/usr/bin"), None);
+
+        // End to end through spawn_spec: a stub `claude` on the spec's PATH.
+        let bin_dir = tempfile::tempdir().expect("temp dir");
+        let stub = bin_dir.path().join("claude");
+        std::fs::write(&stub, "#!/bin/sh\n").expect("stub");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod");
+        }
+        let claude = descriptor("claude-code");
+        let inherited = [(
+            "PATH".to_string(),
+            bin_dir.path().to_string_lossy().into_owned(),
+        )];
+        let spec = claude
+            .spawn_spec(Path::new("/tmp"), inherited, &[])
+            .expect("claude has a binary");
+        assert_eq!(
+            spec.argv[0],
+            stub.to_string_lossy(),
+            "argv[0] must leave the daemon already absolute"
+        );
     }
 
     #[test]

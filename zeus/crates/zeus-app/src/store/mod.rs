@@ -1473,8 +1473,11 @@ impl SessionStore {
         if self
             .sessions
             .get(&id)
-            .is_some_and(|session| session.attention() == AttentionLevel::DoneUnseen)
+            .is_some_and(|session| !session.is_archived())
         {
+            // Selection is also the PR/artifact visibility signal. The
+            // daemon uses mark_seen to wake a fresh foreground refresh, even
+            // when there was no unseen completion to acknowledge.
             self.emit(StoreEffect::MarkSeen(id.clone()));
         }
         self.auto_resume_if_needed(&id);

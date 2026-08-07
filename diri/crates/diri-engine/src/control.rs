@@ -1020,7 +1020,7 @@ impl ControlServer {
     }
 
     fn daemon_prepare_shutdown(&self) -> Result<JsonValue, ControlError> {
-        let registry = self.registry.lock().map_err(poisoned)?;
+        let mut registry = self.registry.lock().map_err(poisoned)?;
         let _ = registry.persist();
         Ok(json!({}))
     }
@@ -1030,7 +1030,7 @@ impl ControlServer {
     /// relaunches the fresh binary.
     fn daemon_shutdown(&self) -> Result<JsonValue, ControlError> {
         {
-            let registry = self.registry.lock().map_err(poisoned)?;
+            let mut registry = self.registry.lock().map_err(poisoned)?;
             let _ = registry.persist();
         }
         std::thread::spawn(|| {
@@ -1186,14 +1186,6 @@ fn write_message(
 
 fn poisoned<T>(_: T) -> ControlError {
     ControlError::internal("engine state is poisoned")
-}
-
-fn string_field(params: &JsonValue, name: &str) -> Result<String, ControlError> {
-    params
-        .get(name)
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .ok_or_else(|| ControlError::bad_request(format!("{name} must be a string")))
 }
 
 /// Decodes params into the shared `diri-proto` type for the method — the same

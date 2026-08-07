@@ -85,19 +85,17 @@ impl AttachHub {
         let sink_id = self.next_sink.fetch_add(1, Ordering::SeqCst);
         self.register(registry, session_id, sink_id, Arc::clone(&writer));
 
-        // The read loop is this connection's thread.
+        // The read loop is this connection's thread. A feed error means a
+        // corrupt stream; a false from handle_frame means the peer's write
+        // half died — both end the whole serve.
         let mut codec = FrameCodec::new();
         let mut chunk = [0u8; 64 << 10];
         let mut pending = buffered;
-        loop {
-            let frames = match codec.feed(&pending) {
-                Ok(frames) => frames,
-                Err(_) => break, // corrupt stream
-            };
+        'serve: while let Ok(frames) = codec.feed(&pending) {
             pending.clear();
             for frame in frames {
                 if !self.handle_frame(registry, session_id, &writer, &frame) {
-                    break;
+                    break 'serve;
                 }
             }
             match reader.read(&mut chunk) {

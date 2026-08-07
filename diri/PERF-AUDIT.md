@@ -6,7 +6,9 @@ B3 scoped to static coders + off-actor writes/probes (a persistent holder
 connection needs a protocol migration old live holders would not survive —
 deliberately not done); C1, C2 (adaptive tick + attach-driven hot signal, not
 kqueue), C3, C4, C5, C7, C10, and the direct pump's 8KiB→64KiB buffer. Plus
-`[profile.release]` thin LTO + codegen-units=1.
+`[profile.release]` thin LTO + codegen-units=1 — **later reverted**: both make
+the linker reject gpui_macos's Objective-C statics ("pointer not aligned"),
+nondeterministically; the release profile is back to defaults.
 
 **Second pass (2026-08-07):** instant session switching landed — evicted
 sessions park their last-known grid (bounded MRU, ~100KB each) and re-selection

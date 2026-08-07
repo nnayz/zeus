@@ -46,11 +46,11 @@ tempfile = "3"
 tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 unicode-segmentation = "1"
 
-[profile.release]
-# Shipped binaries do per-frame text shaping and grid diffing; thin LTO plus a
-# single codegen unit is a measurable CPU and size win for slower builds.
-lto = "thin"
-codegen-units = 1
+# No [profile.release] overrides, deliberately: both `lto = "thin"` and
+# `codegen-units = 1` make the linker reject gpui_macos's Objective-C statics
+# ("ld: pointer not aligned in 'ltmp1'") — nondeterministically, depending on
+# codegen partitioning, which is worse than a hard failure in a release
+# pipeline. Revisit if the vendored gpui_macos patch or rustc changes.
 
 [patch."https://github.com/zed-industries/zed.git"]
 # Diri does not use GPUI vector paths during normal rendering: brand marks are

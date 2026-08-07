@@ -88,6 +88,10 @@ struct Shared {
     /// Seconds since UNIX_EPOCH of the last attach-pump poll or input write.
     /// Keeps interactive sessions on the fast quiet-tick.
     last_hot: AtomicU64,
+    /// URLs scanned off the visible screen (PRs, previews, links).
+    artifacts: Mutex<Vec<diri_proto::SessionArtifact>>,
+    /// The child's pid, for tree enumeration by the resource governor.
+    child_pid: std::sync::atomic::AtomicI32,
 }
 
 impl Shared {
@@ -188,6 +192,9 @@ impl Session {
         let pty = Pty::spawn(&spec.pty)?;
         let log = OutputLog::writer(&spec.logs_dir, &spec.id)?;
         let shared = new_shared(&spec, log);
+        shared
+            .child_pid
+            .store(pty.pid() as i32, Ordering::SeqCst);
 
         let reader = pty.reader()?;
         let pty = Arc::new(Mutex::new(pty));
@@ -281,6 +288,9 @@ impl Session {
     ) -> std::io::Result<Self> {
         let log = OutputLog::reader(&spec.logs_dir, &spec.id)?;
         let shared = new_shared(&spec, log);
+        if let Ok(stat) = client.stat() {
+            shared.child_pid.store(stat.child_pid, Ordering::SeqCst);
+        }
 
         let pump = {
             let shared = Arc::clone(&shared);
@@ -346,6 +356,16 @@ impl Session {
     }
 
     /// The emulator's current geometry.
+    /// URLs the screen has shown, for the artifacts inspector.
+    pub fn artifacts(&self) -> Vec<diri_proto::SessionArtifact> {
+        self.shared.artifacts.lock().expect("artifacts").clone()
+    }
+
+    /// The child's pid (0 before it is known), for tree enumeration.
+    pub fn child_pid(&self) -> i32 {
+        self.shared.child_pid.load(Ordering::SeqCst)
+    }
+
     pub fn screen_size(&self) -> (usize, usize) {
         self.shared.screen.lock().expect("screen").size()
     }
@@ -599,6 +619,8 @@ fn new_shared(spec: &SessionSpec, log: OutputLog) -> Arc<Shared> {
         stop: AtomicBool::new(false),
         state_version: AtomicU64::new(0),
         last_hot: AtomicU64::new(unix_secs()),
+        artifacts: Mutex::new(Vec::new()),
+        child_pid: std::sync::atomic::AtomicI32::new(0),
     })
 }
 
@@ -678,6 +700,35 @@ fn apply(shared: &Shared, outcome: &ReducerOutcome) {
     }
 }
 
+/// Rescans the visible screen for artifact URLs every ~2s, only when the
+/// content actually changed and only when it plausibly contains a URL —
+/// most screens never pay more than a substring check.
+fn scan_artifacts_if_due(
+    shared: &Shared,
+    last_scan_at: &mut Option<std::time::Instant>,
+    last_scan_seq: &mut u64,
+) {
+    if last_scan_at.is_some_and(|at| at.elapsed() < Duration::from_secs(2)) {
+        return;
+    }
+    *last_scan_at = Some(std::time::Instant::now());
+    let (seq, text) = {
+        let screen = shared.screen.lock().expect("screen");
+        let seq = screen.content_seq();
+        if seq == *last_scan_seq {
+            return;
+        }
+        (seq, screen.lines().join("\n"))
+    };
+    *last_scan_seq = seq;
+    if !(text.contains("http") || text.contains("github.com") || text.contains("linear.app")) {
+        return;
+    }
+    let now = diri_proto::DateMillis::from(SystemTime::now());
+    let mut artifacts = shared.artifacts.lock().expect("artifacts");
+    *artifacts = crate::artifacts::scan(&text, &artifacts, now);
+}
+
 /// The read/evaluate/reduce loop.
 ///
 /// Waits on the terminal with a timeout rather than blocking in `read`. Two
@@ -697,12 +748,15 @@ fn pump(
     let mut buffer = [0u8; 64 << 10];
     let mut last_tick = SystemTime::now();
     let mut last_eval_seq = 0u64;
+    let mut last_scan_at = None;
+    let mut last_scan_seq = 0u64;
     let fd = reader.as_raw_fd();
 
     loop {
         if shared.stop.load(Ordering::SeqCst) {
             break;
         }
+        scan_artifacts_if_due(&shared, &mut last_scan_at, &mut last_scan_seq);
 
         // Wait for output, but never longer than a tick. Output interrupts the
         // wait immediately, so the idle tick only slows reducer timers — which
@@ -849,12 +903,15 @@ fn pump_held(
     let mut marker_buffer: Vec<u8> = Vec::new();
     let mut last_liveness = Instant::now();
     let mut last_eval_seq = 0u64;
+    let mut last_scan_at = None;
+    let mut last_scan_seq = 0u64;
     let mut exit_status: Option<HolderExitStatus> = None;
     // Until the tail is first caught up, bytes are history, not activity:
     // they must render, but not flip a quiet adopted session to Working.
     let mut replaying = true;
 
     while !shared.stop.load(Ordering::SeqCst) && exit_status.is_none() {
+        scan_artifacts_if_due(&shared, &mut last_scan_at, &mut last_scan_seq);
         let (start, chunk) = {
             let mut log = shared.log.lock().expect("log");
             log.refresh_from_disk();

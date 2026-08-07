@@ -136,6 +136,19 @@ fn main() {
         server.events(),
         Arc::new(AtomicBool::new(false)),
     );
+    let _governor = diri_engine::governor::spawn_governor(
+        Arc::clone(&registry),
+        server.events(),
+        server.attach_hub(),
+        server.governor_config(),
+        Arc::new(AtomicBool::new(false)),
+    );
+    let _pr_monitor = diri_engine::pr_monitor::spawn_pr_monitor(
+        Arc::clone(&registry),
+        server.events(),
+        server.attach_hub(),
+        Arc::new(AtomicBool::new(false)),
+    );
     let _persist_flusher = diri_engine::registry::spawn_persist_flusher(
         Arc::clone(&registry),
         Arc::new(AtomicBool::new(false)),

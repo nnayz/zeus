@@ -173,6 +173,16 @@ impl AttachHub {
         }
     }
 
+    /// Whether any client is currently attached to `session_id` — the
+    /// governor's "someone is looking at this" signal.
+    pub fn has_sinks(&self, session_id: &str) -> bool {
+        self.sessions
+            .lock()
+            .expect("attach hub")
+            .get(session_id)
+            .is_some_and(|entry| !entry.sinks.is_empty())
+    }
+
     fn deregister(&self, session_id: &str, sink_id: u64) {
         let mut sessions = self.sessions.lock().expect("attach hub");
         if let Some(entry) = sessions.get_mut(session_id) {

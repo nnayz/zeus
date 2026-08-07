@@ -19,11 +19,13 @@
 //!   sessions.
 
 pub mod agent;
+pub mod artifacts;
 pub mod attach;
 pub mod control;
 pub mod detect;
 pub mod events;
 pub mod git;
+pub mod governor;
 pub mod history;
 #[cfg(unix)]
 pub mod holder;
@@ -31,6 +33,7 @@ pub mod hooks;
 pub mod inject;
 pub mod log;
 pub mod mcp;
+pub mod pr_monitor;
 pub mod pty;
 pub mod registry;
 pub mod remote;

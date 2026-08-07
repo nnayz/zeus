@@ -34,6 +34,7 @@ pub struct ControlServer {
     events: crate::events::EventBus,
     attach: crate::attach::AttachHub,
     injection: Option<InjectionConfig>,
+    governor: std::sync::Arc<Mutex<crate::governor::GovernorConfig>>,
 }
 
 /// Where injection files live and which CLI they point at. Present, spawns
@@ -59,6 +60,9 @@ impl ControlServer {
             events: crate::events::EventBus::new(),
             attach: crate::attach::AttachHub::new(),
             injection: None,
+            governor: std::sync::Arc::new(Mutex::new(
+                crate::governor::GovernorConfig::default(),
+            )),
         }
     }
 
@@ -76,6 +80,16 @@ impl ControlServer {
     /// registry watcher (see [`crate::events::spawn_registry_watcher`]).
     pub fn events(&self) -> crate::events::EventBus {
         self.events.clone()
+    }
+
+    /// The attach hub, for the resource governor's attached-session checks.
+    pub fn attach_hub(&self) -> crate::attach::AttachHub {
+        self.attach.clone()
+    }
+
+    /// The governor tunables `governor.configure` updates in place.
+    pub fn governor_config(&self) -> std::sync::Arc<Mutex<crate::governor::GovernorConfig>> {
+        std::sync::Arc::clone(&self.governor)
     }
 
     /// Where session output logs are written. Defaults to `logs/` beside the
@@ -369,12 +383,11 @@ impl ControlServer {
             Method::SESSION_WAKE => self.session_wake(params),
             Method::DAEMON_PREPARE_SHUTDOWN => self.daemon_prepare_shutdown(),
             Method::DAEMON_SHUTDOWN => self.daemon_shutdown(),
-            // Ownership arbitration and the governor's active-client hinting
-            // are desktop/mobile features this engine does not model yet;
+            Method::GOVERNOR_CONFIGURE => self.governor_configure(params),
+            // Ownership arbitration and the active-client hinting are
+            // desktop/mobile features this engine does not model yet;
             // accepting them keeps clients on their happy path.
-            Method::SESSION_SET_OWNER | Method::CLIENT_SET_ACTIVE | Method::GOVERNOR_CONFIGURE => {
-                Ok(json!({}))
-            }
+            Method::SESSION_SET_OWNER | Method::CLIENT_SET_ACTIVE => Ok(json!({})),
             other => Err(ControlError::not_found(format!(
                 "method {other:?} is not implemented by this engine yet"
             ))),
@@ -977,26 +990,22 @@ impl ControlServer {
 
     /// SIGSTOPs the session's whole tree and records it as hibernated. The
     /// PTY and holder stay alive; wake is one SIGCONT away.
+    /// Updates the two governor tunables the app exposes; the rest keep the
+    /// Swift defaults. Applies on the governor's next sweep.
+    fn governor_configure(&self, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
+        let p: diri_proto::GovernorSettingsParams = decode(params)?;
+        let mut config = self.governor.lock().map_err(poisoned)?;
+        config.idle_threshold_seconds = p.idle_threshold_seconds.max(0.0);
+        config.hard_memory_bytes = p.hard_memory_bytes;
+        Ok(json!({}))
+    }
+
     fn session_hibernate(&self, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
         let p: diri_proto::SessionIdParams = decode(params)?;
         let mut registry = self.registry.lock().map_err(poisoned)?;
-        let tree = {
-            let session = registry
-                .get(&p.session_id.0)
-                .ok_or_else(|| ControlError::not_found(p.session_id.0.clone()))?;
-            session
-                .signal_tree(libc::SIGSTOP)
-                .map_err(|error| ControlError::internal(error.to_string()))?
-        };
-        registry.set_hibernation(
-            &p.session_id.0,
-            Some(diri_proto::HibernationInfo {
-                since: std::time::SystemTime::now().into(),
-                reason: diri_proto::HibernationReason::Manual,
-                tree_pids: tree.iter().map(|(pid, _)| *pid).collect(),
-                tree_start_times: Some(tree.into_iter().collect()),
-            }),
-        );
+        registry
+            .hibernate(&p.session_id.0, diri_proto::HibernationReason::Manual)
+            .map_err(io_control_error)?;
         let _ = registry.persist();
         self.publish_updated(&registry, &p.session_id.0);
         Ok(json!({}))

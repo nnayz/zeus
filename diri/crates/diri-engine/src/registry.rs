@@ -436,6 +436,106 @@ impl Registry {
         changed
     }
 
+    /// SIGSTOPs a session's whole tree and records it as hibernated. The PTY
+    /// and holder stay alive; wake is one SIGCONT away.
+    pub fn hibernate(
+        &mut self,
+        id: &str,
+        reason: diri_proto::HibernationReason,
+    ) -> std::io::Result<()> {
+        let tree = {
+            let session = self.sessions.get(id).ok_or_else(|| not_found(id))?;
+            session.signal_tree(libc::SIGSTOP)?
+        };
+        self.set_hibernation(
+            id,
+            Some(diri_proto::HibernationInfo {
+                since: std::time::SystemTime::now().into(),
+                reason,
+                tree_pids: tree.iter().map(|(pid, _)| *pid).collect(),
+                tree_start_times: Some(tree.into_iter().collect()),
+            }),
+        );
+        Ok(())
+    }
+
+    /// Folds a governor sample into the record; returns the event to publish
+    /// when anything actually changed (carrying only the changed facets, as
+    /// the Swift daemon does).
+    pub fn apply_resource_sample(
+        &mut self,
+        id: &str,
+        memory_bytes: Option<u64>,
+        ports: Option<Vec<diri_proto::PortInfo>>,
+        artifacts: Option<Vec<diri_proto::SessionArtifact>>,
+    ) -> Option<diri_proto::SessionResourcesEvent> {
+        let record = self.records.get_mut(id)?;
+        let mut memory_changed = false;
+        let mut ports_changed = false;
+        let mut artifacts_changed = false;
+        if let Some(memory) = memory_bytes
+            && record.memory_bytes != Some(memory)
+        {
+            record.memory_bytes = Some(memory);
+            memory_changed = true;
+        }
+        if let Some(ports) = ports
+            && record.listening_ports.as_deref().unwrap_or_default() != ports
+        {
+            record.listening_ports = Some(ports);
+            ports_changed = true;
+        }
+        if let Some(artifacts) = artifacts
+            && record.artifacts.as_deref().unwrap_or_default() != artifacts
+        {
+            record.artifacts = Some(artifacts);
+            artifacts_changed = true;
+        }
+        if !(memory_changed || ports_changed || artifacts_changed) {
+            return None;
+        }
+        Some(diri_proto::SessionResourcesEvent {
+            id: record.id.clone(),
+            memory_bytes: memory_changed.then_some(record.memory_bytes).flatten(),
+            listening_ports: if ports_changed {
+                record.listening_ports.clone()
+            } else {
+                None
+            },
+            artifacts: if artifacts_changed {
+                record.artifacts.clone()
+            } else {
+                None
+            },
+        })
+    }
+
+    /// Replaces the record's PR statuses when they materially changed.
+    /// Returns whether they did.
+    pub fn apply_pull_request_statuses(
+        &mut self,
+        id: &str,
+        statuses: Vec<diri_proto::PullRequestStatus>,
+    ) -> bool {
+        let Some(record) = self.records.get_mut(id) else {
+            return false;
+        };
+        let current = record.pull_requests.as_deref().unwrap_or_default();
+        let materially_same = current.len() == statuses.len()
+            && current.iter().zip(&statuses).all(|(a, b)| {
+                // fetched_at always moves; compare everything else.
+                let mut b_pinned = b.clone();
+                b_pinned.fetched_at = a.fetched_at;
+                *a == b_pinned
+            });
+        if materially_same {
+            return false;
+        }
+        record.pull_requests = (!statuses.is_empty()).then_some(statuses);
+        record.updated_at = DateMillis::from(std::time::SystemTime::now());
+        true
+    }
+
     pub fn set_hibernation(&mut self, id: &str, info: Option<diri_proto::HibernationInfo>) {
         if let Some(record) = self.records.get_mut(id) {
             record.hibernation = info;

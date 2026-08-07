@@ -302,6 +302,9 @@ impl RegistryHost {
     fn spawn_agent(&self, arguments: &Value) -> Result<Value, String> {
         let kind = required_str(arguments, "kind")?;
         let cwd = required_str(arguments, "cwd")?;
+        if let Some(host) = arguments.get("host").and_then(Value::as_str) {
+            return self.spawn_agent_remote(arguments, &kind, &cwd, host);
+        }
         let cwd_path = PathBuf::from(&cwd);
         if !cwd_path.is_dir() {
             return Err(format!("cwd {cwd:?} is not a directory"));
@@ -373,6 +376,151 @@ impl RegistryHost {
             "cwd": working_dir.to_string_lossy(),
             "worktree": worktree_path,
             "branch": branch,
+            "parent": self.caller,
+            "pendingPrompt": prompt,
+        }))
+    }
+
+    /// The local→cloud handoff: take the CALLER's local context (its repo,
+    /// branch, and uncommitted work), place it on the VPS, and start an agent
+    /// there — one tool call from inside a session.
+    ///
+    /// `cwd` is the LOCAL context source. The remote checkout is found by
+    /// origin URL (or given via `remote_cwd`); with `sync_code` (default on)
+    /// the local branch is WIP-committed, pushed, and hard-synced into the
+    /// target checkout first — a linked local worktree gets its own worktree
+    /// next to the remote clone. The spawned session records the caller as
+    /// parent, so wait_for_agent / read_output / send_prompt work unchanged:
+    /// the cloud agent is just another child.
+    fn spawn_agent_remote(
+        &self,
+        arguments: &Value,
+        kind: &str,
+        cwd: &str,
+        host_id: &str,
+    ) -> Result<Value, String> {
+        let hosts_file = self
+            .logs_dir
+            .parent()
+            .map(|parent| parent.join("hosts.json"))
+            .ok_or("cannot locate hosts.json")?;
+        let host = diri_proto::HostsConfig::load(&hosts_file)
+            .hosts
+            .into_iter()
+            .find(|entry| entry.id == host_id)
+            .ok_or_else(|| format!("unknown host {host_id:?}; check Settings → Remote"))?;
+        let sync_code = arguments
+            .get("sync_code")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        let prompt = arguments
+            .get("prompt")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let title = arguments
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+
+        // Where on the host? Explicit, or located by the local repo's origin.
+        let explicit_remote = arguments
+            .get("remote_cwd")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let origin = crate::hosts::origin_of_cwd(cwd, None);
+        let remote_root = match (&explicit_remote, &origin) {
+            (Some(remote), _) => remote.clone(),
+            (None, Some(origin)) => {
+                crate::hosts::locate(origin, Some(&host), &[]).ok_or_else(|| {
+                    format!(
+                        "repo not cloned on {} — clone {origin} under {} first, or pass remote_cwd",
+                        host.display_name(),
+                        host.default_cwd.as_deref().unwrap_or("~")
+                    )
+                })?
+            }
+            (None, None) => host
+                .default_cwd
+                .clone()
+                .ok_or("local cwd has no git origin and the host has no defaultCwd; pass remote_cwd")?,
+        };
+
+        // Code handoff: the caller's exact tree state lands on the host
+        // before the agent starts. Reuses the migrate prepare phase — every
+        // step idempotent, dirty targets a hard stop.
+        let mut synced = false;
+        let mut branch = None;
+        let mut spawn_cwd = remote_root.clone();
+        if sync_code && origin.is_some() {
+            let prepared = crate::migrate::prepare(
+                cwd,
+                None,
+                Some(&host),
+                &remote_root,
+                host.display_name(),
+            )
+            .map_err(|error| format!("code sync failed: {error}"))?;
+            synced = true;
+            branch = Some(prepared.branch.clone());
+            spawn_cwd = prepared.target_repo_root;
+        }
+
+        let mut registry = self.registry()?;
+        let engine = registry.engine();
+        let manifest = engine
+            .manifest(kind)
+            .ok_or_else(|| format!("no manifest for agent {kind:?}"))?;
+        let descriptor = manifest.agent.clone().unwrap_or_default();
+        let authority = descriptor.authority();
+
+        let id = crate::control::next_session_id();
+        let agent_session_id = descriptor
+            .session_id_flag
+            .is_some()
+            .then(crate::inject::uuid_v4);
+        let argv = crate::remote::remote_argv(
+            kind,
+            &descriptor,
+            &id,
+            &host,
+            &spawn_cwd,
+            agent_session_id.as_deref(),
+            false,
+        );
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
+        let mut pty = crate::pty::PtySpec::new(argv, &home);
+        pty.env = std::env::vars().collect();
+        pty.env.retain(|(key, _)| key != "NO_COLOR");
+
+        let mut record = crate::control::new_record(&id, kind, &spawn_cwd);
+        record.host = Some(host.id.clone());
+        record.parent = self.caller.clone().map(SessionId);
+        record.agent_session_id = agent_session_id;
+        record.git_branch = branch.clone();
+        if let Some(title) = title {
+            record.title = title;
+        }
+
+        let spec = crate::session::SessionSpec {
+            id: id.clone(),
+            pty,
+            manifest_id: kind.to_string(),
+            authority,
+            logs_dir: self.logs_dir.clone(),
+            holder: self.holder.clone(),
+        };
+        registry
+            .spawn(spec, record)
+            .map_err(|error| format!("could not start {kind} on {}: {error}", host.id))?;
+        let _ = registry.persist();
+
+        Ok(json!({
+            "id": id,
+            "kind": kind,
+            "host": host.id,
+            "cwd": spawn_cwd,
+            "branch": branch,
+            "codeSynced": synced,
             "parent": self.caller,
             "pendingPrompt": prompt,
         }))

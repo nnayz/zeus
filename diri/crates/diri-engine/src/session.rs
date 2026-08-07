@@ -18,10 +18,10 @@
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use diri_proto::{NeedsInputDetail, SessionStatus};
 
@@ -39,14 +39,23 @@ use crate::status::{Authority, ClaudeHook, ReducerOutcome, StatusReducer, Status
 /// advance and staleness is noticed.
 const TICK_INTERVAL: Duration = Duration::from_millis(100);
 
+/// Quiet-tick interval for a session that is neither attached, recently
+/// touched, nor Working. Reducer ticks are no-ops outside Working, so with 30
+/// idle background sessions this is the difference between ~300 wakeups plus
+/// ~900 log syscalls a second and ~30.
+const IDLE_TICK_INTERVAL: Duration = Duration::from_secs(1);
+
+/// How long an attach poll or input write keeps a session on the fast tick.
+const HOT_WINDOW_SECS: u64 = 30;
+
 /// Maximum raw log tail replayed when starting or adopting a held session.
 /// The same hard startup-work bound the Swift daemon enforced.
 const REPLAY_BUDGET: usize = 256 << 10;
 
-/// How many quiet ticks between holder liveness probes (~2s): a holder that
-/// died markerless (SIGKILL, machine issues) must not leave a forever-live
-/// session behind.
-const LIVENESS_EVERY_TICKS: u32 = 20;
+/// Quiet time between holder liveness probes: a holder that died markerless
+/// (SIGKILL, machine issues) must not leave a forever-live session behind.
+/// Elapsed-based so the probe cadence is the same on fast and idle ticks.
+const LIVENESS_INTERVAL: Duration = Duration::from_secs(2);
 
 /// What a session looks like from the outside.
 #[derive(Clone, Debug)]
@@ -72,6 +81,50 @@ struct Shared {
     exit: Mutex<Option<Exit>>,
     exited: AtomicBool,
     stop: AtomicBool,
+    /// Bumped whenever status, needs-input, or title actually change. The
+    /// registry watcher compares this instead of cloning and JSON-serializing
+    /// every record on every poll.
+    state_version: AtomicU64,
+    /// Seconds since UNIX_EPOCH of the last attach-pump poll or input write.
+    /// Keeps interactive sessions on the fast quiet-tick.
+    last_hot: AtomicU64,
+}
+
+impl Shared {
+    fn bump_state_version(&self) {
+        self.state_version.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn note_hot(&self) {
+        self.last_hot.store(unix_secs(), Ordering::Relaxed);
+    }
+
+    /// Fast quiet-tick while the session is attached/touched or Working;
+    /// everything else can wait a second.
+    fn wants_fast_tick(&self) -> bool {
+        if unix_secs().saturating_sub(self.last_hot.load(Ordering::Relaxed)) <= HOT_WINDOW_SECS {
+            return true;
+        }
+        matches!(
+            *self.status.lock().expect("status"),
+            SessionStatus::Working | SessionStatus::Starting
+        )
+    }
+
+    fn quiet_tick(&self) -> Duration {
+        if self.wants_fast_tick() {
+            TICK_INTERVAL
+        } else {
+            IDLE_TICK_INTERVAL
+        }
+    }
+}
+
+fn unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 /// What the grid pump compares between ticks to decide whether anything
@@ -268,6 +321,12 @@ impl Session {
         }
     }
 
+    /// Monotonic counter that moves exactly when status, needs-input, or
+    /// title change. Poll this before paying for [`Self::view`].
+    pub fn state_version(&self) -> u64 {
+        self.shared.state_version.load(Ordering::SeqCst)
+    }
+
     pub fn status(&self) -> SessionStatus {
         self.shared.status.lock().expect("status").clone()
     }
@@ -294,6 +353,7 @@ impl Session {
     /// A full grid snapshot for a freshly attached sink, plus current modes.
     /// Does not disturb the shared diff baseline.
     pub fn full_grid(&self) -> (diri_proto::grid::GridUpdate, (bool, bool)) {
+        self.shared.note_hot();
         let screen = self.shared.screen.lock().expect("screen");
         let modes = (screen.is_alt_screen(), screen.mouse_reporting());
         (screen.full_snapshot(), modes)
@@ -302,10 +362,15 @@ impl Session {
     /// The next grid diff, if anything observable changed since `signature`.
     /// The signature compare makes an idle 16ms pump tick cost one mutex lock
     /// and a tuple compare — the grid walk only happens on change.
+    ///
+    /// Doubles as the attachment heartbeat: the attach hub polls this while
+    /// any sink is connected, which keeps the session pump on its fast tick
+    /// without the hub having to know about pump cadence.
     pub fn grid_update_if_changed(
         &self,
         signature: &mut GridSignature,
     ) -> Option<diri_proto::grid::GridUpdate> {
+        self.shared.note_hot();
         let mut screen = self.shared.screen.lock().expect("screen");
         let current = GridSignature {
             content_seq: screen.content_seq(),
@@ -415,6 +480,9 @@ impl Session {
 
     /// Sends bytes to the child, as if typed.
     pub fn write_input(&self, bytes: &[u8]) -> std::io::Result<()> {
+        // Input means someone is interacting: keep the pump on its fast tick
+        // so the echo renders promptly.
+        self.shared.note_hot();
         match &self.transport {
             Transport::Direct(pty) => {
                 use std::io::Write;
@@ -529,6 +597,8 @@ fn new_shared(spec: &SessionSpec, log: OutputLog) -> Arc<Shared> {
         exit: Mutex::new(None),
         exited: AtomicBool::new(false),
         stop: AtomicBool::new(false),
+        state_version: AtomicU64::new(0),
+        last_hot: AtomicU64::new(unix_secs()),
     })
 }
 
@@ -567,16 +637,29 @@ fn holder_io_error(error: crate::holder::HolderError) -> std::io::Error {
     std::io::Error::other(error.to_string())
 }
 
-/// Applies a reducer outcome to the shared state.
+/// Applies a reducer outcome to the shared state, bumping the state version
+/// only when something observable actually changed — that version is what the
+/// registry watcher polls instead of deep-diffing records.
 fn apply(shared: &Shared, outcome: &ReducerOutcome) {
+    let mut changed = false;
     if let Some(status) = &outcome.status_change {
-        *shared.status.lock().expect("status") = status.clone();
+        {
+            let mut current = shared.status.lock().expect("status");
+            if *current != *status {
+                *current = status.clone();
+                changed = true;
+            }
+        }
         if matches!(status, SessionStatus::Exited(_)) {
             shared.exited.store(true, Ordering::SeqCst);
         }
     }
     if let Some(detail) = &outcome.needs_input {
-        *shared.needs_input.lock().expect("needs input") = Some(detail.clone());
+        let mut current = shared.needs_input.lock().expect("needs input");
+        if current.as_ref() != Some(detail) {
+            *current = Some(detail.clone());
+            changed = true;
+        }
     }
     // Leaving a needs-input state clears the pending detail, so the UI does not
     // keep showing a prompt that has been answered.
@@ -584,7 +667,14 @@ fn apply(shared: &Shared, outcome: &ReducerOutcome) {
         outcome.status_change,
         Some(SessionStatus::Working) | Some(SessionStatus::Idle)
     ) {
-        *shared.needs_input.lock().expect("needs input") = None;
+        let mut current = shared.needs_input.lock().expect("needs input");
+        if current.is_some() {
+            *current = None;
+            changed = true;
+        }
+    }
+    if changed {
+        shared.bump_state_version();
     }
 }
 
@@ -602,8 +692,11 @@ fn pump(
     mut reader: crate::pty::PtyStream,
     manifest_id: String,
 ) {
-    let mut buffer = [0u8; 8192];
+    // 64 KiB, matching the held pump: every read may trigger an evaluation,
+    // so a small buffer multiplies per-chunk costs on burst output.
+    let mut buffer = [0u8; 64 << 10];
     let mut last_tick = SystemTime::now();
+    let mut last_eval_seq = 0u64;
     let fd = reader.as_raw_fd();
 
     loop {
@@ -611,14 +704,16 @@ fn pump(
             break;
         }
 
-        // Wait for output, but never longer than a tick.
+        // Wait for output, but never longer than a tick. Output interrupts the
+        // wait immediately, so the idle tick only slows reducer timers — which
+        // are no-ops outside Working anyway.
         let mut poll_fd = libc::pollfd {
             fd,
             events: libc::POLLIN,
             revents: 0,
         };
         // SAFETY: one initialized pollfd, a millisecond timeout.
-        let ready = unsafe { libc::poll(&mut poll_fd, 1, TICK_INTERVAL.as_millis() as i32) };
+        let ready = unsafe { libc::poll(&mut poll_fd, 1, shared.quiet_tick().as_millis() as i32) };
         if ready < 0 {
             let error = std::io::Error::last_os_error();
             if error.kind() == std::io::ErrorKind::Interrupted {
@@ -649,8 +744,13 @@ fn pump(
                 let observation = {
                     let mut screen = shared.screen.lock().expect("screen");
                     screen.feed(chunk);
-                    *shared.title.lock().expect("title") = screen.title().map(str::to_string);
-                    engine.evaluate(&screen.snapshot(), &manifest_id)
+                    evaluate_if_screen_changed(
+                        &shared,
+                        &mut screen,
+                        &engine,
+                        &manifest_id,
+                        &mut last_eval_seq,
+                    )
                 };
 
                 let now = SystemTime::now();
@@ -696,6 +796,37 @@ fn pump(
     let _ = shared.log.lock().expect("log").flush();
 }
 
+/// Runs manifest detection only when the visible screen actually changed.
+///
+/// `feed` is called per PTY chunk, but the reducer discards observations whose
+/// `content_seq` it has already judged — previously *after* paying for a full
+/// snapshot, two region clones, and the regex walk. `content_seq` also covers
+/// the title (an OSC title change bumps it), so the title store rides the same
+/// gate and only allocates when it moved.
+fn evaluate_if_screen_changed(
+    shared: &Shared,
+    screen: &mut HeadlessScreen,
+    engine: &ManifestEngine,
+    manifest_id: &str,
+    last_eval_seq: &mut u64,
+) -> Option<crate::detect::ScreenObservation> {
+    let seq = screen.content_seq();
+    if seq == *last_eval_seq {
+        return None;
+    }
+    *last_eval_seq = seq;
+    {
+        let title = screen.title();
+        let mut stored = shared.title.lock().expect("title");
+        if stored.as_deref() != title {
+            *stored = title.map(str::to_string);
+            drop(stored);
+            shared.bump_state_version();
+        }
+    }
+    engine.evaluate(&screen.snapshot(), manifest_id)
+}
+
 /// The held-transport pump: tails the holder-owned output log.
 ///
 /// The holder writes the log; this loop replays a bounded tail, then follows
@@ -716,7 +847,8 @@ fn pump_held(
         log.preferred_replay_start(REPLAY_BUDGET)
     };
     let mut marker_buffer: Vec<u8> = Vec::new();
-    let mut ticks_since_liveness = 0u32;
+    let mut last_liveness = Instant::now();
+    let mut last_eval_seq = 0u64;
     let mut exit_status: Option<HolderExitStatus> = None;
     // Until the tail is first caught up, bytes are history, not activity:
     // they must render, but not flip a quiet adopted session to Working.
@@ -732,8 +864,9 @@ fn pump_held(
         if chunk.is_empty() {
             replaying = false;
             // Quiet: advance the reducer's timers, and periodically make sure
-            // the holder is still there at all.
-            std::thread::sleep(TICK_INTERVAL);
+            // the holder is still there at all. Attached or Working sessions
+            // keep the fast tick; idle background ones sleep longer.
+            std::thread::sleep(shared.quiet_tick());
             let outcome = shared
                 .reducer
                 .lock()
@@ -741,9 +874,8 @@ fn pump_held(
                 .reduce(StatusSignal::Tick, SystemTime::now());
             apply(&shared, &outcome);
 
-            ticks_since_liveness += 1;
-            if ticks_since_liveness >= LIVENESS_EVERY_TICKS {
-                ticks_since_liveness = 0;
+            if last_liveness.elapsed() >= LIVENESS_INTERVAL {
+                last_liveness = Instant::now();
                 if !client.is_alive() {
                     // One last look for a marker that raced the probe.
                     let (_, tail) = {
@@ -766,7 +898,7 @@ fn pump_held(
             marker_buffer.clear();
         }
         offset = start + chunk.len() as u64;
-        ticks_since_liveness = 0;
+        last_liveness = Instant::now();
 
         // The floor is an incarnation boundary, so no marker straddles it:
         // markers wholly below are stripped but their statuses ignored.
@@ -793,8 +925,13 @@ fn pump_held(
             let observation = {
                 let mut screen = shared.screen.lock().expect("screen");
                 screen.feed(&output);
-                *shared.title.lock().expect("title") = screen.title().map(str::to_string);
-                engine.evaluate(&screen.snapshot(), &manifest_id)
+                evaluate_if_screen_changed(
+                    &shared,
+                    &mut screen,
+                    &engine,
+                    &manifest_id,
+                    &mut last_eval_seq,
+                )
             };
             let now = SystemTime::now();
             let mut reducer = shared.reducer.lock().expect("reducer");

@@ -136,6 +136,10 @@ fn main() {
         server.events(),
         Arc::new(AtomicBool::new(false)),
     );
+    let _persist_flusher = diri_engine::registry::spawn_persist_flusher(
+        Arc::clone(&registry),
+        Arc::new(AtomicBool::new(false)),
+    );
 
     eprintln!(
         "dirijord-rs: serving {}",

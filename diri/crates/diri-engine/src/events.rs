@@ -383,36 +383,23 @@ pub fn spawn_registry_watcher(
     std::thread::Builder::new()
         .name("diri-events-watcher".into())
         .spawn(move || {
+            // Each session bumps a version counter exactly when its status,
+            // needs-input, or title change, so the steady-state poll is one
+            // integer compare per live session — the previous implementation
+            // cloned and JSON-serialized every record (live and archived) on
+            // every pass, all under the registry lock.
             let mut published: HashMap<String, u64> = HashMap::new();
             while !stop.load(Ordering::SeqCst) {
-                let records = {
+                let changed = {
                     let Ok(registry) = registry.lock() else { break };
-                    registry.records()
+                    registry.changed_since(&mut published)
                 };
-                for record in records {
-                    // A cheap fingerprint of what the app renders from an
-                    // update: status, needs-input, and title.
-                    let fingerprint = {
-                        use std::hash::{Hash, Hasher};
-                        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                        serde_json::to_string(&record.status)
-                            .unwrap_or_default()
-                            .hash(&mut hasher);
-                        serde_json::to_string(&record.needs_input)
-                            .unwrap_or_default()
-                            .hash(&mut hasher);
-                        record.title.hash(&mut hasher);
-                        hasher.finish()
-                    };
-                    let id = record.id.0.clone();
-                    if published.get(&id) != Some(&fingerprint) {
-                        published.insert(id.clone(), fingerprint);
-                        events.publish_encoded(
-                            diri_proto::EventName::SESSION_UPDATED,
-                            &record,
-                            Some(&id),
-                        );
-                    }
+                for (id, record) in changed {
+                    events.publish_encoded(
+                        diri_proto::EventName::SESSION_UPDATED,
+                        &record,
+                        Some(&id),
+                    );
                 }
                 std::thread::sleep(Duration::from_millis(150));
             }

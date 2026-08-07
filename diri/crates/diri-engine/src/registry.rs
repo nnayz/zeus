@@ -48,6 +48,43 @@ pub struct Registry {
     /// Sessions the user closed, newest last — the "reopen closed tab" stack.
     recently_closed: Vec<SessionRecord>,
     state_file: PathBuf,
+    /// Trailing-edge persistence: a mutation inside the debounce window marks
+    /// dirty instead of rewriting the whole file (mark-seen fires on every
+    /// tab switch), and the flusher or the next persist call writes it out.
+    dirty: bool,
+    last_persist: Option<std::time::Instant>,
+}
+
+/// How long consecutive persists coalesce. Matches the Swift daemon's
+/// `PersistenceStore` debounce.
+const PERSIST_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(500);
+
+impl Drop for Registry {
+    fn drop(&mut self) {
+        // A deferred persist must not die with the process: embedders without
+        // a flusher thread (tests, short-lived tools) still land their state.
+        let _ = self.flush_dirty();
+    }
+}
+
+/// Flushes deferred persists on a short cadence. One per daemon, next to the
+/// events watcher.
+pub fn spawn_persist_flusher(
+    registry: Arc<std::sync::Mutex<Registry>>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::Builder::new()
+        .name("diri-persist-flusher".into())
+        .spawn(move || {
+            while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                std::thread::sleep(PERSIST_DEBOUNCE);
+                let Ok(mut registry) = registry.lock() else {
+                    break;
+                };
+                let _ = registry.flush_dirty();
+            }
+        })
+        .expect("spawn persist flusher")
 }
 
 impl Registry {
@@ -59,6 +96,8 @@ impl Registry {
             projects: Vec::new(),
             recently_closed: Vec::new(),
             state_file: state_file.into(),
+            dirty: false,
+            last_persist: None,
         }
     }
 
@@ -95,10 +134,33 @@ impl Registry {
         }
     }
 
-    /// Writes the current state atomically.
-    pub fn persist(&self) -> std::io::Result<()> {
+    /// Persists the current state — immediately when the last write is older
+    /// than the debounce window, otherwise by marking dirty for the flusher
+    /// ([`spawn_persist_flusher`]) or the next call to pick up. Serializing
+    /// and atomically rewriting every record used to happen on every single
+    /// mutation, including each tab switch's mark-seen.
+    pub fn persist(&mut self) -> std::io::Result<()> {
+        if let Some(last) = self.last_persist
+            && last.elapsed() < PERSIST_DEBOUNCE
+        {
+            self.dirty = true;
+            return Ok(());
+        }
+        self.persist_now()
+    }
+
+    /// Writes out a deferred persist, if one is pending.
+    pub fn flush_dirty(&mut self) -> std::io::Result<()> {
+        if !self.dirty {
+            return Ok(());
+        }
+        self.persist_now()
+    }
+
+    /// Writes the current state atomically, unconditionally.
+    fn persist_now(&mut self) -> std::io::Result<()> {
         let state = PersistedState::current(self.records(), self.projects.clone());
-        let bytes = serde_json::to_vec_pretty(&state)?;
+        let bytes = serde_json::to_vec(&state)?;
         let temp = self.state_file.with_extension("json.tmp");
         if let Some(parent) = self.state_file.parent() {
             std::fs::create_dir_all(parent)?;
@@ -106,6 +168,8 @@ impl Registry {
         std::fs::write(&temp, &bytes)?;
         // Rename is atomic, so a crash mid-write cannot truncate the real file.
         std::fs::rename(&temp, &self.state_file)?;
+        self.dirty = false;
+        self.last_persist = Some(std::time::Instant::now());
         Ok(())
     }
 
@@ -217,6 +281,41 @@ impl Registry {
         }
         records.sort_by(|a, b| a.id.0.cmp(&b.id.0));
         records
+    }
+
+    /// One record with live status folded in, without cloning the whole table.
+    pub fn record(&self, id: &str) -> Option<SessionRecord> {
+        let mut record = self.records.get(id)?.clone();
+        if let Some(session) = self.sessions.get(id) {
+            let view = session.view();
+            record.status = view.status;
+            record.needs_input = view.needs_input;
+        }
+        Some(record)
+    }
+
+    /// Diffs live sessions' state versions against `published` (updating it in
+    /// place) and returns folded records for just the sessions that changed.
+    /// The steady-state cost — the events watcher polls this several times a
+    /// second — is one integer compare per live session: no clones, no
+    /// serialization.
+    pub fn changed_since(
+        &self,
+        published: &mut HashMap<String, u64>,
+    ) -> Vec<(String, SessionRecord)> {
+        published.retain(|id, _| self.sessions.contains_key(id));
+        let mut changed = Vec::new();
+        for (id, session) in &self.sessions {
+            let version = session.state_version();
+            if published.get(id) == Some(&version) {
+                continue;
+            }
+            published.insert(id.clone(), version);
+            if let Some(record) = self.record(id) {
+                changed.push((id.clone(), record));
+            }
+        }
+        changed
     }
 
     /// Ends a session but keeps its record, which is what archiving means here.

@@ -29,7 +29,11 @@ use crate::detect::ScreenSnapshot;
 /// Scrollback is byte-budgeted, as in the Swift daemon: enough history for a
 /// client's scrollback view without letting a build log grow daemon memory
 /// unboundedly. Divided by the per-line cell cost at construction.
-const HISTORY_CELL_BUDGET_BYTES: usize = 1 << 20;
+///
+/// 4 MiB works out to ~2,180 history rows at 80 columns (~870 at 200) per
+/// session. The original 1 MiB kept only 546 rows at 80 columns — shallower
+/// than one long compile's output, and users hit the floor scrolling back.
+const HISTORY_CELL_BUDGET_BYTES: usize = 4 << 20;
 
 fn history_line_limit(cols: usize) -> usize {
     let bytes_per_line = cols.max(1) * std::mem::size_of::<alacritty_terminal::term::cell::Cell>();

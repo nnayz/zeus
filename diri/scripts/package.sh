@@ -170,9 +170,19 @@ fi
 # runtime + timestamp), then the app LAST WITHOUT --deep. A --deep sign would
 # re-stamp the nested executables with the app's identifier and can fail
 # notarization; nested Mach-O must be signed independently.
+# Auto-detect a Developer ID when none is given, exactly as release.sh does.
+# TCC keys privacy grants (Documents/Desktop access prompts) to the signing
+# identity: ad-hoc changes every rebuild, so each dev install used to re-ask —
+# a stable Developer ID makes one "Allow" stick across every future install.
+if [[ -z "${DIRI_SIGN_IDENTITY:-}" ]]; then
+    DIRI_SIGN_IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null \
+        | grep "Developer ID Application" | head -1 \
+        | sed -E 's/.*"(.*)".*/\1/' || true)"
+fi
 sign_id="${DIRI_SIGN_IDENTITY:--}"
 ts_flag=(--timestamp)
-[[ "${sign_id}" == "-" ]] && ts_flag=(--timestamp=none) && echo "==> No DIRI_SIGN_IDENTITY set; ad-hoc signature"
+[[ "${sign_id}" == "-" ]] && ts_flag=(--timestamp=none) && echo "==> No signing identity found; ad-hoc signature"
+[[ "${sign_id}" != "-" ]] && echo "==> Signing with: ${sign_id}"
 echo "==> Signing nested daemon binaries"
 codesign --force --options runtime "${ts_flag[@]}" --sign "${sign_id}" "${app_bin_dir}/dirijord-holder"
 codesign --force --options runtime "${ts_flag[@]}" --sign "${sign_id}" "${app_bin_dir}/dirijord"

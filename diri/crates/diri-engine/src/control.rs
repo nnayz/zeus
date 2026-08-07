@@ -674,7 +674,7 @@ impl ControlServer {
         let mut pty = crate::pty::PtySpec::new(argv, &home);
         pty.env = std::env::vars().collect();
         pty.env.retain(|(key, _)| key != "NO_COLOR");
-        absolutize_argv0(&mut pty);
+        absolutize_remote_argv0(&mut pty);
         if let (Some(cols), Some(rows)) = (p.initial_cols, p.initial_rows) {
             pty.cols = cols.clamp(2, u16::MAX as i64) as u16;
             pty.rows = rows.clamp(2, u16::MAX as i64) as u16;
@@ -753,7 +753,7 @@ impl ControlServer {
         let mut pty = crate::pty::PtySpec::new(argv, &home);
         pty.env = std::env::vars().collect();
         pty.env.retain(|(key, _)| key != "NO_COLOR");
-        absolutize_argv0(&mut pty);
+        absolutize_remote_argv0(&mut pty);
         let spec = crate::session::SessionSpec {
             id: record.id.0.clone(),
             pty,
@@ -1773,6 +1773,14 @@ fn resolve_on_path(binary: &str) -> Option<String> {
 /// program lookup happens THERE, so a bare "ssh" can exit 127 no matter
 /// what env the spec carries.
 pub(crate) fn absolutize_remote_argv0(pty: &mut crate::pty::PtySpec) {
+    // The daemon itself has no terminal (launchd env): without an asserted
+    // TERM, `ssh -t` hands the remote an empty one and tmux refuses to start
+    // ("terminal does not support clear") — the same assertion spawn_spec
+    // makes for local agents.
+    pty.env
+        .retain(|(key, _)| key != "TERM" && key != "COLORTERM");
+    pty.env.push(("TERM".into(), "xterm-256color".into()));
+    pty.env.push(("COLORTERM".into(), "truecolor".into()));
     absolutize_argv0(pty);
 }
 

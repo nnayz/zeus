@@ -41,6 +41,9 @@ pub enum StatusModel {
 /// What a predicate is evaluated against.
 pub struct PredicateContext<'a> {
     pub text: &'a str,
+    /// Case-folded once per region per evaluation; `Contains` needles are
+    /// folded at load, so the substring check itself allocates nothing.
+    pub text_lower: &'a str,
     pub lines: &'a [String],
     pub progress_state: Option<i64>,
 }
@@ -48,7 +51,8 @@ pub struct PredicateContext<'a> {
 /// A recursive detection predicate. Patterns compile once, at load.
 #[derive(Debug)]
 pub enum Predicate {
-    /// Case-insensitive substring over the region's joined text.
+    /// Case-insensitive substring over the region's joined text. The stored
+    /// needle is lowercased at deserialize.
     Contains(String),
     /// Matches anywhere in the region's joined text.
     Regex(Regex),
@@ -64,9 +68,7 @@ pub enum Predicate {
 impl Predicate {
     pub fn evaluate(&self, context: &PredicateContext) -> bool {
         match self {
-            Predicate::Contains(needle) => {
-                context.text.to_lowercase().contains(&needle.to_lowercase())
-            }
+            Predicate::Contains(needle) => context.text_lower.contains(needle),
             Predicate::Regex(regex) => regex.is_match(context.text),
             Predicate::LineRegex(regex) => context.lines.iter().any(|line| regex.is_match(line)),
             Predicate::Progress(state) => context.progress_state == Some(*state),
@@ -103,7 +105,9 @@ impl<'de> Deserialize<'de> for Predicate {
                 let mut found: Option<Predicate> = None;
                 while let Some(key) = map.next_key::<String>()? {
                     let predicate = match key.as_str() {
-                        "contains" => Predicate::Contains(map.next_value()?),
+                        "contains" => {
+                            Predicate::Contains(map.next_value::<String>()?.to_lowercase())
+                        }
                         "regex" => Predicate::Regex(compile::<M>(map.next_value()?)?),
                         "lineRegex" => Predicate::LineRegex(compile::<M>(map.next_value()?)?),
                         "progress" => {

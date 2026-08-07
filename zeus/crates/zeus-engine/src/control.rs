@@ -1020,7 +1020,7 @@ impl ControlServer {
     }
 
     fn daemon_prepare_shutdown(&self) -> Result<JsonValue, ControlError> {
-        let registry = self.registry.lock().map_err(poisoned)?;
+        let mut registry = self.registry.lock().map_err(poisoned)?;
         let _ = registry.persist();
         Ok(json!({}))
     }
@@ -1030,7 +1030,7 @@ impl ControlServer {
     /// relaunches the fresh binary.
     fn daemon_shutdown(&self) -> Result<JsonValue, ControlError> {
         {
-            let registry = self.registry.lock().map_err(poisoned)?;
+            let mut registry = self.registry.lock().map_err(poisoned)?;
             let _ = registry.persist();
         }
         std::thread::spawn(|| {

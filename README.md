@@ -1,4 +1,4 @@
-# zeus
+<h1><img src="docs/images/zeus-wordmark.png" alt="Zeus" width="300"></h1>
 
 [![CI](https://github.com/nnayz/zeus/actions/workflows/ci.yml/badge.svg)](https://github.com/nnayz/zeus/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
@@ -9,7 +9,7 @@ shells in parallel — across git worktrees or on remote hosts — each with a l
 (working / needs-you / done) and tmux-like persistence: closing the app never kills a session,
 and a daemon restart brings conversations back.
 
-![zeus](docs/images/zeus.png)
+![Zeus](docs/images/zeus.png)
 
 ## Install
 
@@ -18,12 +18,12 @@ brew install --cask nnayz/zeus/zeus
 ```
 
 Or download the latest DMG from [Releases](https://github.com/nnayz/zeus/releases/latest),
-open it, and drag zeus to Applications. Either way it is the same universal build (Apple
-silicon and Intel), signed and notarized. zeus updates itself from there.
+open it, and drag Zeus to Applications. Either way it is the same universal build (Apple
+silicon and Intel), signed and notarized. Zeus updates itself from there.
 
 The tap has to be named in full — a bare `zeus` resolves only against Homebrew's default
 taps. The cask lives in [nnayz/homebrew-zeus](https://github.com/nnayz/homebrew-zeus)
-rather than `homebrew-cask`, which requires a notability threshold zeus does not meet yet.
+rather than `homebrew-cask`, which requires a notability threshold Zeus does not meet yet.
 
 macOS 15 or newer.
 

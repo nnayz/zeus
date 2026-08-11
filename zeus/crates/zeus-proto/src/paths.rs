@@ -1,4 +1,4 @@
-//! Pure path construction and shared environment names from `Paths.swift`.
+//! Pure path construction and shared environment names.
 //!
 //! This crate deliberately does not discover a home directory or touch the
 //! filesystem. Callers provide the user's home directory.
@@ -13,7 +13,6 @@ pub const INJECT_DIR_NAME: &str = "inject";
 pub const BIN_DIR_NAME: &str = "bin";
 pub const MANIFEST_OVERRIDES_RELATIVE_PATH: &str = "manifests/overrides";
 pub const DAEMON_LOG_FILE_NAME: &str = "zeusd.log";
-pub const REMOTE_CONFIG_FILE_NAME: &str = "remote.json";
 pub const HOSTS_CONFIG_FILE_NAME: &str = "hosts.json";
 
 pub const ENV_SESSION_ID: &str = "ZEUS_SESSION_ID";
@@ -53,10 +52,6 @@ impl ZeusPaths {
 
     pub fn daemon_log_file(home: impl AsRef<Path>) -> PathBuf {
         Self::app_support(home).join(DAEMON_LOG_FILE_NAME)
-    }
-
-    pub fn remote_config_file(home: impl AsRef<Path>) -> PathBuf {
-        Self::app_support(home).join(REMOTE_CONFIG_FILE_NAME)
     }
 
     pub fn hosts_config_file(home: impl AsRef<Path>) -> PathBuf {

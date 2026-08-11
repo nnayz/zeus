@@ -32,6 +32,10 @@
       "ZEUS_",
       "ZEUS_"
     ],
+    "injection": {
+      "cursorMCP": true,
+      "cursorHooks": true
+    },
     "deny": {
       "text": "n",
       "submit": false

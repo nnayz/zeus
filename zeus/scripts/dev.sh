@@ -98,15 +98,24 @@ mkdir -p "${target_dir}"
 
 cd "${workspace_dir}"
 echo "==> Building ${display_name} (${profile})"
+# zeus-app does not pull zeusd-rs into target/<profile>/; build both so a
+# clean checkout launches against this tree's Engine instead of a missing or
+# stale binary (installed app / leftover debug build).
 if (( ${#cargo_args[@]} > 0 )); then
-    cargo build --package zeus-app --bin zeus "${cargo_args[@]}"
+    cargo build --package zeus-app --bin zeus --package zeus-engine --bin zeusd-rs "${cargo_args[@]}"
 else
-    cargo build --package zeus-app --bin zeus
+    cargo build --package zeus-app --bin zeus --package zeus-engine --bin zeusd-rs
 fi
 
 binary="${target_dir}/${profile}/zeus"
 if [[ ! -x "${binary}" ]]; then
     echo "error: cargo did not produce ${binary}" >&2
+    exit 1
+fi
+
+engine_bin="${target_dir}/${profile}/zeusd-rs"
+if [[ ! -x "${engine_bin}" ]]; then
+    echo "error: cargo did not produce ${engine_bin}" >&2
     exit 1
 fi
 
@@ -156,14 +165,20 @@ if [[ -n "${settings_preview}" ]]; then
     launch_environment+=("ZEUS_SETTINGS_PREVIEW=${settings_preview}")
 fi
 
-# A dev wrapper intentionally does not carry a second daemon. If no daemon is
-# live, point its launch-only fallback at the installed release bundle; both
-# clients still use the same socket and Application Support directory.
+# The Rust app fail-closes unless Hello reports engineKind=zeus-rust-engine.
+# Prefer a local cargo build of zeusd-rs, then the packaged Rust Engine in
+# an installed bundle. Never point at Swift `zeusd` — the client rejects it
+# and the UI comes up unable to spawn or list sessions.
 if [[ -z "${ZEUSD_PATH:-}" ]]; then
-    for installed_app in "${HOME}/Applications/zeus.app" "/Applications/zeus.app"; do
-        installed_daemon="${installed_app}/Contents/Resources/bin/zeusd"
-        if [[ -x "${installed_daemon}" ]]; then
-            launch_environment+=("ZEUSD_PATH=${installed_daemon}")
+    for candidate in \
+        "${target_dir}/${profile}/zeusd-rs" \
+        "${target_dir}/debug/zeusd-rs" \
+        "${target_dir}/release/zeusd-rs" \
+        "${HOME}/Applications/zeus.app/Contents/Resources/bin/zeusd-rs" \
+        "/Applications/zeus.app/Contents/Resources/bin/zeusd-rs"
+    do
+        if [[ -x "${candidate}" ]]; then
+            launch_environment+=("ZEUSD_PATH=${candidate}")
             break
         fi
     done
@@ -171,6 +186,14 @@ fi
 
 echo "==> Launching ${display_name} (${build_label})"
 echo "    ${app_path}"
+if [[ -n "${ZEUSD_PATH:-}" ]]; then
+    echo "    engine: ${ZEUSD_PATH}"
+fi
+for item in "${launch_environment[@]}"; do
+    if [[ "${item}" == ZEUSD_PATH=* ]]; then
+        echo "    engine: ${item#ZEUSD_PATH=}"
+    fi
+done
 exec env \
     -u ZEUS_SOCKET \
     -u ZEUS_SESSION_ID \

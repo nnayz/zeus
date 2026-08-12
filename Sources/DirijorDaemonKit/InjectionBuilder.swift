@@ -1,6 +1,7 @@
 import DirijorCore
 import DirijorProtocol
 import Foundation
+import Darwin
 
 /// Builds spawn command lines + env with hook/notify injection for each agent
 /// kind. Pure — fully unit-testable.
@@ -105,6 +106,13 @@ public enum InjectionBuilder {
             argv += [flag, uuid]
         }
         argv += injectionArgs(descriptor.injection, injectDir: injectDir, cliPath: cliPath)
+        argv += cursorPluginArgs(
+            descriptor.injection,
+            sessionID: sessionID,
+            socketPath: socketPath,
+            cliPath: cliPath,
+            injectDir: injectDir
+        )
 
         return SpawnPlan(
             argv: descriptor.returnToLoginShell ? returnToLoginShell(argv) : resolveBinary(argv),
@@ -138,6 +146,8 @@ public enum InjectionBuilder {
             argv += ["-c", "notify=[\(tomlString(cliPath)), \"notify\"]"]
         }
         if injection.codexMCP { argv += codexMcpArgs(cliPath: cliPath) }
+        // Cursor plugin args need a session id / socket; `plan` and `resumeArgv`
+        // append them after writing the per-session plugin directory.
         return argv
     }
 
@@ -148,27 +158,33 @@ public enum InjectionBuilder {
     /// most CLIs accept `--resume <id>` but give us no way to *learn* an id, so
     /// their manifests carry the spec (accurate, and ready the day a hook or
     /// transcript scanner supplies one) while resume stays inert in practice.
-    public static func resumeArgv(record: SessionRecord, injectDir: URL) -> [String]? {
+    public static func resumeArgv(
+        record: SessionRecord,
+        injectDir: URL,
+        socketPath: String = "",
+        cliPath: String = ""
+    ) -> [String]? {
         let descriptor = record.kind.descriptor
         guard let binary = descriptor.binary, let resume = descriptor.resume else { return nil }
-        guard let agentID = record.agentSessionID else {
+        var argv: [String]
+        if let agentID = record.agentSessionID {
+            argv = [binary] + resume.argv(id: agentID)
+        } else {
             // `.latest` needs no id — it means "reopen whatever this CLI
             // considers the most recent conversation".
             guard resume.style == .latest else { return nil }
-            let argv = [binary] + resume.argv(id: "")
-            return descriptor.returnToLoginShell
-                ? returnToLoginShell(argv) : resolveBinary(argv)
+            argv = [binary] + resume.argv(id: "")
         }
-        var argv = [binary] + resume.argv(id: agentID)
         // Resume re-enters the same conversation, so it needs the same hook and
         // MCP wiring a fresh spawn gets — otherwise a resumed Claude silently
         // loses status detection and the dirijor MCP tools.
         //
         // Only the appendable `--flag value` mechanisms are replayed. Codex's
         // `-c key=value` overrides are global options that must precede the
-        // `resume` SUBCOMMAND, and `codex -c … resume <id>` has never been
+        // resume SUBCOMMAND, and `codex -c … resume <id>` has never been
         // verified here — so a subcommand-style resume stays bare, exactly as
-        // it was before this became manifest-driven.
+        // it was before this became manifest-driven. Cursor's `--plugin-dir`
+        // is appendable like Claude's flags, so it is replayed.
         if descriptor.injection.claudeHooks {
             let hooks = injectDir.appendingPathComponent("claude-hooks.json")
             if FileManager.default.fileExists(atPath: hooks.path) {
@@ -176,6 +192,15 @@ public enum InjectionBuilder {
             }
         }
         if descriptor.injection.claudeMCP { argv += claudeMcpArgs(injectDir: injectDir) }
+        if !socketPath.isEmpty, !cliPath.isEmpty {
+            argv += cursorPluginArgs(
+                descriptor.injection,
+                sessionID: record.id,
+                socketPath: socketPath,
+                cliPath: cliPath,
+                injectDir: injectDir
+            )
+        }
         return descriptor.returnToLoginShell ? returnToLoginShell(argv) : resolveBinary(argv)
     }
 
@@ -356,6 +381,130 @@ public enum InjectionBuilder {
         for key in ProcessInfo.processInfo.environment.keys
         where agentNestingEnvPrefixes.contains(where: { key.hasPrefix($0) }) {
             unsetenv(key)
+        }
+    }
+
+    /// Writes a session-local Cursor plugin and returns `--plugin-dir` argv.
+    /// Cursor has no Claude-style `--mcp-config` / Codex `-c mcp_servers…`; the
+    /// documented launch-scoped surface is `--plugin-dir` with `mcp.json` and
+    /// optional `hooks/hooks.json`. Env for the MCP child is baked into
+    /// `mcp.json` because Cursor's stdio MCP subprocess does not reliably
+    /// inherit the agent process environment.
+    static func cursorPluginArgs(
+        _ injection: AgentDescriptor.Injection,
+        sessionID: SessionID,
+        socketPath: String,
+        cliPath: String,
+        injectDir: URL
+    ) -> [String] {
+        guard injection.cursorMCP || injection.cursorHooks else { return [] }
+        let pluginDir = injectDir
+            .appendingPathComponent("cursor-plugin", isDirectory: true)
+            .appendingPathComponent(sessionID.rawValue, isDirectory: true)
+        do {
+            try writeCursorPlugin(
+                into: pluginDir,
+                mcp: injection.cursorMCP,
+                hooks: injection.cursorHooks,
+                sessionID: sessionID,
+                socketPath: socketPath,
+                cliPath: cliPath
+            )
+        } catch {
+            return []
+        }
+        return ["--plugin-dir", pluginDir.path]
+    }
+
+    /// Session-local Cursor plugin: `.cursor-plugin/plugin.json` + optional
+    /// `mcp.json` / `hooks/hooks.json`.
+    ///
+    /// Stages into a fresh temp directory and replaces the live plugin tree so
+    /// a resume that disables MCP or hooks cannot leave the previous files.
+    public static func writeCursorPlugin(
+        into pluginDir: URL,
+        mcp: Bool,
+        hooks: Bool,
+        sessionID: SessionID,
+        socketPath: String,
+        cliPath: String
+    ) throws {
+        let fm = FileManager.default
+        let parent = pluginDir.deletingLastPathComponent()
+        try fm.createDirectory(at: parent, withIntermediateDirectories: true)
+        let staging = parent.appendingPathComponent(
+            ".\(pluginDir.lastPathComponent).\(getpid()).tmp", isDirectory: true)
+        try? fm.removeItem(at: staging)
+        try fm.createDirectory(at: staging, withIntermediateDirectories: true)
+
+        let manifestDir = staging.appendingPathComponent(".cursor-plugin", isDirectory: true)
+        try fm.createDirectory(at: manifestDir, withIntermediateDirectories: true)
+        let manifest: [String: Any] = [
+            "name": "dirijor",
+            "version": "0.1.0",
+            "description": "Diri agent orchestration for Cursor sessions",
+        ]
+        try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+            .write(
+                to: manifestDir.appendingPathComponent("plugin.json"), options: .atomic)
+
+        if mcp {
+            let launch = mcpLaunch(cliPath: cliPath)
+            let server: [String: Any] = [
+                "type": "stdio",
+                // Cursor splits `command` on spaces before spawning it. Keep
+                // App Support paths in argv, where JSON preserves one value.
+                "command": "/usr/bin/env",
+                "args": [launch.command] + launch.args,
+                "env": [
+                    DirijorEnv.sessionID: sessionID.rawValue,
+                    DirijorEnv.socket: socketPath,
+                    DirijorEnv.cli: cliPath,
+                ],
+            ]
+            let mcpConfig: [String: Any] = ["mcpServers": ["dirijor": server]]
+            try JSONSerialization.data(
+                withJSONObject: mcpConfig, options: [.prettyPrinted, .sortedKeys]
+            )
+            .write(to: staging.appendingPathComponent("mcp.json"), options: .atomic)
+        }
+
+        if hooks {
+            let hooksDir = staging.appendingPathComponent("hooks", isDirectory: true)
+            try fm.createDirectory(at: hooksDir, withIntermediateDirectories: true)
+            // Absolute CLI path: Cursor does not expand $DIRIJOR_CLI in hook
+            // commands the way Claude's settings do. Reuse the Claude hook
+            // parser — Stop is strong-idle (done chime); UserPromptSubmit
+            // marks working for the next turn.
+            let quoted = shellQuote(cliPath)
+            let hooksConfig: [String: Any] = [
+                "version": 1,
+                "hooks": [
+                    "stop": [["command": "\(quoted) hook Stop"]],
+                    "beforeSubmitPrompt": [["command": "\(quoted) hook UserPromptSubmit"]],
+                ],
+            ]
+            try JSONSerialization.data(
+                withJSONObject: hooksConfig, options: [.prettyPrinted, .sortedKeys]
+            )
+            .write(to: hooksDir.appendingPathComponent("hooks.json"), options: .atomic)
+        }
+
+        let backup = parent.appendingPathComponent(
+            ".\(pluginDir.lastPathComponent).\(getpid()).old", isDirectory: true)
+        try? fm.removeItem(at: backup)
+        if fm.fileExists(atPath: pluginDir.path) {
+            try fm.moveItem(at: pluginDir, to: backup)
+        }
+        do {
+            try fm.moveItem(at: staging, to: pluginDir)
+            try? fm.removeItem(at: backup)
+        } catch {
+            try? fm.removeItem(at: staging)
+            if fm.fileExists(atPath: backup.path) {
+                try? fm.moveItem(at: backup, to: pluginDir)
+            }
+            throw error
         }
     }
 

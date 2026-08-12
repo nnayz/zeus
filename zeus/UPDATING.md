@@ -137,7 +137,7 @@ bundle itself, which then goes into both the DMG and the update zip.
 ### Env overrides
 
 - `ZEUS_SIGN_IDENTITY` — Developer ID identity (default: auto-detected).
-- `NOTARY_PROFILE` — notarytool profile (default `zeus-notary`).
+- `NOTARY_PROFILE` — notarytool profile (default `zeusctl-notary`).
 - `GH_REPO` — repository to publish to (default `nnayz/zeus`).
 - `TAP_DIR` — clean Homebrew tap checkout (default `../../homebrew-zeus`).
 - `SKIP_CASK=1` — explicitly publish without offering the release via Homebrew.

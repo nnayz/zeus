@@ -1,7 +1,6 @@
 <h1><img src="docs/images/zeus-wordmark.png" alt="Zeus" width="300"></h1>
 
 [![CI](https://github.com/nnayz/zeus/actions/workflows/ci.yml/badge.svg)](https://github.com/nnayz/zeus/actions/workflows/ci.yml)
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![GitHub release](https://img.shields.io/github/v/release/nnayz/zeus)](https://github.com/nnayz/zeus/releases/latest)
 
 Native macOS orchestrator for coding agents. Run Claude Code, Codex, Cursor, Gemini and plain
@@ -123,8 +122,3 @@ vulnerabilities in [private security reports](SECURITY.md). See the
 [roadmap](ROADMAP.md), [support guide](SUPPORT.md), [privacy notice](PRIVACY.md),
 and [governance](GOVERNANCE.md) for project expectations.
 
-## License
-
-Zeus's original source is Apache 2.0. Builds also contain third-party software
-under its own licenses; see [LICENSE](LICENSE), [NOTICE](NOTICE), and the
-machine-checked dependency policy in [`license-policy.json`](license-policy.json).

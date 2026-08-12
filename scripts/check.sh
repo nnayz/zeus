@@ -48,9 +48,6 @@ echo "==> Rust app"
     cargo test --workspace
 )
 
-echo "==> Dependency license policy"
-python3 "${root}/scripts/check-licenses.py"
-
 if [[ "${run_browser}" == "1" ]]; then
     if ! command -v npm >/dev/null 2>&1; then
         echo "error: npm is required for --browser" >&2

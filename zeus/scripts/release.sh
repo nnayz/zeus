@@ -5,7 +5,7 @@
 #
 # Env overrides:
 #   ZEUS_SIGN_IDENTITY  "Developer ID Application: ..." (default: auto-detected)
-#   NOTARY_PROFILE      notarytool keychain profile (default: zeus-notary)
+#   NOTARY_PROFILE      notarytool keychain profile (default: zeusctl-notary)
 #   GH_REPO             GitHub repo to publish to (default: nnayz/zeus)
 #   TAP_DIR             Homebrew tap checkout (default: ../../homebrew-zeus)
 #   SKIP_CASK=1         explicitly publish without updating the Homebrew cask
@@ -40,7 +40,7 @@ DMG="$DIST/zeus-$VERSION-universal.dmg"
 ZIP="$DIST/zeus-$VERSION-universal.zip"
 MANIFEST="$WORKSPACE/crates/zeus-app/Cargo.toml"
 
-NOTARY_PROFILE="${NOTARY_PROFILE:-zeus-notary}"
+NOTARY_PROFILE="${NOTARY_PROFILE:-zeusctl-notary}"
 GH_REPO="${GH_REPO:-nnayz/zeus}"
 # Homebrew tap checkout, bumped in lockstep with each release (step 6).
 TAP_DIR="${TAP_DIR:-$ROOT/../homebrew-zeus}"

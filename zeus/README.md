@@ -5,7 +5,7 @@ and transactional local↔cloud handoff, see [NODE.md](NODE.md).
 
 `zeus` is the Rust + GPUI desktop app, shipped self-contained: the app bundle
 carries the daemon (`zeusd`), the session holders that keep agents alive
-across daemon restarts and upgrades, the `zeus` CLI, and the MCP proxy. The
+across daemon restarts and upgrades, the `zeusctl` CLI, and the MCP proxy. The
 workspace holds the protocol/client core, the session engine, terminal
 renderer, shared design system, session store, usage accounting, and
 window/sidebar shell. [`PLAN.md`](PLAN.md) is the historical record of the

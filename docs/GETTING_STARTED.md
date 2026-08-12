@@ -51,7 +51,7 @@ possible, and avoid forwarding credentials the remote job does not need.
 Run this when the CLI is available:
 
 ```sh
-zeus doctor
+zeusctl doctor
 ```
 
 Daemon logs and session state live under

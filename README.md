@@ -68,7 +68,7 @@ Two processes, one wire protocol:
   headless terminal emulator for status detection, the session registry and persistence,
   worktrees, and the control socket.
 
-`zeus` is a small CLI: the MCP shim injected into agents, the hook and notify forwarders, and
+`zeusctl` is a small CLI: the MCP shim injected into agents, the hook and notify forwarders, and
 `status`/`doctor`. `zeusd-holder` owns the PTY master so sessions survive a daemon restart.
 
 > **A Rust port of the engine is in progress** in `zeus/crates/zeus-engine`, so that zeus can run

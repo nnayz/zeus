@@ -92,9 +92,9 @@ if ! command -v gh >/dev/null 2>&1; then
     exit 1
 fi
 if [ "${SKIP_CASK:-0}" != "1" ] \
-    && [ ! -f "$TAP_DIR/homebrew-zeus/Casks/zeus.rb" ]; then
+    && [ ! -f "$TAP_DIR/Casks/zeus.rb" ]; then
     cat >&2 <<EOF
-error: Zeus checkout is missing homebrew-zeus/Casks/zeus.rb: $TAP_DIR
+error: Zeus checkout is missing Casks/zeus.rb: $TAP_DIR
 
 Set TAP_DIR to a clean nnayz/zeus monorepo checkout. The release cannot claim
 success unless its in-tree cask is pushed and verified. Use SKIP_CASK=1 only

@@ -12,7 +12,7 @@ dmg_path="$2"
 repo_dir="$3"
 gh_repo="${GH_REPO:-nnayz/zeus}"
 gh_bin="${GH_BIN:-gh}"
-cask_relative="homebrew-zeus/Casks/zeus.rb"
+cask_relative="Casks/zeus.rb"
 asset_name="zeus-${version}-universal.dmg"
 
 if ! [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then

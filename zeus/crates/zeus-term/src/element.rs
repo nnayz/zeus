@@ -3,13 +3,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant};
 
-use zeus_proto::grid::{GridCell, GridUpdate};
 use gpui::{
     App, Bounds, ContentMask, Element, ElementId, FocusHandle, Font, FontFallbacks, FontId,
     GlobalElementId, InputHandler, InspectorElementId, IntoElement, LayoutId, PaintQuad, Pixels,
     Point, ShapedLine, SharedString, Style, TextAlign, TextRun, UTF16Selection, Window, fill, font,
     point, px, relative, size,
 };
+use zeus_proto::grid::{GridCell, GridUpdate};
 
 use crate::buffer::{ApplySummary, GridBuffer};
 use crate::find::{FindSnapshot, FindSpan, NavigationTarget, SearchRequest, TerminalFindModel};
@@ -1649,8 +1649,8 @@ mod link_tests {
 
 #[cfg(test)]
 mod history_cache_tests {
-    use zeus_proto::grid::{GridCell, TermColor, TermStyle};
     use gpui::{FontId, ShapedLine};
+    use zeus_proto::grid::{GridCell, TermColor, TermStyle};
 
     use super::{HistoryLineCache, HistoryShapeKey, digest_cells};
 

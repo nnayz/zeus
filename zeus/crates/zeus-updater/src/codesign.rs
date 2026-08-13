@@ -180,7 +180,7 @@ Runtime Version=15.0.0
 "#;
 
     const AD_HOC: &str = r#"
-Executable=/Users/giga/fun/zeusctl/zeus/dist/zeus.app/Contents/MacOS/zeus
+Executable=/Users/giga/fun/zeus/dist/zeus.app/Contents/MacOS/zeus
 Identifier=com.zeus.zeus
 Format=app bundle with Mach-O universal (x86_64 arm64)
 Signature=adhoc
@@ -224,7 +224,7 @@ TeamIdentifier=not set
     #[test]
     fn rejects_a_different_app_from_the_same_developer() {
         let sibling = SignatureInfo {
-            identifier: Some("com.zeusctl.Zeus".to_owned()),
+            identifier: Some("com.zeus.sibling".to_owned()),
             ..SignatureInfo::parse(DEVELOPER_ID)
         };
         assert!(check_identity(&sibling, "AH8WARWU6L", Some("com.zeus.zeus")).is_err());
@@ -243,8 +243,6 @@ TeamIdentifier=not set
             team_identifier: Some("AH8WARWU6L".to_owned()),
             authorities: vec!["Apple Development: Nasrul Huda (ABCDE12345)".to_owned()],
         };
-        assert!(
-            check_identity(&apple_development, "AH8WARWU6L", Some("com.zeus.zeus")).is_err()
-        );
+        assert!(check_identity(&apple_development, "AH8WARWU6L", Some("com.zeus.zeus")).is_err());
     }
 }

@@ -13,8 +13,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use zeus_proto::{ArtifactKind, DateMillis, PrCheck, PrDiscussionItem, PullRequestStatus};
 use serde_json::Value;
+use zeus_proto::{ArtifactKind, DateMillis, PrCheck, PrDiscussionItem, PullRequestStatus};
 
 use crate::attach::AttachHub;
 use crate::events::EventBus;

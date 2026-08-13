@@ -74,7 +74,7 @@ The daemon is built for multiple concurrent clients (per-connection control chan
 | Packaging | `cargo-packager` (universal binary, .app assembly, entitlements) + existing Apple ID / notarytool creds from Zeus's release flow | Updater: a minimal self-updater (`crates/zeus-updater`) reading a JSON feed published with each GitHub Release; Sparkle's appcast was not reusable, and neither was its keypair model. |
 | Repo location | `zeus/` — a Rust workspace **inside this repo** | Keeps the Swift protocol files adjacent as the porting reference; the Swift build ignores it; agents can worktree it. |
 
-Community prior art worth skimming (not depending on): **tty7** (GPU terminal client for a daemon — architecturally closest to zeus), **Loungy** (status item, panel windows, packaging), **Arbor / Rabbitty / hunk** (GPUI agent orchestrators).
+Prior art worth skimming (not depending on): **tty7** (GPU terminal client for a daemon — architecturally closest to zeus), **Loungy** (status item, panel windows, packaging), **Arbor / Rabbitty / hunk** (GPUI agent orchestrators).
 
 ---
 

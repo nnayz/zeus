@@ -13,9 +13,9 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use zeus_updater::{Release, StagedUpdate, UpdateError, Updater, UpdaterConfig};
 use tokio::runtime::Runtime;
 use tokio::sync::{mpsc, watch};
+use zeus_updater::{Release, StagedUpdate, UpdateError, Updater, UpdaterConfig};
 
 /// How long after launch the first background check runs. Long enough to stay
 /// out of the way of startup work.
@@ -85,9 +85,9 @@ impl UpdateState {
     pub fn summary(&self) -> String {
         match &self.phase {
             UpdatePhase::Unsupported(_) => "Updates off for this build".to_owned(),
-            UpdatePhase::Idle => format!("zeus {}", self.current_version),
+            UpdatePhase::Idle => format!("Zeus {}", self.current_version),
             UpdatePhase::Checking => "Checking for updates…".to_owned(),
-            UpdatePhase::UpToDate => format!("zeus {} is up to date", self.current_version),
+            UpdatePhase::UpToDate => format!("Zeus {} is up to date", self.current_version),
             UpdatePhase::Available(release) => format!("Update to {}", release.version),
             UpdatePhase::Downloading { progress, .. } => {
                 format!("Downloading… {}%", (progress * 100.0).round() as u32)
@@ -482,10 +482,10 @@ mod tests {
 
     #[test]
     fn an_idle_build_just_names_its_version() {
-        assert_eq!(state(UpdatePhase::Idle, false).summary(), "zeus 0.4.2");
+        assert_eq!(state(UpdatePhase::Idle, false).summary(), "Zeus 0.4.2");
         assert_eq!(
             state(UpdatePhase::UpToDate, true).summary(),
-            "zeus 0.4.2 is up to date"
+            "Zeus 0.4.2 is up to date"
         );
     }
 

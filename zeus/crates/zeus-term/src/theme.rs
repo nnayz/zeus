@@ -1,5 +1,5 @@
-use zeus_proto::grid::{GridCell, TermColor, TermStyle};
 use gpui::Rgba;
+use zeus_proto::grid::{GridCell, TermColor, TermStyle};
 
 const fn rgba_f32(r: f32, g: f32, b: f32, a: f32) -> Rgba {
     Rgba { r, g, b, a }

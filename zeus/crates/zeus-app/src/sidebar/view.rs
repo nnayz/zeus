@@ -2,6 +2,13 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
+use gpui::{
+    Anchor, AnyElement, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle,
+    Focusable, FontWeight, Hsla, IntoElement, MouseButton, Pixels, Point, Render, Rgba,
+    ScrollHandle, SharedString, Task, Window, anchored, deferred, div, linear_color_stop,
+    linear_gradient, point, prelude::*, px,
+};
+use tokio::sync::mpsc;
 use zeus_proto::remote_pty::PersistenceCapability;
 use zeus_proto::{
     AgentKind as ProtoAgentKind, AttentionLevel as ProtoAttentionLevel, ProjectId, SessionId,
@@ -12,13 +19,6 @@ use zeus_ui::{
     HoverMarquee, Ink, LoadingIndicator, Metrics, Radius, RowFill, SemanticColors, Space,
     StatusGlyph, StatusState, Typo,
 };
-use gpui::{
-    Anchor, AnyElement, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle,
-    Focusable, FontWeight, Hsla, IntoElement, MouseButton, Pixels, Point, Render, Rgba,
-    ScrollHandle, SharedString, Task, Window, anchored, deferred, div, linear_color_stop,
-    linear_gradient, point, prelude::*, px,
-};
-use tokio::sync::mpsc;
 
 use crate::macos::sf_symbols::{SymbolWeight, sf_symbol, sf_symbol_weighted};
 use crate::navigation::query_label;
@@ -186,8 +186,7 @@ impl Sidebar {
         };
         sidebar.ui.preview_account = preview;
         // Preview-only hook so headless screenshots can verify popover layout.
-        if preview
-            && std::env::var("ZEUS_SIDEBAR_POPOVER").is_ok_and(|value| value == "new-agent")
+        if preview && std::env::var("ZEUS_SIDEBAR_POPOVER").is_ok_and(|value| value == "new-agent")
         {
             sidebar.ui.popover = Some(Popover::NewAgent {
                 directory: None,

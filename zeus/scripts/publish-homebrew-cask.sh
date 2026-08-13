@@ -3,16 +3,16 @@
 set -euo pipefail
 
 if [[ $# -ne 3 ]]; then
-    echo "usage: $0 <version> <dmg-path> <tap-checkout>" >&2
+    echo "usage: $0 <version> <dmg-path> <repo-checkout>" >&2
     exit 2
 fi
 
 version="$1"
 dmg_path="$2"
-tap_dir="$3"
+repo_dir="$3"
 gh_repo="${GH_REPO:-nnayz/zeus}"
 gh_bin="${GH_BIN:-gh}"
-cask_relative="Casks/zeus.rb"
+cask_relative="homebrew-zeus/Casks/zeus.rb"
 asset_name="zeus-${version}-universal.dmg"
 
 if ! [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -23,8 +23,8 @@ if [[ ! -f "${dmg_path}" ]]; then
     echo "error: DMG does not exist: ${dmg_path}" >&2
     exit 1
 fi
-if [[ ! -d "${tap_dir}/.git" || ! -f "${tap_dir}/${cask_relative}" ]]; then
-    echo "error: Homebrew tap checkout is missing ${cask_relative}: ${tap_dir}" >&2
+if [[ ! -d "${repo_dir}/.git" || ! -f "${repo_dir}/${cask_relative}" ]]; then
+    echo "error: Zeus checkout is missing ${cask_relative}: ${repo_dir}" >&2
     exit 1
 fi
 
@@ -52,49 +52,49 @@ EOF
     exit 1
 fi
 
-if [[ -n "$(git -C "${tap_dir}" status --porcelain --untracked-files=no)" ]]; then
-    echo "error: tracked changes in Homebrew tap checkout: ${tap_dir}" >&2
+if [[ -n "$(git -C "${repo_dir}" status --porcelain --untracked-files=no)" ]]; then
+    echo "error: tracked changes in Zeus checkout: ${repo_dir}" >&2
     exit 1
 fi
 
-branch="$(git -C "${tap_dir}" branch --show-current)"
+branch="$(git -C "${repo_dir}" branch --show-current)"
 if [[ -z "${branch}" ]]; then
-    echo "error: Homebrew tap checkout is on a detached HEAD" >&2
+    echo "error: Zeus checkout is on a detached HEAD" >&2
     exit 1
 fi
-if ! upstream="$(git -C "${tap_dir}" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null)"; then
-    echo "error: Homebrew tap branch '${branch}' has no upstream" >&2
+if ! upstream="$(git -C "${repo_dir}" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null)"; then
+    echo "error: Zeus branch '${branch}' has no upstream" >&2
     exit 1
 fi
 remote="${upstream%%/*}"
 remote_branch="${upstream#*/}"
 
-# Fetch before editing so a concurrent tap update either fast-forwards cleanly
+# Fetch before editing so a concurrent repository update fast-forwards cleanly
 # or stops here. A non-fast-forward push below is the second race barrier.
-git -C "${tap_dir}" pull --ff-only --quiet "${remote}" "${remote_branch}"
+git -C "${repo_dir}" pull --ff-only --quiet "${remote}" "${remote_branch}"
 
 /usr/bin/sed -i '' -E \
     -e "s|^  version \".*\"$|  version \"${version}\"|" \
     -e "s|^  sha256 \".*\"$|  sha256 \"${local_sha}\"|" \
-    "${tap_dir}/${cask_relative}"
+    "${repo_dir}/${cask_relative}"
 
-if ! grep -q "^  version \"${version}\"$" "${tap_dir}/${cask_relative}" \
-    || ! grep -q "^  sha256 \"${local_sha}\"$" "${tap_dir}/${cask_relative}"; then
+if ! grep -q "^  version \"${version}\"$" "${repo_dir}/${cask_relative}" \
+    || ! grep -q "^  sha256 \"${local_sha}\"$" "${repo_dir}/${cask_relative}"; then
     echo "error: Homebrew cask update did not apply cleanly" >&2
     exit 1
 fi
 
-if ! git -C "${tap_dir}" diff --quiet -- "${cask_relative}"; then
-    git -C "${tap_dir}" add "${cask_relative}"
-    git -C "${tap_dir}" commit -q -m "zeus ${version}" -- "${cask_relative}"
+if ! git -C "${repo_dir}" diff --quiet -- "${cask_relative}"; then
+    git -C "${repo_dir}" add "${cask_relative}"
+    git -C "${repo_dir}" commit -q -m "zeus ${version}" -- "${cask_relative}"
 fi
 
 # Always push: this is load-bearing for recovery from issue #9, where the
 # correct cask commit already existed locally and the remote was still stale.
-git -C "${tap_dir}" push --quiet "${remote}" "HEAD:${remote_branch}"
-git -C "${tap_dir}" fetch --quiet "${remote}" "${remote_branch}"
+git -C "${repo_dir}" push --quiet "${remote}" "HEAD:${remote_branch}"
+git -C "${repo_dir}" fetch --quiet "${remote}" "${remote_branch}"
 
-remote_cask="$(git -C "${tap_dir}" show "FETCH_HEAD:${cask_relative}")"
+remote_cask="$(git -C "${repo_dir}" show "FETCH_HEAD:${cask_relative}")"
 remote_version="$(sed -n 's/^  version "\(.*\)"$/\1/p' <<<"${remote_cask}")"
 remote_sha="$(sed -n 's/^  sha256 "\([0-9a-f]*\)"$/\1/p' <<<"${remote_cask}")"
 if [[ "${remote_version}" != "${version}" || "${remote_sha}" != "${published_sha}" ]]; then

@@ -10,6 +10,8 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use zeus_proto::HostEntry;
 use zeus_proto::remote_pty::{
     DirectoryListRequest, DirectoryListResult, EnvironmentCaptureRequest, EnvironmentCaptureResult,
@@ -17,8 +19,6 @@ use zeus_proto::remote_pty::{
     PersistenceCapability, PersistenceProbeAction, PersistenceProbeRequest, PersistenceProbeResult,
     ProtocolVersion, SessionInspection, SessionSelector,
 };
-use serde::Deserialize;
-use sha2::{Digest, Sha256};
 
 use super::bootstrap::{PackagedArtifact, PlatformProbe, RemoteInstallLayout, RemoteTarget};
 use super::executor::{CommandOutput, ProcessExecutor, SshChannel};

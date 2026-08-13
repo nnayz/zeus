@@ -5,6 +5,19 @@ use std::rc::Rc;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use gpui::{
+    AnyElement, App, Bounds, ClickEvent, Context, CursorStyle, FocusHandle, Focusable, FontWeight,
+    IntoElement, KeyDownEvent, MouseButton, Pixels, Render, Rgba, SharedString, Task, TextRun,
+    Window, actions, canvas, deferred, div, font, prelude::*, px, rgba,
+};
+use tokio::runtime::Runtime;
+use zeus_proto::{AgentKind as ProtoAgentKind, HistoryEntry, HostEntry, HostsConfig};
+use zeus_term::theme::{TermTheme, ThemeAppearance};
+use zeus_ui::{
+    AgentLogo, Fill, FloatingSurface, HairlineDivider, Ink, LoadingIndicator, Metrics, Palette,
+    Radius, SemanticColors, Space, Typo,
+};
+
 use crate::macos::sf_symbols::{SymbolWeight, sf_symbol, sf_symbol_weighted};
 use crate::navigation::query_label;
 use crate::query_editor::{self, ClipboardEdit, Edit, QueryEditor};
@@ -12,18 +25,6 @@ use crate::settings::{HostDraft, SettingsTab, default_agent_label, theme};
 use crate::store::{Prefs, SessionStore, StoreRuntime};
 use crate::updates::{UpdateCommand, UpdateHandle, UpdatePhase};
 use crate::worktrees::WorktreesSheet;
-use zeus_proto::{AgentKind as ProtoAgentKind, HistoryEntry, HostEntry, HostsConfig};
-use zeus_term::theme::{TermTheme, ThemeAppearance};
-use zeus_ui::{
-    AgentLogo, Fill, FloatingSurface, HairlineDivider, Ink, LoadingIndicator, Metrics, Palette,
-    Radius, SemanticColors, Space, Typo,
-};
-use gpui::{
-    AnyElement, App, Bounds, ClickEvent, Context, CursorStyle, FocusHandle, Focusable, FontWeight,
-    IntoElement, KeyDownEvent, MouseButton, Pixels, Render, Rgba, SharedString, Task, TextRun,
-    Window, actions, canvas, deferred, div, font, prelude::*, px, rgba,
-};
-use tokio::runtime::Runtime;
 
 const SETTINGS_WIDTH: f32 = 600.0;
 const SETTINGS_HEIGHT: f32 = 420.0;
@@ -1536,8 +1537,8 @@ impl UtilitySurfaces {
                         .flex()
                         .flex_col()
                         .child(toggle_row(
-                            "Start zeus at login",
-                            "Open zeus automatically after you sign in.",
+                            "Start Zeus at login",
+                            "Open Zeus automatically after you sign in.",
                             self.prefs.start_at_login,
                             "toggle-login",
                             colors,

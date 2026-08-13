@@ -17,9 +17,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use zeus_proto::paths::{ZeusPaths, ENV_SOCKET};
-use zeus_proto::{ControlMessage, HelloParams, HelloResult, Method, RUST_ENGINE_KIND};
 use sha2::{Digest, Sha256};
+use zeus_proto::paths::{ENV_SOCKET, ZeusPaths};
+use zeus_proto::{ControlMessage, HelloParams, HelloResult, Method, RUST_ENGINE_KIND};
 
 /// Explicit development/test override pointing at an Engine executable.
 const ENV_DAEMON_PATH: &str = "ZEUSD_PATH";

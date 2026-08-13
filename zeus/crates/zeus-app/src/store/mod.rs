@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use tokio::sync::{broadcast, mpsc};
+use tokio::task::JoinHandle;
 use zeus_client::{ClientError, ConnectionState, DaemonClient, EventEnvelope};
 use zeus_proto::paths::ZeusPaths;
 use zeus_proto::remote_pty::DirectoryListResult;
@@ -18,8 +20,6 @@ use zeus_proto::{
     ExitReason, GovernorConfigureParams, HostEntry, HostsConfig, Project, ProjectId, Resumability,
     SessionId, SessionListResult, SessionRecord, SessionSpawnParams, SessionStatus,
 };
-use tokio::sync::{broadcast, mpsc};
-use tokio::task::JoinHandle;
 
 use crate::notifications::{
     SendTextCommand, StatusTransition, migration_transition, prefs_sync_transition,

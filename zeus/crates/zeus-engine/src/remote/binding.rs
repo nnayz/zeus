@@ -5,8 +5,8 @@ use std::io::{self, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-use zeus_proto::remote_pty::{ProtocolVersion, SessionToken};
 use serde::{Deserialize, Serialize};
+use zeus_proto::remote_pty::{ProtocolVersion, SessionToken};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]

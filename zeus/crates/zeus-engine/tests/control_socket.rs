@@ -10,11 +10,11 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex};
 
+use serde_json::json;
 use zeus_engine::control::ControlServer;
 use zeus_engine::detect::ManifestEngine;
 use zeus_engine::registry::Registry;
 use zeus_proto::{ControlMessage, RUST_ENGINE_KIND, WIRE_VERSION};
-use serde_json::json;
 
 fn engine() -> Arc<ManifestEngine> {
     let dir = zeus_engine::detect::bundled_manifest_dir()

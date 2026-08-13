@@ -18,10 +18,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use zeus_proto::control::MAX_CONTROL_LINE_BYTES;
-use zeus_proto::{ControlError, ControlMessage, JsonValue, Method, WIRE_VERSION};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use zeus_proto::control::MAX_CONTROL_LINE_BYTES;
+use zeus_proto::{ControlError, ControlMessage, JsonValue, Method, WIRE_VERSION};
 
 use crate::registry::Registry;
 

@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use zeus_proto::{SessionId, SessionStatus};
 use serde_json::{Value, json};
+use zeus_proto::{SessionId, SessionStatus};
 
 use super::ToolHost;
 use crate::git;

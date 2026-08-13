@@ -318,9 +318,7 @@ mod tests {
             installed_signature: SignatureInfo {
                 identifier: Some("com.zeus.zeus".to_owned()),
                 team_identifier: Some("A56RVNJ69X".to_owned()),
-                authorities: vec![
-                    "Developer ID Application: Nasrul Huda (A56RVNJ69X)".to_owned(),
-                ],
+                authorities: vec!["Developer ID Application: Nasrul Huda (A56RVNJ69X)".to_owned()],
             },
             // A version below the release so `download` has something to fetch.
             current_version: Version::new(0, 0, 1),

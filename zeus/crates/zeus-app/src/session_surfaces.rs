@@ -9,6 +9,11 @@ use crate::store::{SessionStore, StoreRuntime};
 use crate::switcher::{
     OverviewArrow, OverviewFilter, OverviewLane, OverviewMode, SwitcherKey, display_title,
 };
+use gpui::{
+    AnyElement, BoxShadow, ClickEvent, Context, Entity, FocusHandle, FontWeight, KeyDownEvent,
+    KeyUpEvent, ModifiersChangedEvent, MouseButton, Render, ScrollHandle, SharedString, Task,
+    Window, div, point, prelude::*, px, rgba,
+};
 use zeus_proto::{
     AgentKind as ProtoAgentKind, AttentionLevel, RiskHint, SessionId, SessionRecord, SessionStatus,
 };
@@ -16,11 +21,6 @@ use zeus_term::element::{SharedGridBuffer, TerminalElement};
 use zeus_ui::{
     AgentKind, AgentLogo, HairlineDivider, Ink, Palette, Radius, SemanticColors, StatusGlyph,
     StatusState,
-};
-use gpui::{
-    AnyElement, BoxShadow, ClickEvent, Context, Entity, FocusHandle, FontWeight, KeyDownEvent,
-    KeyUpEvent, ModifiersChangedEvent, MouseButton, Render, ScrollHandle, SharedString, Task,
-    Window, div, point, prelude::*, px, rgba,
 };
 
 pub struct SessionSurfaces {
@@ -1480,11 +1480,11 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use gpui::{ScrollDelta, ScrollWheelEvent, StyleRefinement, TestAppContext, size};
     use zeus_proto::{
         AgentKind as ProtoAgentKind, DateMillis, Project, ProjectId, Resumability,
         SessionListResult, TitleSource,
     };
-    use gpui::{ScrollDelta, ScrollWheelEvent, StyleRefinement, TestAppContext, size};
 
     struct OverviewHarness {
         surfaces: Entity<SessionSurfaces>,

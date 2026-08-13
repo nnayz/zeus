@@ -8,9 +8,10 @@ Zeus requires macOS 15 or newer. Install the signed, notarized universal build:
 brew install --cask nnayz/zeus/zeus
 ```
 
-Alternatively, download the latest DMG from [GitHub Releases](https://github.com/nnayz/zeus/releases/latest),
-open it, and drag Zeus to Applications. The app checks the same release feed for
-updates; it never installs one until you click restart.
+Alternatively, download the latest DMG from
+[GitHub Releases](https://github.com/nnayz/zeus/releases/latest), open it, and
+drag Zeus to Applications. The app checks the same release feed for updates; it
+never installs one until you click restart. See [Updates](updates.md).
 
 ## Your first session
 
@@ -29,9 +30,9 @@ terminal.
 ## Parallel work with worktrees
 
 Create separate sessions with separate git worktrees when agents may edit the
-same repository. This keeps branches and working trees isolated while Zeus
-gives you one place to monitor them. Treat each worktree as a normal checkout:
-commit or move changes before deleting it.
+same repository. This keeps branches and working trees isolated while Zeus gives
+you one place to monitor them. Treat each worktree as a normal checkout: commit
+or move changes before deleting it.
 
 ## Agent orchestration
 
@@ -40,24 +41,27 @@ sessions when you explicitly configure the MCP server. That capability is
 powerful: it can launch local processes with your user privileges. Only expose
 it to agents you trust and review requested actions.
 
-## Remote hosts
+## Remote execution
 
-Remote sessions use SSH and tmux; Zeus does not run a hosted relay. Start with
-the [remote-node guide](../zeus/NODE.md), use a dedicated non-admin account when
-possible, and avoid forwarding credentials the remote job does not need.
+- **SSH hosts** — add machines under Settings → Remote. See
+  [Remote hosts](remote-hosts.md).
+- **First-party nodes** — optional `zeus-node` for accounts, usage, and handoff
+  on a VPS. See [Remote nodes](remote-nodes.md).
+
+Prefer a dedicated non-admin account when possible, and avoid forwarding
+credentials the remote job does not need.
 
 ## Diagnostics
 
-Run this when the CLI is available:
-
 ```sh
-zeusctl doctor
+zeus doctor
 ```
 
 Daemon logs and session state live under
-`~/Library/Application Support/Zeus`. Logs may contain terminal output,
-paths, or secrets printed by a process, so redact them before filing an issue.
-See [SUPPORT.md](../SUPPORT.md) for the details to include.
+`~/Library/Application Support/Zeus`. Logs may contain terminal output, paths,
+or secrets printed by a process — redact them before sharing. Email
+**[hi@nasrul.info](mailto:hi@nasrul.info)** for help; see [Support](support.md)
+for what to include.
 
 ## Local data and uninstalling
 
@@ -70,5 +74,5 @@ also want to remove its local state:
 ~/Library/Caches/zeus/updates
 ```
 
-Read [PRIVACY.md](../PRIVACY.md) and the [security model](SECURITY-MODEL.md)
-before using Zeus with sensitive repositories or remote hosts.
+Read [Privacy](privacy.md) and the [security model](security-model.md) before
+using Zeus with sensitive repositories or remote hosts.

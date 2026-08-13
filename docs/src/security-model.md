@@ -41,14 +41,14 @@ The updater downloads a versioned ZIP from GitHub Releases, checks its SHA-256
 from the release feed, verifies the code signature, requires the running app's
 Team ID and bundle identifier, validates notarization, and refuses downgrades.
 Published release assets are treated as immutable. Details are in
-[UPDATING.md](../zeus/UPDATING.md).
+[Updates](updates.md).
 
 ## Sensitive data
 
 Terminal replay logs can contain prompts, output, paths, and secrets emitted by
 tools. PR monitoring, remote hosts, and third-party agents can send data to their
 own services. Zeus itself has no account, analytics, or telemetry service; see
-[PRIVACY.md](../PRIVACY.md).
+[Privacy](privacy.md).
 
 ## Security assumptions
 
@@ -58,9 +58,10 @@ Zeus assumes:
 - installed agents, MCP servers, hooks, and shell configuration are trusted;
 - GitHub, Apple code-signing/notarization, Homebrew, SSH, and dependency sources
   provide the guarantees documented by those systems;
-- contributors and release operators protect their GitHub and Apple credentials.
+- release operators protect their GitHub and Apple credentials.
 
 ## Reporting
 
 Report boundary bypasses, unsafe IPC/update behavior, credential disclosure,
-and unintended code execution privately through [SECURITY.md](../SECURITY.md).
+and unintended code execution to **[hi@nasrul.info](mailto:hi@nasrul.info)**
+(see the [security policy](security-policy.md)).

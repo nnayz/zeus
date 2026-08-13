@@ -1,13 +1,13 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use tempfile::tempdir;
+use tokio::sync::mpsc;
 use zeus_proto::{
     AgentDescriptor, AgentKind, AgentReadinessItem, AgentReadinessResult, AttentionLevel,
     DateMillis, ExitInfo, ExitReason, Project, ProjectId, Resumability, SessionId,
     SessionListResult, SessionRecord, SessionStatus, TitleSource,
 };
-use tempfile::tempdir;
-use tokio::sync::mpsc;
 
 use crate::notifications::NotificationSound;
 

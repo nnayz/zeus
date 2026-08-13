@@ -76,12 +76,8 @@ mod tests {
     #[test]
     fn release_bundle_cannot_show_dev_identity() {
         assert!(
-            DevBuildIdentity::from_parts(
-                Some("1"),
-                Some("com.zeus.zeus"),
-                Some("main@abc1234"),
-            )
-            .is_none()
+            DevBuildIdentity::from_parts(Some("1"), Some("com.zeus.zeus"), Some("main@abc1234"),)
+                .is_none()
         );
     }
 

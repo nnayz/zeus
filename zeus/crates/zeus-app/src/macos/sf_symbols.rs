@@ -5,8 +5,8 @@
 //! every existing control gets the new SVG immediately, while views can move
 //! to semantic `IconName` values independently.
 
-use zeus_ui::{IconName, icon_from_system_name};
 use gpui::{AnyElement, Rgba};
+use zeus_ui::{IconName, icon_from_system_name};
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub enum SymbolWeight {

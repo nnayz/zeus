@@ -52,11 +52,7 @@ impl SidebarPreviewFixture {
         // A stable clock makes screenshot output deterministic while retaining
         // the exact relative intervals used by the Swift fixture.
         let now = 1_750_000_000_000.0;
-        let zeus = project(
-            "preview-zeus",
-            "/Users/preview/Projects/zeus",
-            "Zeus",
-        );
+        let zeus = project("preview-zeus", "/Users/preview/Projects/zeus", "Zeus");
         let anara = project("preview-anara", "/Users/preview/Projects/anara", "Anara");
         let settings = project(
             "preview-settings-kit",

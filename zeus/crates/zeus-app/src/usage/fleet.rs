@@ -1,10 +1,10 @@
 use std::path::Path;
 use std::time::Duration;
 
+use tokio::task::JoinSet;
 use zeus_client::NodeClient;
 use zeus_proto::paths::ZeusPaths;
 use zeus_proto::{HostsConfig, ProviderKind, UsageQueryParams};
-use tokio::task::JoinSet;
 
 use super::{Clock, ProviderUsage, SystemClock, UsageSnapshot, UsageTotals};
 

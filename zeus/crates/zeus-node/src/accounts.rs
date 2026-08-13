@@ -3,11 +3,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use serde::{Deserialize, Serialize};
 use zeus_proto::{
     AccountCatalogResult, AccountInstallation, AccountProfile, AccountSetDefaultParams,
     AccountUpsertParams, InstallationStatus, ProviderKind,
 };
-use serde::{Deserialize, Serialize};
 
 use crate::config::{NodePaths, atomic_json, set_owner_directory};
 use crate::error::{NodeError, NodeResult};

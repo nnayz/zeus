@@ -26,21 +26,21 @@ actions!(zeus, [ToggleCommandPalette, ToggleQuickOpen]);
 /// The search field above the results, and the gap the surface keeps from the
 /// window edges. Everything else is measured against the live viewport so the
 /// list grows into a tall window and never overflows a short one.
-const SEARCH_HEIGHT: f32 = 46.0;
-const ROW_HEIGHT: f32 = 32.0;
-const QUICK_ROW_HEIGHT: f32 = 34.0;
+const SEARCH_HEIGHT: f32 = 34.0;
+const ROW_HEIGHT: f32 = 24.0;
+const QUICK_ROW_HEIGHT: f32 = 26.0;
 /// Quick Open rows that show a parent path stack two lines.
-const QUICK_ROW_HEIGHT_WITH_PATH: f32 = 44.0;
-const SECTION_HEADER_HEIGHT: f32 = 24.0;
-const LIST_PADDING_X: f32 = 8.0;
-const LIST_PADDING_Y: f32 = 6.0;
-const ROW_PADDING_X: f32 = 14.0;
-const SURFACE_WIDTH: f32 = 580.0;
+const QUICK_ROW_HEIGHT_WITH_PATH: f32 = 33.0;
+const SECTION_HEADER_HEIGHT: f32 = 18.0;
+const LIST_PADDING_X: f32 = 6.0;
+const LIST_PADDING_Y: f32 = 3.0;
+const ROW_PADDING_X: f32 = 10.0;
+const SURFACE_WIDTH: f32 = 540.0;
 const MIN_LIST_HEIGHT: f32 = 96.0;
-const MAX_LIST_HEIGHT: f32 = 640.0;
+const MAX_LIST_HEIGHT: f32 = 600.0;
 const MIN_TOP_INSET: f32 = 12.0;
-const MAX_TOP_INSET: f32 = 96.0;
-const BOTTOM_INSET: f32 = 24.0;
+const MAX_TOP_INSET: f32 = 72.0;
+const BOTTOM_INSET: f32 = 16.0;
 
 /// Where the overlay sits and how tall its list may grow in this window.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -623,6 +623,10 @@ impl NavigationOverlay {
             }
             PaletteCommand::OpenSettings => {
                 cx.emit(NavigationEvent::OpenSettings);
+                self.close_overlay(cx);
+            }
+            PaletteCommand::OpenDocumentation => {
+                cx.open_url(crate::settings::DOCS_URL);
                 self.close_overlay(cx);
             }
             PaletteCommand::CheckForUpdates => {
@@ -1344,13 +1348,13 @@ mod tests {
         // The old fixed 400pt list wasted a tall window and overflowed a short
         // one; both directions now track the viewport.
         assert!(layout(1400.0, 1100.0).list_height > px(400.0));
-        assert!(layout(900.0, 495.0).list_height < px(400.0));
+        assert!(layout(900.0, 460.0).list_height < px(400.0));
         // Beyond the cap the surface stops growing rather than becoming a wall.
         assert_eq!(layout(1600.0, 3000.0).list_height, px(MAX_LIST_HEIGHT));
         // A window too short for the minimum list gives up its top inset first,
         // down to the floor.
-        let cramped = layout(800.0, 180.0);
-        assert!(cramped.top_inset < px(180.0 / 12.0));
+        let cramped = layout(800.0, 160.0);
+        assert!(cramped.top_inset < px(160.0 / 12.0));
         assert_eq!(cramped.list_height, px(MIN_LIST_HEIGHT));
         assert_eq!(layout(800.0, 150.0).top_inset, px(MIN_TOP_INSET));
     }

@@ -11,7 +11,7 @@ use tokio::sync::{Mutex, RwLock, broadcast, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use zeus_proto::control::{ControlError, ControlMessage, JsonValue, encode_line};
 use zeus_proto::methods::*;
-use zeus_proto::model::{Project, SessionId, SessionRecord, WorktreeInfo};
+use zeus_proto::model::{Project, ProjectId, SessionId, SessionRecord, WorktreeInfo};
 use zeus_proto::paths::ZeusPaths;
 
 use crate::connection::ActiveConnection;
@@ -725,6 +725,11 @@ impl DaemonClient {
 
     pub async fn project_add(&self, root: String) -> Result<Project, ClientError> {
         self.typed(Method::PROJECT_ADD, &ProjectAddParams { root })
+            .await
+    }
+
+    pub async fn project_remove(&self, id: ProjectId) -> Result<(), ClientError> {
+        self.empty(Method::PROJECT_REMOVE, &ProjectRemoveParams { id })
             .await
     }
 

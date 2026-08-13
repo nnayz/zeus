@@ -5,6 +5,22 @@ pub const fn rgba_f32(r: f32, g: f32, b: f32, a: f32) -> Rgba {
     Rgba { r, g, b, a }
 }
 
+const fn hex(value: u32) -> Rgba {
+    Rgba {
+        r: ((value >> 16) & 0xff) as f32 / 255.0,
+        g: ((value >> 8) & 0xff) as f32 / 255.0,
+        b: (value & 0xff) as f32 / 255.0,
+        a: 1.0,
+    }
+}
+
+const fn hex_with_alpha(value: u32, alpha: f32) -> Rgba {
+    Rgba {
+        a: alpha,
+        ..hex(value)
+    }
+}
+
 /// Continuous-corner radii from the Swift design system.
 ///
 /// GPUI's rounded rectangles are circular, not continuous squircles. Consumers
@@ -13,11 +29,11 @@ pub const fn rgba_f32(r: f32, g: f32, b: f32, a: f32) -> Rgba {
 pub struct Radius;
 
 impl Radius {
-    pub const CHIP: f32 = 5.0;
-    pub const BADGE: f32 = 6.0;
-    pub const ROW: f32 = 7.0;
-    pub const CARD: f32 = 10.0;
-    pub const PANEL: f32 = 12.0;
+    pub const CHIP: f32 = 4.0;
+    pub const BADGE: f32 = 5.0;
+    pub const ROW: f32 = 5.0;
+    pub const CARD: f32 = 8.0;
+    pub const PANEL: f32 = 10.0;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -41,13 +57,13 @@ pub struct TypeStyle {
 pub struct Typo;
 
 impl Typo {
-    pub const META: TypeStyle = TypeStyle::new(11.0, FontWeight::MEDIUM, false);
-    pub const SECTION_HEADER: TypeStyle = TypeStyle::new(11.0, FontWeight::SEMIBOLD, false);
-    pub const ROW: TypeStyle = TypeStyle::new(13.0, FontWeight::NORMAL, false);
-    pub const ROW_EMPHASIZED: TypeStyle = TypeStyle::new(13.0, FontWeight::MEDIUM, false);
-    pub const TITLE: TypeStyle = TypeStyle::new(13.0, FontWeight::SEMIBOLD, false);
-    pub const DISPLAY_TITLE: TypeStyle = TypeStyle::new(15.0, FontWeight::SEMIBOLD, false);
-    pub const META_MONO: TypeStyle = TypeStyle::new(11.0, FontWeight::MEDIUM, true);
+    pub const META: TypeStyle = TypeStyle::new(10.5, FontWeight::MEDIUM, false);
+    pub const SECTION_HEADER: TypeStyle = TypeStyle::new(10.5, FontWeight::SEMIBOLD, false);
+    pub const ROW: TypeStyle = TypeStyle::new(12.5, FontWeight::NORMAL, false);
+    pub const ROW_EMPHASIZED: TypeStyle = TypeStyle::new(12.5, FontWeight::MEDIUM, false);
+    pub const TITLE: TypeStyle = TypeStyle::new(12.5, FontWeight::SEMIBOLD, false);
+    pub const DISPLAY_TITLE: TypeStyle = TypeStyle::new(14.0, FontWeight::SEMIBOLD, false);
+    pub const META_MONO: TypeStyle = TypeStyle::new(10.5, FontWeight::MEDIUM, true);
 
     pub const ALL: [(TextRole, TypeStyle); 7] = [
         (TextRole::Meta, Self::META),
@@ -119,15 +135,15 @@ impl SemanticColors {
     }
 
     pub const fn dark() -> Self {
-        let foreground = rgba_f32(1.0, 1.0, 1.0, 1.0);
+        let foreground = hex(0xcccccc);
         Self {
             appearance: Appearance::Dark,
             primary: foreground,
-            secondary: rgba_f32(1.0, 1.0, 1.0, 0.60),
-            tertiary: rgba_f32(1.0, 1.0, 1.0, 0.30),
-            background: rgba_f32(0.071, 0.075, 0.094, 1.0),
-            sidebar_surface: rgba_f32(0.141, 0.161, 0.196, 0.89),
-            floating_surface: rgba_f32(0.141, 0.161, 0.196, 1.0),
+            secondary: hex_with_alpha(0xcccccc, 0.60),
+            tertiary: hex_with_alpha(0xcccccc, 0.30),
+            background: hex(0x1f1f1f),
+            sidebar_surface: hex_with_alpha(0x181818, 0.94),
+            floating_surface: hex(0x222222),
         }
     }
 
@@ -149,8 +165,8 @@ impl SemanticColors {
                 ..Self::light()
             },
             Appearance::Dark => Self {
-                secondary: rgba_f32(1.0, 1.0, 1.0, 0.70),
-                tertiary: rgba_f32(1.0, 1.0, 1.0, 0.44),
+                secondary: hex_with_alpha(0xcccccc, 0.70),
+                tertiary: hex_with_alpha(0xcccccc, 0.44),
                 ..Self::dark()
             },
         }
@@ -279,23 +295,31 @@ impl Fill {
 pub struct Space;
 
 impl Space {
-    pub const INDENT: f32 = 12.0;
-    pub const ROW_H: f32 = 8.0;
-    pub const INSET: f32 = 10.0;
+    pub const INDENT: f32 = 10.0;
+    pub const ROW_H: f32 = 6.0;
+    pub const INSET: f32 = 8.0;
 }
 
 pub struct Metrics;
 
 impl Metrics {
-    pub const TITLE_BAR: f32 = 42.0;
-    pub const TOOLBAR_EDGE_INSET: f32 = 12.0;
-    pub const TOOLBAR_TRAFFIC_LIGHT_LANE: f32 = 66.0;
-    pub const TOOLBAR_ITEM_GAP: f32 = 8.0;
-    pub const TOOLBAR_COMPACT_GAP: f32 = 4.0;
+    pub const TITLE_BAR: f32 = 38.0;
+    pub const TOOLBAR_EDGE_INSET: f32 = 10.0;
+    /// Window-space x coordinate after the macOS close/minimize/zoom cluster.
+    ///
+    /// Zeus places the close control at x=20. AppKit's 14pt controls and 6pt
+    /// spacing put the zoom control's trailing edge at x=74; the remaining
+    /// 8pt keeps labels from looking attached to (or painting under) it.
+    pub const TOOLBAR_TRAFFIC_LIGHT_SAFE_RIGHT: f32 = 82.0;
+    pub const TOOLBAR_ITEM_GAP: f32 = 6.0;
+    pub const TOOLBAR_COMPACT_GAP: f32 = 3.0;
     pub const TOOLBAR_CONTROL_SIZE: f32 = 26.0;
     pub const TOOLBAR_CHIP_HEIGHT: f32 = 24.0;
-    pub const ROW_HEIGHT: f32 = 28.0;
-    pub const NEW_AGENT_FOOTER: f32 = 32.0;
+    pub const ROW_HEIGHT: f32 = 25.0;
+    /// Rows inside menus, dropdowns, and popovers. Deliberately tighter than
+    /// ROW_HEIGHT: a menu is scanned and dismissed, not lived in.
+    pub const MENU_ROW_HEIGHT: f32 = 22.0;
+    pub const NEW_AGENT_FOOTER: f32 = 28.0;
     pub const TRAFFIC_LIGHT_X_OFFSET: f32 = 12.0;
     pub const TRAFFIC_LIGHT_Y_OFFSET: f32 = 6.0;
 }

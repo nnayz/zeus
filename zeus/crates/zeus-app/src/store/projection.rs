@@ -95,6 +95,12 @@ pub(super) fn build_projection(
             .or_default()
             .push(Arc::clone(session));
     }
+    // A workspace exists before its first agent does. `project.add` persists
+    // that empty state, and the sidebar must retain it so the user has a
+    // concrete project row from which to create the first session.
+    for project_id in projects.keys() {
+        grouped.entry(project_id.clone()).or_default();
+    }
 
     let session_rank = rank_map(&prefs.sidebar_session_order);
     let project_rank = rank_map(&prefs.sidebar_project_order);

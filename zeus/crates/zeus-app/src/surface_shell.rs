@@ -26,11 +26,11 @@ use crate::store::{Prefs, SessionStore, StoreRuntime};
 use crate::updates::{UpdateCommand, UpdateHandle, UpdatePhase};
 use crate::worktrees::WorktreesSheet;
 
-const SETTINGS_WIDTH: f32 = 600.0;
-const SETTINGS_HEIGHT: f32 = 420.0;
-const SETTINGS_NAV_WIDTH: f32 = 150.0;
-const SETTINGS_SECTION_GAP: f32 = 16.0;
-const SETTINGS_ROW_HEIGHT: f32 = 50.0;
+const SETTINGS_WIDTH: f32 = 560.0;
+const SETTINGS_HEIGHT: f32 = 400.0;
+const SETTINGS_NAV_WIDTH: f32 = 140.0;
+const SETTINGS_SECTION_GAP: f32 = 9.0;
+const SETTINGS_ROW_HEIGHT: f32 = 36.0;
 const RESULT_LIMIT: usize = 200;
 /// Reinstall success is confirmation, not persistent host state. Errors stay
 /// actionable and first-time setup keeps its "Use by default" action.
@@ -1458,9 +1458,32 @@ impl UtilitySurfaces {
                             div()
                                 .px(px(Metrics::TOOLBAR_EDGE_INSET))
                                 .pb(px(10.0))
-                                .text_size(px(Typo::META.size))
-                                .text_color(colors.tertiary)
-                                .child(format!("zeus {}", crate::updates::CURRENT_VERSION)),
+                                .flex()
+                                .flex_col()
+                                .gap(px(4.0))
+                                .child(
+                                    div()
+                                        .text_size(px(Typo::META.size))
+                                        .text_color(colors.tertiary)
+                                        .child(format!("zeus {}", crate::updates::CURRENT_VERSION)),
+                                )
+                                .child(
+                                    div()
+                                        .id("settings-documentation")
+                                        .debug_selector(|| "settings-documentation".into())
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(5.0))
+                                        .cursor_pointer()
+                                        .text_size(px(Typo::META.size))
+                                        .text_color(colors.secondary)
+                                        .hover(move |style| style.text_color(colors.primary))
+                                        .on_click(|_, _, cx| {
+                                            cx.open_url(crate::settings::DOCS_URL);
+                                        })
+                                        .child(sf_symbol("link", 10.0, colors.tertiary))
+                                        .child("Documentation"),
+                                ),
                         ),
                 )
                 .child(HairlineDivider::vertical(colors))
@@ -1528,6 +1551,27 @@ impl UtilitySurfaces {
                         "Used by ⌘T and Quick Open.",
                         self.default_agent_dropdown(cx),
                         colors,
+                    ),
+                    colors,
+                ))
+                .child(setting_section(
+                    "Layout",
+                    toggle_row(
+                        "Projects sidebar on the right",
+                        "Puts the sidebar on the trailing edge and the inspector on the leading one.",
+                        self.prefs.sidebar_on_right,
+                        "toggle-sidebar-side",
+                        colors,
+                        cx,
+                        |this, cx| {
+                            this.prefs.sidebar_on_right = !this.prefs.sidebar_on_right;
+                            this.persist_prefs();
+                            // The workbench reads this straight from
+                            // preferences, so the window has to repaint past
+                            // its cached view boundaries to pick it up.
+                            cx.refresh_windows();
+                            cx.notify();
+                        },
                     ),
                     colors,
                 ))
@@ -1665,7 +1709,7 @@ impl UtilitySurfaces {
                 options = options.child(
                     div()
                         .id(SharedString::from(format!("default-agent-option-{index}")))
-                        .min_h(px(Metrics::ROW_HEIGHT))
+                        .min_h(px(Metrics::MENU_ROW_HEIGHT))
                         .px(px(8.0))
                         .py(px(5.0))
                         .flex()
@@ -2760,7 +2804,7 @@ impl UtilitySurfaces {
                         options.child(
                             div()
                                 .id(SharedString::from(format!("terminal-theme-option-{index}")))
-                                .h(px(Metrics::ROW_HEIGHT))
+                                .h(px(Metrics::MENU_ROW_HEIGHT))
                                 .px(px(8.0))
                                 .rounded(px(Radius::ROW))
                                 .flex()
@@ -3434,7 +3478,7 @@ fn settings_choice_row(
 ) -> impl IntoElement {
     div()
         .id(id.into())
-        .h(px(Metrics::ROW_HEIGHT))
+        .h(px(Metrics::MENU_ROW_HEIGHT))
         .px(px(8.0))
         .rounded(px(Radius::ROW))
         .flex()

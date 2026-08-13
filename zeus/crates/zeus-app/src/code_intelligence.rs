@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fmt;
 use std::fs::{self, File};
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
@@ -166,6 +166,97 @@ impl CodeIntelligence {
     ) -> Result<SourceSnapshot, CodeIntelligenceError> {
         let reference = self.resolve_reference(terminal_text)?;
         self.load_resolved(reference)
+    }
+
+    /// Atomically replaces a source file after confirming that it is still
+    /// the same contained workspace file and has not changed since it was
+    /// opened. The optimistic content check matters in Zeus: the agent in the
+    /// neighboring terminal may edit this file while the user has it open.
+    pub fn save_source(
+        &self,
+        snapshot: &SourceSnapshot,
+        expected_text: &str,
+        new_text: &str,
+    ) -> Result<(), CodeIntelligenceError> {
+        if new_text.len() as u64 > MAX_SOURCE_BYTES {
+            return Err(CodeIntelligenceError::TooLarge {
+                path: snapshot.absolute_path.clone(),
+                size: new_text.len() as u64,
+                limit: MAX_SOURCE_BYTES,
+            });
+        }
+
+        let (canonical, relative) = self.resolve_workspace_file(&snapshot.absolute_path)?;
+        if canonical != snapshot.absolute_path || relative != snapshot.relative_path {
+            return Err(CodeIntelligenceError::ChangedOnDisk {
+                path: snapshot.absolute_path.clone(),
+            });
+        }
+
+        let current = fs::read(&canonical).map_err(|error| CodeIntelligenceError::Io {
+            path: canonical.clone(),
+            operation: "read before saving",
+            message: error.to_string(),
+        })?;
+        if current != expected_text.as_bytes() {
+            return Err(CodeIntelligenceError::ChangedOnDisk { path: canonical });
+        }
+
+        let parent = canonical
+            .parent()
+            .ok_or_else(|| CodeIntelligenceError::Io {
+                path: canonical.clone(),
+                operation: "locate parent directory for",
+                message: "the file has no parent directory".to_owned(),
+            })?;
+        let permissions = fs::metadata(&canonical)
+            .map_err(|error| CodeIntelligenceError::Io {
+                path: canonical.clone(),
+                operation: "inspect before saving",
+                message: error.to_string(),
+            })?
+            .permissions();
+        let mut temporary =
+            tempfile::NamedTempFile::new_in(parent).map_err(|error| CodeIntelligenceError::Io {
+                path: canonical.clone(),
+                operation: "create a temporary save beside",
+                message: error.to_string(),
+            })?;
+        temporary
+            .as_file_mut()
+            .write_all(new_text.as_bytes())
+            .and_then(|()| temporary.as_file_mut().flush())
+            .and_then(|()| temporary.as_file().set_permissions(permissions))
+            .and_then(|()| temporary.as_file().sync_all())
+            .map_err(|error| CodeIntelligenceError::Io {
+                path: canonical.clone(),
+                operation: "write a temporary save for",
+                message: error.to_string(),
+            })?;
+
+        // Resolve once more immediately before the replacement. This catches
+        // a file swapped for a symlink after the content comparison. Rename
+        // replaces the directory entry instead of following it.
+        let (revalidated, _) = self.resolve_workspace_file(&canonical)?;
+        if revalidated != canonical {
+            return Err(CodeIntelligenceError::ChangedOnDisk { path: canonical });
+        }
+        let rechecked = fs::read(&canonical).map_err(|error| CodeIntelligenceError::Io {
+            path: canonical.clone(),
+            operation: "recheck before saving",
+            message: error.to_string(),
+        })?;
+        if rechecked != expected_text.as_bytes() {
+            return Err(CodeIntelligenceError::ChangedOnDisk { path: canonical });
+        }
+        temporary
+            .persist(&canonical)
+            .map_err(|error| CodeIntelligenceError::Io {
+                path: canonical,
+                operation: "replace",
+                message: error.error.to_string(),
+            })?;
+        Ok(())
     }
 
     /// Rank cached file paths and symbol-like declarations. Results are stable
@@ -498,6 +589,9 @@ pub enum CodeIntelligenceError {
     NotUtf8 {
         path: PathBuf,
     },
+    ChangedOnDisk {
+        path: PathBuf,
+    },
     Io {
         path: PathBuf,
         operation: &'static str,
@@ -538,6 +632,11 @@ impl fmt::Display for CodeIntelligenceError {
             Self::NotUtf8 { path } => {
                 write!(formatter, "{} is not valid UTF-8 text", path.display())
             }
+            Self::ChangedOnDisk { path } => write!(
+                formatter,
+                "{} changed on disk; reload it before saving so newer changes are not overwritten",
+                path.display()
+            ),
             Self::Io {
                 path,
                 operation,
@@ -1105,7 +1204,7 @@ fn lexical_normalize(path: &Path) -> PathBuf {
     normalized
 }
 
-fn source_lines(text: &str) -> Vec<SourceLine> {
+pub(crate) fn source_lines(text: &str) -> Vec<SourceLine> {
     let mut result = Vec::new();
     let mut start = 0;
     for (offset, character) in text.char_indices() {
@@ -1407,6 +1506,30 @@ mod tests {
 
         let clamped = intelligence.open_reference("source.rs:999:999").unwrap();
         assert_eq!(clamped.target, Some(SourceTarget { line: 4, column: 1 }));
+    }
+
+    #[test]
+    fn saves_contained_source_atomically_and_refuses_to_overwrite_newer_changes() {
+        let workspace = workspace();
+        let path = workspace.path().join("source.rs");
+        write(&path, "fn before() {}\n");
+        let intelligence = CodeIntelligence::for_session(workspace.path()).unwrap();
+        let snapshot = intelligence.open_reference("source.rs").unwrap();
+
+        intelligence
+            .save_source(&snapshot, &snapshot.text, "fn after() {}\n")
+            .unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "fn after() {}\n");
+
+        write(&path, "fn agent_changed_it() {}\n");
+        let error = intelligence
+            .save_source(&snapshot, "fn after() {}\n", "fn stale_edit() {}\n")
+            .unwrap_err();
+        assert!(matches!(error, CodeIntelligenceError::ChangedOnDisk { .. }));
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "fn agent_changed_it() {}\n"
+        );
     }
 
     #[test]

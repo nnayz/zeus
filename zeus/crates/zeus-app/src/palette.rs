@@ -43,6 +43,7 @@ pub enum PaletteCommand {
     OpenWorktrees,
     ToggleSidebar,
     OpenSettings,
+    OpenDocumentation,
     CheckForUpdates,
 }
 
@@ -269,6 +270,16 @@ pub fn actions_for_default_host(
             enabled: true,
             command: PaletteCommand::OpenSettings,
             keywords: "preferences config options".into(),
+        },
+        PaletteAction {
+            id: "documentation".into(),
+            title: "Open Documentation".into(),
+            system_image: "link",
+            shortcut: None,
+            detail: None,
+            enabled: true,
+            command: PaletteCommand::OpenDocumentation,
+            keywords: "docs help guide manual reference website".into(),
         },
         PaletteAction {
             id: "check-for-updates".into(),

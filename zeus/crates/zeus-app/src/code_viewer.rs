@@ -1,25 +1,31 @@
-//! Native, read-only code viewer for the trailing workbench.
+//! Native code editor for the trailing workbench.
 //!
 //! `code_intelligence` owns filesystem discovery, containment and loading.
-//! This module owns only the presentation state: asynchronous opens, source
-//! history, line targeting, virtualization, and lightweight lexical color.
+//! This module owns editing, asynchronous opens and saves, source history,
+//! line targeting, virtualization, and lightweight lexical color.
 
+use std::cell::Cell;
 use std::ops::Range;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
 use gpui::{
-    AnyElement, App, Context, FocusHandle, Focusable, FontWeight, HighlightStyle, KeyDownEvent,
-    ListHorizontalSizingBehavior, MouseButton, Render, ScrollStrategy, SharedString, StyledText,
-    Task, UniformListScrollHandle, Window, div, prelude::*, px, rgba, uniform_list,
+    Animation, AnimationExt, AnyElement, App, Context, CursorStyle, FocusHandle, Focusable,
+    FontWeight, HighlightStyle, KeyDownEvent, ListHorizontalSizingBehavior, MouseButton,
+    MouseDownEvent, Render, ScrollStrategy, SharedString, StyledText, Task, TextRun,
+    UniformListScrollHandle, Window, canvas, div, font, prelude::*, px, rgba, uniform_list,
 };
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::code_intelligence::{
-    CodeIntelligence, CodeIntelligenceError, SearchHit, SearchHitKind, SourceSnapshot,
+    CodeIntelligence, CodeIntelligenceError, SearchHit, SearchHitKind, SourceLine, SourceSnapshot,
+    source_lines,
 };
 use crate::macos::sf_symbols::{SymbolWeight, sf_symbol, sf_symbol_weighted};
-use crate::query_editor::{self, ClipboardEdit, Edit, QueryEditor};
-use zeus_ui::{FloatingSurface, Radius, SemanticColors, Typo};
+use crate::query_editor::{self, ClipboardEdit, Edit, LocalEdit, Motion, QueryEditor};
+use zeus_ui::{FloatingSurface, Ink, Metrics, Radius, SemanticColors, Typo};
 
 #[cfg(test)]
 use crate::code_intelligence::SourceTarget;
@@ -27,12 +33,248 @@ use crate::code_intelligence::SourceTarget;
 const SOURCE_ROW_HEIGHT: f32 = 20.0;
 const SOURCE_GUTTER_WIDTH: f32 = 52.0;
 
-#[derive(Clone)]
 enum ViewerState {
     Empty,
     Loading { reference: String },
-    Ready(Arc<SourceSnapshot>),
+    Ready(Box<SourceDocument>),
     Error { reference: String, message: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SaveStatus {
+    Idle,
+    Saving,
+    Saved,
+    Error(String),
+}
+
+#[derive(Clone, Debug)]
+enum PendingTransition {
+    Workspace(Option<PathBuf>),
+    Open {
+        cwd: PathBuf,
+        reference: String,
+        record_history: bool,
+    },
+}
+
+struct SourceDocument {
+    snapshot: SourceSnapshot,
+    editor: QueryEditor,
+    saved_text: String,
+    lines: Vec<SourceLine>,
+    preferred_column: Option<usize>,
+    save_status: SaveStatus,
+    revision: u64,
+}
+
+struct SourceRowContext {
+    focused: bool,
+    extension: String,
+    content_width: f32,
+    colors: SemanticColors,
+    editor: gpui::Entity<CodeViewer>,
+    caret_epoch: u64,
+}
+
+impl SourceDocument {
+    fn new(snapshot: SourceSnapshot) -> Self {
+        let cursor = snapshot
+            .target
+            .map(|target| {
+                target_offset(&snapshot.text, &snapshot.lines, target.line, target.column)
+            })
+            .unwrap_or(0);
+        let saved_text = snapshot.text.clone();
+        let lines = snapshot.lines.clone();
+        let mut editor = QueryEditor::default();
+        editor.reset(snapshot.text.clone(), cursor);
+        Self {
+            snapshot,
+            editor,
+            saved_text,
+            lines,
+            preferred_column: None,
+            save_status: SaveStatus::Idle,
+            revision: 0,
+        }
+    }
+
+    fn is_dirty(&self) -> bool {
+        self.editor.text() != self.saved_text
+    }
+
+    fn line_index_for_cursor(&self) -> usize {
+        line_index_for_offset(&self.lines, self.editor.cursor())
+    }
+
+    fn changed(&mut self) {
+        self.lines = source_lines(self.editor.text());
+        self.snapshot.target = None;
+        self.preferred_column = None;
+        self.save_status = SaveStatus::Idle;
+        self.revision = self.revision.wrapping_add(1);
+    }
+
+    fn apply_local(&mut self, edit: LocalEdit) -> bool {
+        let line_index = self.line_index_for_cursor();
+        let line = self.lines[line_index].range.clone();
+        let changed = match edit {
+            LocalEdit::MoveLeft(Motion::Line, extend) => {
+                self.editor.move_to(line.start, extend);
+                false
+            }
+            LocalEdit::MoveRight(Motion::Line, extend) => {
+                self.editor.move_to(line.end, extend);
+                false
+            }
+            LocalEdit::DeleteBackward(Motion::Line) => self.editor.delete_to(line.start),
+            LocalEdit::DeleteForward(Motion::Line) => self.editor.delete_to(line.end),
+            LocalEdit::MoveLeft(Motion::Character, false)
+                if self.editor.selection().is_none()
+                    && self.editor.cursor() == line.start
+                    && line_index > 0 =>
+            {
+                self.editor
+                    .move_to(self.lines[line_index - 1].range.end, false);
+                false
+            }
+            LocalEdit::MoveRight(Motion::Character, false)
+                if self.editor.selection().is_none()
+                    && self.editor.cursor() == line.end
+                    && line_index + 1 < self.lines.len() =>
+            {
+                self.editor
+                    .move_to(self.lines[line_index + 1].range.start, false);
+                false
+            }
+            LocalEdit::DeleteBackward(Motion::Character)
+                if self.editor.selection().is_none()
+                    && self.editor.cursor() == line.start
+                    && line_index > 0 =>
+            {
+                self.editor.delete_to(self.lines[line_index - 1].range.end)
+            }
+            LocalEdit::DeleteForward(Motion::Character)
+                if self.editor.selection().is_none()
+                    && self.editor.cursor() == line.end
+                    && line_index + 1 < self.lines.len() =>
+            {
+                self.editor
+                    .delete_to(self.lines[line_index + 1].range.start)
+            }
+            edit => self.editor.apply(edit),
+        };
+        if changed {
+            self.changed();
+        } else {
+            self.preferred_column = None;
+        }
+        changed
+    }
+
+    fn insert(&mut self, insertion: &str) -> bool {
+        let insertion = normalize_line_endings(insertion, self.line_ending());
+        let changed = self.editor.insert_document(&insertion);
+        if changed {
+            self.changed();
+        }
+        changed
+    }
+
+    fn insert_newline(&mut self) -> bool {
+        let line = &self.lines[self.line_index_for_cursor()].range;
+        let indentation: String = self.editor.text()[line.clone()]
+            .chars()
+            .take_while(|character| matches!(character, ' ' | '\t'))
+            .collect();
+        self.insert(&format!("{}{}", self.line_ending(), indentation))
+    }
+
+    fn line_ending(&self) -> &'static str {
+        if self.saved_text.contains("\r\n") {
+            "\r\n"
+        } else {
+            "\n"
+        }
+    }
+
+    fn move_vertical(&mut self, delta: isize, extend: bool) {
+        let current = self.line_index_for_cursor();
+        let current_range = self.lines[current].range.clone();
+        let cursor = self
+            .editor
+            .cursor()
+            .clamp(current_range.start, current_range.end);
+        let column = self.preferred_column.unwrap_or_else(|| {
+            self.editor.text()[current_range.start..cursor]
+                .graphemes(true)
+                .count()
+        });
+        self.preferred_column = Some(column);
+        let Some(target) = current
+            .checked_add_signed(delta)
+            .filter(|index| *index < self.lines.len())
+        else {
+            self.editor.move_to(
+                if delta < 0 {
+                    0
+                } else {
+                    self.editor.text().len()
+                },
+                extend,
+            );
+            return;
+        };
+        let range = self.lines[target].range.clone();
+        let offset = offset_at_grapheme_column(self.editor.text(), &range, column);
+        self.editor.move_to(offset, extend);
+    }
+
+    fn set_cursor(&mut self, offset: usize, extend: bool) {
+        self.editor.set_cursor(offset, extend);
+        self.preferred_column = None;
+    }
+
+    fn revert(&mut self) {
+        let cursor = self.editor.cursor().min(self.saved_text.len());
+        self.editor.reset(self.saved_text.clone(), cursor);
+        self.lines = source_lines(self.editor.text());
+        self.preferred_column = None;
+        self.save_status = SaveStatus::Idle;
+        self.revision = self.revision.wrapping_add(1);
+    }
+}
+
+fn line_index_for_offset(lines: &[SourceLine], offset: usize) -> usize {
+    lines
+        .iter()
+        .rposition(|line| line.range.start <= offset)
+        .unwrap_or(0)
+}
+
+fn offset_at_grapheme_column(text: &str, range: &Range<usize>, column: usize) -> usize {
+    text[range.clone()]
+        .grapheme_indices(true)
+        .nth(column)
+        .map_or(range.end, |(offset, _)| range.start + offset)
+}
+
+fn target_offset(text: &str, lines: &[SourceLine], line: usize, column: usize) -> usize {
+    let line = &lines[line.saturating_sub(1).min(lines.len().saturating_sub(1))];
+    text[line.range.clone()]
+        .char_indices()
+        .nth(column.saturating_sub(1))
+        .map_or(line.range.end, |(offset, _)| line.range.start + offset)
+}
+
+fn normalize_line_endings(text: &str, line_ending: &str) -> String {
+    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+    if line_ending == "\r\n" {
+        normalized.replace('\n', "\r\n")
+    } else {
+        normalized
+    }
 }
 
 pub struct CodeViewer {
@@ -45,6 +287,7 @@ pub struct CodeViewer {
     generation: u64,
     _load_task: Option<Task<()>>,
     _search_task: Option<Task<()>>,
+    _save_task: Option<Task<()>>,
     search_generation: u64,
     picker_open: bool,
     query: QueryEditor,
@@ -52,6 +295,12 @@ pub struct CodeViewer {
     highlighted_result: usize,
     history: Vec<(PathBuf, String)>,
     history_index: usize,
+    pending_transition: Option<PendingTransition>,
+    /// Changes whenever the caret moves or the document changes. GPUI keys
+    /// the blink animation by this value, so interaction always brings the
+    /// caret back visibly before the next blink cycle begins.
+    caret_epoch: u64,
+    selection_dragging: bool,
 }
 
 impl CodeViewer {
@@ -66,6 +315,7 @@ impl CodeViewer {
             generation: 0,
             _load_task: None,
             _search_task: None,
+            _save_task: None,
             search_generation: 0,
             picker_open: false,
             query: QueryEditor::default(),
@@ -73,7 +323,14 @@ impl CodeViewer {
             highlighted_result: 0,
             history: Vec::new(),
             history_index: 0,
+            pending_transition: None,
+            caret_epoch: 0,
+            selection_dragging: false,
         }
+    }
+
+    fn reveal_caret(&mut self) {
+        self.caret_epoch = self.caret_epoch.wrapping_add(1);
     }
 
     fn toggle_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -131,11 +388,21 @@ impl CodeViewer {
 
     /// Selects the local workspace represented by the active agent. The file
     /// index remains lazy, but the picker can now be used before a source file
-    /// has been opened. Switching agents clears stale source and history.
+    /// has been opened. Unsaved changes are retained until the user saves or
+    /// reverts them; the requested workspace switch then completes.
     pub fn set_workspace(&mut self, cwd: Option<PathBuf>, cx: &mut Context<Self>) {
         if self.workspace_cwd == cwd {
             return;
         }
+        if self.must_preserve_document() {
+            self.pending_transition = Some(PendingTransition::Workspace(cwd));
+            cx.notify();
+            return;
+        }
+        self.apply_workspace(cwd, cx);
+    }
+
+    fn apply_workspace(&mut self, cwd: Option<PathBuf>, cx: &mut Context<Self>) {
         self.workspace_cwd = cwd;
         self.intelligence = None;
         self.state = ViewerState::Empty;
@@ -148,7 +415,16 @@ impl CodeViewer {
         self.highlighted_result = 0;
         self.history.clear();
         self.history_index = 0;
+        self.pending_transition = None;
         cx.notify();
+    }
+
+    fn must_preserve_document(&self) -> bool {
+        matches!(
+            &self.state,
+            ViewerState::Ready(document)
+                if document.is_dirty() || document.save_status == SaveStatus::Saving
+        )
     }
 
     fn open_highlighted(&mut self, cx: &mut Context<Self>) {
@@ -176,52 +452,226 @@ impl CodeViewer {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.picker_open {
+        if event.keystroke.modifiers.platform && event.keystroke.key == "s" {
+            if matches!(self.state, ViewerState::Ready(_)) {
+                self.save_document(cx);
+                cx.stop_propagation();
+            }
             return;
         }
+
+        if self.picker_open {
+            match event.keystroke.key.as_str() {
+                "escape" => {
+                    self.picker_open = false;
+                    self.query.clear();
+                    self.results.clear();
+                    cx.notify();
+                }
+                "up" => {
+                    self.highlighted_result = self.highlighted_result.saturating_sub(1);
+                    cx.notify();
+                }
+                "down" => {
+                    self.highlighted_result =
+                        (self.highlighted_result + 1).min(self.results.len().saturating_sub(1));
+                    cx.notify();
+                }
+                "enter" => self.open_highlighted(cx),
+                _ => {
+                    let Some(edit) = query_editor::edit_for(&event.keystroke) else {
+                        return;
+                    };
+                    let changed = match edit {
+                        Edit::Local(local) => self.query.apply(local),
+                        Edit::Clipboard(ClipboardEdit::Copy) => {
+                            query_editor::copy_selection(&self.query, cx);
+                            false
+                        }
+                        Edit::Clipboard(ClipboardEdit::Cut) => {
+                            query_editor::cut_selection(&mut self.query, cx)
+                        }
+                        Edit::Clipboard(ClipboardEdit::Paste) => cx
+                            .read_from_clipboard()
+                            .and_then(|item| item.text())
+                            .is_some_and(|text| self.query.insert(&text)),
+                    };
+                    if changed {
+                        self.schedule_search(cx);
+                    } else {
+                        cx.notify();
+                    }
+                }
+            }
+            cx.stop_propagation();
+            return;
+        }
+
+        let clipboard_text = (event.keystroke.modifiers.platform && event.keystroke.key == "v")
+            .then(|| cx.read_from_clipboard().and_then(|item| item.text()))
+            .flatten();
+        let Some(document) = (match &mut self.state {
+            ViewerState::Ready(document) => Some(document),
+            _ => None,
+        }) else {
+            return;
+        };
+
         match event.keystroke.key.as_str() {
-            "escape" => {
-                self.picker_open = false;
-                self.query.clear();
-                self.results.clear();
-                cx.notify();
+            "enter" if !event.keystroke.modifiers.platform => {
+                document.insert_newline();
             }
-            "up" => {
-                self.highlighted_result = self.highlighted_result.saturating_sub(1);
-                cx.notify();
+            "tab" if !event.keystroke.modifiers.platform => {
+                document.insert("\t");
             }
-            "down" => {
-                self.highlighted_result =
-                    (self.highlighted_result + 1).min(self.results.len().saturating_sub(1));
-                cx.notify();
-            }
-            "enter" => self.open_highlighted(cx),
+            "up" => document.move_vertical(-1, event.keystroke.modifiers.shift),
+            "down" => document.move_vertical(1, event.keystroke.modifiers.shift),
             _ => {
                 let Some(edit) = query_editor::edit_for(&event.keystroke) else {
                     return;
                 };
-                let changed = match edit {
-                    Edit::Local(local) => self.query.apply(local),
+                match edit {
+                    Edit::Local(local) => {
+                        document.apply_local(local);
+                    }
                     Edit::Clipboard(ClipboardEdit::Copy) => {
-                        query_editor::copy_selection(&self.query, cx);
-                        false
+                        query_editor::copy_selection(&document.editor, cx);
                     }
                     Edit::Clipboard(ClipboardEdit::Cut) => {
-                        query_editor::cut_selection(&mut self.query, cx)
+                        if query_editor::cut_selection(&mut document.editor, cx) {
+                            document.changed();
+                        }
                     }
-                    Edit::Clipboard(ClipboardEdit::Paste) => cx
-                        .read_from_clipboard()
-                        .and_then(|item| item.text())
-                        .is_some_and(|text| self.query.insert(&text)),
-                };
-                if changed {
-                    self.schedule_search(cx);
-                } else {
-                    cx.notify();
+                    Edit::Clipboard(ClipboardEdit::Paste) => {
+                        if let Some(text) = clipboard_text {
+                            document.insert(&text);
+                        }
+                    }
                 }
             }
         }
+        self.reveal_caret();
+        if let ViewerState::Ready(document) = &self.state {
+            self.scroll
+                .scroll_to_item(document.line_index_for_cursor(), ScrollStrategy::Nearest);
+        }
+        cx.notify();
         cx.stop_propagation();
+    }
+
+    fn save_document(&mut self, cx: &mut Context<Self>) {
+        let Some(intelligence) = self.intelligence.clone() else {
+            return;
+        };
+        let (snapshot, expected_text, new_text, revision) = match &mut self.state {
+            ViewerState::Ready(document)
+                if document.is_dirty() && document.save_status != SaveStatus::Saving =>
+            {
+                document.save_status = SaveStatus::Saving;
+                (
+                    document.snapshot.clone(),
+                    document.saved_text.clone(),
+                    document.editor.text().to_owned(),
+                    document.revision,
+                )
+            }
+            ViewerState::Ready(_) => {
+                self.perform_pending_transition(cx);
+                return;
+            }
+            _ => return,
+        };
+        cx.notify();
+
+        let tokio = self.tokio.clone();
+        let saved_path = snapshot.absolute_path.clone();
+        self._save_task = Some(cx.spawn(async move |this, cx| {
+            let saved_text = new_text.clone();
+            let result = tokio
+                .spawn_blocking(move || {
+                    intelligence.save_source(&snapshot, &expected_text, &new_text)
+                })
+                .await
+                .map_err(|error| format!("Code save stopped: {error}"))
+                .and_then(|result| result.map_err(|error| error.to_string()));
+            let _ = this.update(cx, |this, cx| {
+                let mut should_transition = false;
+                if let ViewerState::Ready(document) = &mut this.state
+                    && document.snapshot.absolute_path == saved_path
+                {
+                    match result {
+                        Ok(()) => {
+                            document.saved_text = saved_text;
+                            document.save_status =
+                                if document.revision == revision && !document.is_dirty() {
+                                    should_transition = true;
+                                    SaveStatus::Saved
+                                } else {
+                                    SaveStatus::Idle
+                                };
+                        }
+                        Err(message) => document.save_status = SaveStatus::Error(message),
+                    }
+                }
+                if should_transition {
+                    this.perform_pending_transition(cx);
+                }
+                cx.notify();
+            });
+        }));
+    }
+
+    fn revert_document(&mut self, cx: &mut Context<Self>) {
+        if let ViewerState::Ready(document) = &mut self.state
+            && document.save_status != SaveStatus::Saving
+        {
+            document.revert();
+            self.perform_pending_transition(cx);
+            cx.notify();
+        }
+    }
+
+    fn place_cursor(
+        &mut self,
+        line_index: usize,
+        local_offset: usize,
+        extend: bool,
+        click_count: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let ViewerState::Ready(document) = &mut self.state else {
+            return;
+        };
+        let Some(line_range) = document
+            .lines
+            .get(line_index)
+            .map(|line| line.range.clone())
+        else {
+            return;
+        };
+        let local_offset = local_offset.min(line_range.len());
+        match click_count {
+            2 => {
+                let word = word_range_at(&document.editor.text()[line_range.clone()], local_offset);
+                if let Some(word) = word {
+                    document.set_cursor(line_range.start + word.start, false);
+                    document.set_cursor(line_range.start + word.end, true);
+                } else {
+                    document.set_cursor(line_range.start + local_offset, extend);
+                }
+            }
+            3.. => {
+                let selection_end = document
+                    .lines
+                    .get(line_index + 1)
+                    .map_or(line_range.end, |next| next.range.start);
+                document.set_cursor(line_range.start, false);
+                document.set_cursor(selection_end, true);
+            }
+            _ => document.set_cursor(line_range.start + local_offset, extend),
+        }
+        self.reveal_caret();
+        cx.notify();
     }
 
     /// Opens a terminal-shaped reference relative to a session cwd. All path
@@ -247,6 +697,29 @@ impl CodeViewer {
         record_history: bool,
         cx: &mut Context<Self>,
     ) {
+        if self.must_preserve_document() {
+            self.pending_transition = Some(PendingTransition::Open {
+                cwd,
+                reference,
+                record_history,
+            });
+            self.picker_open = false;
+            self.query.clear();
+            self.results.clear();
+            cx.notify();
+            return;
+        }
+        self.begin_open_reference(cwd, reference, record_history, cx);
+    }
+
+    fn begin_open_reference(
+        &mut self,
+        cwd: PathBuf,
+        reference: String,
+        record_history: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.pending_transition = None;
         self.generation = self.generation.wrapping_add(1);
         let generation = self.generation;
         self.scroll = UniformListScrollHandle::new();
@@ -290,7 +763,7 @@ impl CodeViewer {
                                 this.history_index = this.history.len().saturating_sub(1);
                             }
                         }
-                        this.state = ViewerState::Ready(Arc::new(snapshot));
+                        this.state = ViewerState::Ready(Box::new(SourceDocument::new(snapshot)));
                         if let Some(line) = target_line {
                             this.scroll
                                 .scroll_to_item(line.saturating_sub(1), ScrollStrategy::Center);
@@ -303,6 +776,20 @@ impl CodeViewer {
                 cx.notify();
             });
         }));
+    }
+
+    fn perform_pending_transition(&mut self, cx: &mut Context<Self>) {
+        let Some(pending) = self.pending_transition.take() else {
+            return;
+        };
+        match pending {
+            PendingTransition::Workspace(cwd) => self.apply_workspace(cwd, cx),
+            PendingTransition::Open {
+                cwd,
+                reference,
+                record_history,
+            } => self.begin_open_reference(cwd, reference, record_history, cx),
+        }
     }
 
     fn navigate(&mut self, delta: isize, cx: &mut Context<Self>) {
@@ -323,19 +810,23 @@ impl CodeViewer {
 
     fn render_toolbar(
         &self,
-        snapshot: Option<&SourceSnapshot>,
+        document: Option<&SourceDocument>,
         colors: SemanticColors,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let can_back = !self.history.is_empty() && self.history_index > 0;
         let can_forward = self.history_index + 1 < self.history.len();
         let picker_open = self.picker_open;
-        let (path, location) = snapshot.map_or_else(
+        let (path, location) = document.map_or_else(
             || ("No file open".to_owned(), None),
-            |snapshot| {
+            |document| {
                 (
-                    snapshot.relative_path.to_string_lossy().into_owned(),
-                    snapshot.target.map(|target| {
+                    document
+                        .snapshot
+                        .relative_path
+                        .to_string_lossy()
+                        .into_owned(),
+                    document.snapshot.target.map(|target| {
                         if target.column > 1 {
                             format!("{}:{}", target.line, target.column)
                         } else {
@@ -345,6 +836,17 @@ impl CodeViewer {
                 )
             },
         );
+        let dirty = document.is_some_and(SourceDocument::is_dirty);
+        let saving = document.is_some_and(|document| document.save_status == SaveStatus::Saving);
+        let save_status = document.and_then(|document| match &document.save_status {
+            SaveStatus::Saved if !dirty => Some(("Saved".to_owned(), Ink::FRESH)),
+            SaveStatus::Error(message) => Some((message.clone(), Ink::DANGER)),
+            _ if self.pending_transition.is_some() => Some((
+                "Save or revert to finish switching files".to_owned(),
+                Ink::ATTENTION,
+            )),
+            _ => None,
+        });
         let nav_button = |id: &'static str,
                           symbol: &'static str,
                           enabled: bool,
@@ -385,7 +887,7 @@ impl CodeViewer {
         };
 
         div()
-            .h(px(38.0))
+            .h(px(Metrics::TITLE_BAR))
             .flex_none()
             .px(px(9.0))
             .flex()
@@ -441,7 +943,7 @@ impl CodeViewer {
                     .child(sf_symbol(
                         "doc.text",
                         11.5,
-                        if snapshot.is_some() {
+                        if document.is_some() {
                             colors.secondary
                         } else {
                             colors.tertiary
@@ -458,6 +960,9 @@ impl CodeViewer {
                             .child(path),
                     ),
             )
+            .when(dirty, |bar| {
+                bar.child(div().size(px(6.0)).rounded_full().bg(Ink::ATTENTION))
+            })
             .when_some(location, |bar, location| {
                 bar.child(
                     div()
@@ -473,40 +978,143 @@ impl CodeViewer {
                         .child(location),
                 )
             })
+            .when_some(save_status, |bar, (message, color)| {
+                bar.child(
+                    div()
+                        .max_w(px(190.0))
+                        .truncate()
+                        .text_size(px(9.5))
+                        .text_color(color)
+                        .child(message),
+                )
+            })
+            .when(dirty && !saving, |bar| {
+                bar.child(
+                    div()
+                        .id("code-revert-file")
+                        .h(px(23.0))
+                        .px(px(7.0))
+                        .flex()
+                        .items_center()
+                        .rounded(px(Radius::CHIP))
+                        .cursor_pointer()
+                        .text_size(px(10.0))
+                        .text_color(colors.tertiary)
+                        .hover(move |button| button.bg(colors.primary.alpha(0.07)))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.revert_document(cx);
+                            cx.stop_propagation();
+                        }))
+                        .child("Revert"),
+                )
+            })
+            .when(dirty || saving, |bar| {
+                bar.child(
+                    div()
+                        .id("code-save-file")
+                        .h(px(23.0))
+                        .px(px(8.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(5.0))
+                        .rounded(px(Radius::CHIP))
+                        .bg(if saving {
+                            colors.primary.alpha(0.05)
+                        } else {
+                            rgba(0xd9775733)
+                        })
+                        .text_size(px(10.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(if saving {
+                            colors.tertiary
+                        } else {
+                            rgba(0xeda98eff)
+                        })
+                        .when(!saving, |button| {
+                            button
+                                .cursor_pointer()
+                                .hover(|button| button.bg(rgba(0xd9775749)))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.save_document(cx);
+                                    cx.stop_propagation();
+                                }))
+                        })
+                        .child(sf_symbol(
+                            if saving {
+                                "ellipsis"
+                            } else {
+                                "square.and.arrow.down"
+                            },
+                            9.5,
+                            if saving {
+                                colors.tertiary
+                            } else {
+                                rgba(0xeda98eff)
+                            },
+                        ))
+                        .child(if saving { "Saving…" } else { "Save" }),
+                )
+            })
             .into_any_element()
     }
 
-    fn render_source(&self, snapshot: Arc<SourceSnapshot>, colors: SemanticColors) -> AnyElement {
-        let rows = snapshot.lines.len();
-        let target = snapshot.target.map(|target| target.line);
-        let extension = snapshot
+    fn render_source(
+        &self,
+        document: &SourceDocument,
+        colors: SemanticColors,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let rows = document.lines.len();
+        let extension = document
+            .snapshot
             .relative_path
             .extension()
             .and_then(|extension| extension.to_str())
             .unwrap_or("")
             .to_owned();
-        let content_width = snapshot
+        let content_width = document
             .lines
             .iter()
-            .map(|line| snapshot.text[line.range.clone()].trim_end().chars().count())
+            .map(|line| {
+                document.editor.text()[line.range.clone()]
+                    .trim_end()
+                    .chars()
+                    .count()
+            })
             .max()
             .unwrap_or(0) as f32
             * 7.1
             + SOURCE_GUTTER_WIDTH
             + 24.0;
-        uniform_list("code-viewer-source", rows, move |range, _, _| {
+        let editor = cx.entity();
+        let focused =
+            self.focus.is_focused(window) && window.is_window_active() && !self.picker_open;
+        let row_context = SourceRowContext {
+            focused,
+            extension,
+            content_width: content_width.max(320.0),
+            colors,
+            editor: editor.clone(),
+            caret_epoch: self.caret_epoch,
+        };
+        uniform_list("code-viewer-source", rows, move |range, window, cx| {
+            let viewer = editor.read(cx);
+            let ViewerState::Ready(document) = &viewer.state else {
+                return Vec::new();
+            };
+            let target = document.snapshot.target.map(|target| target.line);
             range
                 .map(|index| {
                     source_row(
-                        &snapshot,
+                        document,
                         index,
                         target == Some(index + 1),
-                        &extension,
-                        content_width.max(320.0),
-                        colors,
+                        &row_context,
+                        window,
                     )
                 })
-                .collect()
+                .collect::<Vec<_>>()
         })
         .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained)
         .track_scroll(&self.scroll)
@@ -637,7 +1245,7 @@ impl CodeViewer {
                         .child(
                             div()
                                 .id("code-search-input")
-                                .h(px(38.0))
+                                .h(px(Metrics::TITLE_BAR))
                                 .px(px(10.0))
                                 .flex()
                                 .items_center()
@@ -711,10 +1319,10 @@ impl Focusable for CodeViewer {
 }
 
 impl Render for CodeViewer {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = SemanticColors::dark();
-        let snapshot = match &self.state {
-            ViewerState::Ready(snapshot) => Some(Arc::clone(snapshot)),
+        let document = match &self.state {
+            ViewerState::Ready(document) => Some(document.as_ref()),
             _ => None,
         };
         let body = match &self.state {
@@ -730,7 +1338,7 @@ impl Render for CodeViewer {
                 "Opening file",
                 format!("Resolving {reference}…"),
             ),
-            ViewerState::Ready(snapshot) => self.render_source(Arc::clone(snapshot), colors),
+            ViewerState::Ready(document) => self.render_source(document, colors, window, cx),
             ViewerState::Error { reference, message } => self.render_message(
                 colors,
                 "exclamationmark.triangle",
@@ -748,32 +1356,109 @@ impl Render for CodeViewer {
             .bg(colors.background)
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::handle_key_down))
-            .child(self.render_toolbar(snapshot.as_deref(), colors, cx))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, _| this.selection_dragging = false),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _, _, _| this.selection_dragging = false),
+            )
+            .child(self.render_toolbar(document, colors, cx))
             .child(div().min_h(px(0.0)).flex_1().overflow_hidden().child(body))
             .when_some(picker, |viewer, picker| viewer.child(picker))
     }
 }
 
+fn word_range_at(text: &str, offset: usize) -> Option<Range<usize>> {
+    let offset = offset.min(text.len());
+    let mut previous = None;
+    for (start, word) in text.split_word_bound_indices() {
+        let end = start + word.len();
+        if !word
+            .chars()
+            .any(|character| character.is_alphanumeric() || character == '_')
+        {
+            continue;
+        }
+        let range = start..end;
+        if start <= offset && offset < end || start == offset {
+            return Some(range);
+        }
+        if end == offset {
+            previous = Some(range);
+        }
+    }
+    previous
+}
+
+fn source_offset_at_x(source: &str, x: gpui::Pixels, color: gpui::Rgba, window: &Window) -> usize {
+    if source.is_empty() {
+        return 0;
+    }
+    let run = TextRun {
+        len: source.len(),
+        font: font(crate::fonts::mono_family()),
+        color: color.into(),
+        ..TextRun::default()
+    };
+    window
+        .text_system()
+        .shape_line(source.to_owned().into(), px(11.5), &[run], None)
+        .closest_index_for_x(x.max(px(0.0)))
+}
+
 fn source_row(
-    snapshot: &SourceSnapshot,
+    document: &SourceDocument,
     index: usize,
     targeted: bool,
-    extension: &str,
-    content_width: f32,
-    colors: SemanticColors,
+    context: &SourceRowContext,
+    window: &Window,
 ) -> AnyElement {
-    let line = &snapshot.lines[index];
-    let source = snapshot.text[line.range.clone()]
+    let line = &document.lines[index];
+    let source = document.editor.text()[line.range.clone()]
         .trim_end_matches(['\r', '\n'])
         .to_owned();
-    let styled = highlighted_source(source, extension);
+    let selection = document.editor.selection().and_then(|selection| {
+        let start = selection.start.max(line.range.start);
+        let end = selection.end.min(line.range.end);
+        (start < end).then_some(start - line.range.start..end - line.range.start)
+    });
+    let caret =
+        (context.focused && selection.is_none() && document.line_index_for_cursor() == index)
+            .then_some(document.editor.cursor().saturating_sub(line.range.start));
+    let caret_x = caret.map(|caret| {
+        if source.is_empty() {
+            return px(0.0);
+        }
+        let run = TextRun {
+            len: source.len(),
+            font: font(crate::fonts::mono_family()),
+            color: context.colors.primary.into(),
+            ..TextRun::default()
+        };
+        window
+            .text_system()
+            .shape_line(source.clone().into(), px(11.5), &[run], None)
+            .x_for_index(caret.min(source.len()))
+    });
+    let styled = highlighted_source(source, &context.extension, selection);
+    let bounds_slot = Rc::new(Cell::new(None));
+    let paint_bounds = Rc::clone(&bounds_slot);
+    let click_bounds = Rc::clone(&bounds_slot);
+    let drag_bounds = Rc::clone(&bounds_slot);
+    let click_editor = context.editor.clone();
+    let drag_editor = context.editor.clone();
+    let colors = context.colors;
     div()
         .id(index)
+        .relative()
         .h(px(SOURCE_ROW_HEIGHT))
-        .min_w(px(content_width))
+        .min_w(px(context.content_width))
         .w_full()
         .flex()
         .items_center()
+        .cursor(CursorStyle::IBeam)
         .bg(if targeted {
             rgba(0xd977571c)
         } else {
@@ -814,11 +1499,114 @@ fn source_row(
                 .text_color(rgba(0xd8dee9ff))
                 .child(styled),
         )
+        .when_some(caret_x, |row, caret_x| {
+            row.child(
+                div()
+                    .id(SharedString::from(format!(
+                        "code-caret-{}",
+                        context.caret_epoch
+                    )))
+                    .absolute()
+                    .left(px(SOURCE_GUTTER_WIDTH + 10.0) + caret_x)
+                    .top(px(2.0))
+                    .w(px(1.5))
+                    .h(px(SOURCE_ROW_HEIGHT - 4.0))
+                    .rounded(px(0.75))
+                    .bg(rgba(0xf0aa8fff))
+                    .with_animation(
+                        SharedString::from(format!("code-caret-blink-{}", context.caret_epoch)),
+                        Animation::new(Duration::from_millis(1_000)).repeat(),
+                        |caret, delta| caret.opacity(if delta < 0.5 { 1.0 } else { 0.0 }),
+                    ),
+            )
+        })
+        .on_mouse_down(
+            MouseButton::Left,
+            move |event: &MouseDownEvent, window, cx| {
+                let Some(bounds): Option<gpui::Bounds<gpui::Pixels>> = click_bounds.get() else {
+                    return;
+                };
+                let source = {
+                    let viewer = click_editor.read(cx);
+                    let ViewerState::Ready(document) = &viewer.state else {
+                        return;
+                    };
+                    let Some(line) = document.lines.get(index) else {
+                        return;
+                    };
+                    document.editor.text()[line.range.clone()].to_owned()
+                };
+                let x = event.position.x - bounds.left() - px(SOURCE_GUTTER_WIDTH) - px(10.0);
+                let local_offset = source_offset_at_x(&source, x, colors.primary, window);
+                click_editor.update(cx, |this, cx| {
+                    window.focus(&this.focus, cx);
+                    this.selection_dragging = true;
+                    this.place_cursor(
+                        index,
+                        local_offset,
+                        event.modifiers.shift,
+                        event.click_count,
+                        cx,
+                    );
+                });
+                cx.stop_propagation();
+            },
+        )
+        .on_mouse_move(move |event: &gpui::MouseMoveEvent, window, cx| {
+            if event.pressed_button != Some(MouseButton::Left) {
+                return;
+            }
+            let Some(bounds): Option<gpui::Bounds<gpui::Pixels>> = drag_bounds.get() else {
+                return;
+            };
+            let source = {
+                let viewer = drag_editor.read(cx);
+                if !viewer.selection_dragging {
+                    return;
+                }
+                let ViewerState::Ready(document) = &viewer.state else {
+                    return;
+                };
+                let Some(line) = document.lines.get(index) else {
+                    return;
+                };
+                document.editor.text()[line.range.clone()].to_owned()
+            };
+            let x = event.position.x - bounds.left() - px(SOURCE_GUTTER_WIDTH) - px(10.0);
+            let local_offset = source_offset_at_x(&source, x, colors.primary, window);
+            drag_editor.update(cx, |this, cx| {
+                this.place_cursor(index, local_offset, true, 1, cx);
+            });
+            cx.stop_propagation();
+        })
+        .child(
+            canvas(
+                move |bounds, _, _| paint_bounds.set(Some(bounds)),
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .inset_0(),
+        )
         .into_any_element()
 }
 
-fn highlighted_source(source: String, extension: &str) -> AnyElement {
-    let ranges = lexical_highlights(&source, extension);
+fn highlighted_source(
+    source: String,
+    extension: &str,
+    selection: Option<Range<usize>>,
+) -> AnyElement {
+    let mut ranges = lexical_highlights(&source, extension);
+    if let Some(selection) = selection {
+        ranges.retain(|(range, _)| range.end <= selection.start || range.start >= selection.end);
+        ranges.push((
+            selection,
+            HighlightStyle {
+                background_color: Some(rgba(0xd9775766).into()),
+                ..HighlightStyle::default()
+            },
+        ));
+        ranges.sort_by_key(|(range, _)| range.start);
+    }
     if ranges.is_empty() {
         return div().child(source).into_any_element();
     }
@@ -1002,6 +1790,17 @@ const COMMON_KEYWORDS: &[&str] = &[
 mod tests {
     use super::*;
 
+    fn document(text: &str, target: Option<SourceTarget>) -> SourceDocument {
+        SourceDocument::new(SourceSnapshot {
+            absolute_path: PathBuf::from("/workspace/src/main.rs"),
+            relative_path: PathBuf::from("src/main.rs"),
+            language: crate::code_intelligence::SourceLanguage::Rust,
+            text: text.to_owned(),
+            lines: source_lines(text),
+            target,
+        })
+    }
+
     #[test]
     fn highlights_keywords_strings_and_comments_without_overlapping() {
         let source = "pub fn main() { let value = \"hello\"; // note";
@@ -1040,11 +1839,62 @@ mod tests {
     }
 
     #[test]
+    fn word_selection_uses_identifier_and_unicode_boundaries() {
+        let source = "alpha_beta café";
+        assert_eq!(word_range_at(source, 4), Some(0..10));
+        assert_eq!(word_range_at(source, 10), Some(0..10));
+        assert_eq!(word_range_at(source, 12), Some(11..16));
+        assert_eq!(word_range_at(source, 11), Some(11..16));
+    }
+
+    #[test]
+    fn word_selection_ignores_whitespace_and_punctuation() {
+        let source = "alpha  +  beta";
+        assert_eq!(word_range_at(source, 7), None);
+        assert_eq!(word_range_at(source, 8), None);
+    }
+
+    #[test]
     fn target_type_is_one_based() {
         let target = SourceTarget {
             line: 12,
             column: 4,
         };
         assert_eq!((target.line, target.column), (12, 4));
+    }
+
+    #[test]
+    fn source_document_edits_at_the_target_and_preserves_indentation() {
+        let mut document = document(
+            "fn main() {\n    call();\n}\n",
+            Some(SourceTarget { line: 2, column: 5 }),
+        );
+        assert_eq!(document.editor.cursor(), "fn main() {\n    ".len());
+        document.insert("await ");
+        assert!(document.editor.text().contains("    await call();"));
+        assert!(document.is_dirty());
+
+        document.apply_local(LocalEdit::MoveRight(Motion::Line, false));
+        document.insert_newline();
+        assert!(document.editor.text().contains("await call();\n    \n}"));
+    }
+
+    #[test]
+    fn source_document_moves_and_deletes_across_crlf_as_one_line_break() {
+        let mut document = document("one\r\ntwo", None);
+        document.editor.move_to(5, false);
+        document.apply_local(LocalEdit::DeleteBackward(Motion::Character));
+        assert_eq!(document.editor.text(), "onetwo");
+        assert_eq!(document.editor.cursor(), 3);
+    }
+
+    #[test]
+    fn vertical_motion_keeps_the_preferred_grapheme_column() {
+        let mut document = document("abcd\nx\nwxyz", None);
+        document.editor.move_to(4, false);
+        document.move_vertical(1, false);
+        assert_eq!(document.editor.cursor(), 6);
+        document.move_vertical(1, false);
+        assert_eq!(document.editor.cursor(), document.editor.text().len());
     }
 }

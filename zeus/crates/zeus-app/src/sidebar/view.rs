@@ -49,6 +49,9 @@ pub enum SidebarEvent {
     /// A plain click (or shortcut) selected a session: hand keyboard focus
     /// to its terminal surface so the user can type immediately.
     SessionActivated,
+    /// The compact picker requested a spawn. RootView dismisses the startup
+    /// welcome canvas while the Engine creates and selects the new session.
+    AgentSpawnRequested,
     /// The user acted on the update pill. The sidebar holds no updater of its
     /// own; RootView owns the handle and forwards these.
     Update(UpdateCommand),
@@ -70,8 +73,8 @@ struct DragPreview {
 impl Render for DragPreview {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         div()
-            .px(px(10.0))
-            .h(px(28.0))
+            .px(px(8.0))
+            .h(px(24.0))
             .flex()
             .items_center()
             .rounded(px(Radius::ROW))
@@ -233,7 +236,14 @@ impl Sidebar {
     pub fn pending_close_copy(&self) -> Option<(String, String)> {
         let store = self.store.read().expect("session store lock poisoned");
         let pending = store.pending_close()?;
-        let title = if pending.ids.len() == 1 {
+        let title = if let Some(project) = &pending.project {
+            let name = store
+                .projects()
+                .get(project)
+                .map(|project| project.name.clone())
+                .unwrap_or_else(|| "project".into());
+            format!("Remove “{name}” and its {} sessions?", pending.ids.len())
+        } else if pending.ids.len() == 1 {
             store
                 .sessions()
                 .get(&pending.ids[0])
@@ -305,7 +315,25 @@ impl Sidebar {
     }
 
     pub fn show_new_agent(&mut self, cx: &mut Context<Self>) {
+        self.ensure_visible(cx);
         self.open_new_agent_popover(None, cx);
+    }
+
+    pub fn show_new_agent_in_workspace(&mut self, directory: String, cx: &mut Context<Self>) {
+        self.ensure_visible(cx);
+        self.open_new_agent_popover_at(Some(directory), None, cx);
+    }
+
+    fn ensure_visible(&mut self, cx: &mut Context<Self>) {
+        if !self.ui.visible {
+            self.ui.visible = true;
+            let _ = self
+                .store
+                .write()
+                .expect("session store lock poisoned")
+                .update_preferences(|prefs| prefs.sidebar_visible = true);
+            cx.emit(SidebarEvent::VisibilityChanged);
+        }
     }
 
     /// Opens the new-agent picker, refreshing the host catalog first so
@@ -521,12 +549,12 @@ impl Sidebar {
         div()
             .id("new-agent")
             .mx(px(Space::INSET))
-            .mb(px(4.0))
+            .mb(px(3.0))
             .px(px(Space::ROW_H))
-            .h(px(44.0))
+            .h(px(36.0))
             .flex()
             .items_center()
-            .gap(px(8.0))
+            .gap(px(6.0))
             .rounded(px(Radius::ROW))
             .bg(Fill::hover(colors, hovering))
             .cursor_pointer()
@@ -584,6 +612,17 @@ impl Sidebar {
     fn top_bar(&self, colors: SemanticColors, cx: &mut Context<Self>) -> AnyElement {
         let settings_hover = self.ui.hovered_control == Some("settings");
         let toggle_hover = self.ui.hovered_control == Some("sidebar-toggle");
+        let toggle_icon = if self
+            .store
+            .read()
+            .expect("session store lock poisoned")
+            .preferences()
+            .sidebar_on_right
+        {
+            "sidebar.right"
+        } else {
+            "sidebar.left"
+        };
         div()
             .h(px(Metrics::TITLE_BAR))
             .flex_none()
@@ -608,7 +647,7 @@ impl Sidebar {
             ))
             .child(icon_button(
                 "sidebar-toggle",
-                "sidebar.left",
+                toggle_icon,
                 toggle_hover,
                 colors,
                 cx.listener(|this, _, _, cx| this.toggle(cx)),
@@ -627,8 +666,8 @@ impl Sidebar {
             .flex_col()
             .items_center()
             .justify_center()
-            .gap(px(12.0))
-            .child(AgentLogo::new(AgentKind::ClaudeCode, 44.0, colors).badged(false))
+            .gap(px(10.0))
+            .child(AgentLogo::new(AgentKind::ClaudeCode, 36.0, colors).badged(false))
             .child(
                 div()
                     .flex()
@@ -652,8 +691,8 @@ impl Sidebar {
             .child(
                 div()
                     .id("empty-new-agent")
-                    .px(px(10.0))
-                    .h(px(28.0))
+                    .px(px(8.0))
+                    .h(px(24.0))
                     .flex()
                     .items_center()
                     .rounded(px(Radius::ROW))
@@ -664,7 +703,7 @@ impl Sidebar {
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.open_new_agent_popover(None, cx);
                     }))
-                    .gap(px(7.0))
+                    .gap(px(6.0))
                     .child(sf_symbol("square.and.pencil", 13.0, colors.secondary))
                     .child("New Agent"),
             )
@@ -705,13 +744,13 @@ impl Sidebar {
                     let id = id.clone();
                     move || format!("PROJECT_{}", id.0)
                 })
-                .mt(px(6.0))
+                .mt(px(4.0))
                 .px(px(Space::ROW_H))
-                .py(px(5.0))
+                .py(px(3.0))
                 .min_h(px(Metrics::ROW_HEIGHT))
                 .flex()
                 .items_center()
-                .gap(px(8.0))
+                .gap(px(6.0))
                 .rounded(px(Radius::ROW))
                 .bg(Fill::hover(colors, is_hovered))
                 .cursor_pointer()
@@ -830,8 +869,8 @@ impl Sidebar {
                     row.child(
                         div()
                             .id(format!("project-menu:{}", id.0))
-                            .w(px(20.0))
-                            .h(px(20.0))
+                            .w(px(18.0))
+                            .h(px(18.0))
                             .flex()
                             .items_center()
                             .justify_center()
@@ -862,8 +901,8 @@ impl Sidebar {
                                 let id = id.clone();
                                 move || format!("PROJECT_ADD_{}", id.0)
                             })
-                            .w(px(20.0))
-                            .h(px(20.0))
+                            .w(px(18.0))
+                            .h(px(18.0))
                             .flex()
                             .items_center()
                             .justify_center()
@@ -966,7 +1005,7 @@ impl Sidebar {
                 .h(px(Metrics::ROW_HEIGHT))
                 .flex()
                 .items_center()
-                .gap(px(8.0))
+                .gap(px(6.0))
                 .rounded(px(Radius::ROW))
                 .bg(RowFill::Selected.color(colors))
                 .children(indent_rails(row, colors))
@@ -1019,7 +1058,7 @@ impl Sidebar {
             .h(px(Metrics::ROW_HEIGHT))
             .flex()
             .items_center()
-            .gap(px(8.0))
+            .gap(px(6.0))
             .rounded(px(Radius::ROW))
             .bg(fill.color(colors))
             .opacity(if archived {
@@ -1627,8 +1666,8 @@ impl Sidebar {
         div()
             .flex_none()
             .px(px(Space::INSET))
-            .pt(px(5.0))
-            .pb(px(10.0))
+            .pt(px(4.0))
+            .pb(px(6.0))
             .border_t_1()
             .border_color(colors.primary.alpha(0.06))
             .children(self.update_pill(colors, cx))
@@ -1639,7 +1678,7 @@ impl Sidebar {
                     .h(px(Metrics::ROW_HEIGHT))
                     .flex()
                     .items_center()
-                    .gap(px(8.0))
+                    .gap(px(6.0))
                     .rounded(px(Radius::ROW))
                     .bg(Fill::hover(colors, hovered))
                     .cursor_pointer()
@@ -1703,11 +1742,11 @@ impl Sidebar {
     ) -> Option<AnyElement> {
         match self.ui.popover.clone()? {
             Popover::NewAgent { directory, host } => {
-                Some(self.new_agent_popover(directory, host, colors, cx))
+                Some(self.new_agent_popover(directory, host, colors, window, cx))
             }
             Popover::Account => Some(self.account_popover(colors, window, cx)),
             Popover::ProjectActions { id, position } => {
-                Some(self.project_actions_popover(id, position, colors, cx))
+                Some(self.project_actions_popover(id, position, colors, window, cx))
             }
             Popover::SessionActions { id, position } => {
                 Some(self.session_actions_popover(id, position, colors, cx))
@@ -1715,21 +1754,40 @@ impl Sidebar {
         }
     }
 
+    /// Panels that hang off the sidebar's own edge sit 12pt inside the window
+    /// edge the sidebar occupies -- the left one normally, the right one once
+    /// the sidebar is mirrored to the trailing side.
+    fn popover_edge(&self, y: f32, bottom: bool, window: &Window) -> (Point<Pixels>, Anchor) {
+        let mirrored = self
+            .store
+            .read()
+            .expect("session store lock poisoned")
+            .preferences()
+            .sidebar_on_right;
+        let x = if mirrored {
+            f32::from(window.viewport_size().width) - 12.0
+        } else {
+            12.0
+        };
+        let anchor = match (mirrored, bottom) {
+            (false, false) => Anchor::TopLeft,
+            (false, true) => Anchor::BottomLeft,
+            (true, false) => Anchor::TopRight,
+            (true, true) => Anchor::BottomRight,
+        };
+        (point(px(x), px(y)), anchor)
+    }
+
     fn popover_shell(
         &self,
         top: f32,
         child: impl IntoElement,
         colors: SemanticColors,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        self.popover_shell_at(
-            point(px(12.0), px(top)),
-            Anchor::TopLeft,
-            244.0,
-            child,
-            colors,
-            cx,
-        )
+        let (position, anchor) = self.popover_edge(top, false, window);
+        self.popover_shell_at(position, anchor, 244.0, child, colors, cx)
     }
 
     /// Anchors above the account footer (Swift: popover opens upward).
@@ -1740,15 +1798,9 @@ impl Sidebar {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let footer_top = f32::from(window.viewport_size().height) - 44.0;
-        self.popover_shell_at(
-            point(px(12.0), px(footer_top)),
-            Anchor::BottomLeft,
-            244.0,
-            child,
-            colors,
-            cx,
-        )
+        let footer_top = f32::from(window.viewport_size().height) - (Metrics::ROW_HEIGHT + 11.0);
+        let (position, anchor) = self.popover_edge(footer_top, true, window);
+        self.popover_shell_at(position, anchor, 244.0, child, colors, cx)
     }
 
     /// Menu-style floating panel: the palette's FloatingSurface recipe, a
@@ -1799,7 +1851,7 @@ impl Sidebar {
                                     div()
                                         .rounded(px(Radius::PANEL))
                                         .overflow_hidden()
-                                        .py(px(4.0))
+                                        .py(px(3.0))
                                         .child(child),
                                 )),
                         ),
@@ -1814,6 +1866,7 @@ impl Sidebar {
         directory: Option<String>,
         host: Option<String>,
         colors: SemanticColors,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let (local_target, default_kind, hosts, active_session, repo_state, syncing, options) = {
@@ -1899,9 +1952,9 @@ impl Sidebar {
             |host| host.display_name().to_owned(),
         );
         let mut header = div()
-            .px(px(12.0))
-            .pt(px(10.0))
-            .pb(px(8.0))
+            .px(px(10.0))
+            .pt(px(8.0))
+            .pb(px(6.0))
             .flex()
             .flex_col()
             .gap(px(3.0))
@@ -2000,8 +2053,8 @@ impl Sidebar {
         if !hosts.is_empty() {
             content = content.child(
                 div()
-                    .px(px(12.0))
-                    .pt(px(7.0))
+                    .px(px(10.0))
+                    .pt(px(6.0))
                     .pb(px(3.0))
                     .text_size(px(Typo::SECTION_HEADER.size))
                     .font_weight(Typo::SECTION_HEADER.weight)
@@ -2032,10 +2085,10 @@ impl Sidebar {
                         .mx(px(6.0))
                         .my(px(1.0))
                         .px(px(8.0))
-                        .h(px(28.0))
+                        .h(px(26.0))
                         .flex()
                         .items_center()
-                        .gap(px(8.0))
+                        .gap(px(6.0))
                         .rounded(px(Radius::ROW))
                         .cursor_pointer()
                         .hover(move |element| element.bg(colors.primary.alpha(0.06)))
@@ -2141,14 +2194,8 @@ impl Sidebar {
                 colors,
                 cx,
             ));
-            return self.popover_shell_at(
-                point(px(12.0), px(70.0)),
-                Anchor::TopLeft,
-                320.0,
-                content.pb(px(6.0)),
-                colors,
-                cx,
-            );
+            let (position, anchor) = self.popover_edge(70.0, false, window);
+            return self.popover_shell_at(position, anchor, 300.0, content.pb(px(6.0)), colors, cx);
         }
         // Carried on repo-preserving spawns so the daemon re-resolves the
         // checkout itself (covers a click that lands while still "locating").
@@ -2178,11 +2225,11 @@ impl Sidebar {
                     .mx(px(6.0))
                     .my(px(1.0))
                     .px(px(8.0))
-                    .min_h(px(42.0))
-                    .py(px(4.0))
+                    .min_h(px(36.0))
+                    .py(px(3.0))
                     .flex()
                     .items_center()
-                    .gap(px(10.0))
+                    .gap(px(8.0))
                     .rounded(px(Radius::ROW))
                     .when(available, |row| {
                         row.cursor_pointer()
@@ -2201,17 +2248,18 @@ impl Sidebar {
                                         },
                                     );
                                 this.ui.popover = None;
+                                cx.emit(SidebarEvent::AgentSpawnRequested);
                                 cx.notify();
                             }))
                     })
                     .child(
                         div()
-                            .w(px(24.0))
+                            .w(px(22.0))
                             .flex_none()
                             .flex()
                             .items_center()
                             .justify_center()
-                            .child(AgentLogo::new(agent_kind, 20.0, colors).badged(false)),
+                            .child(AgentLogo::new(agent_kind, 18.0, colors).badged(false)),
                     )
                     .child(
                         div()
@@ -2269,7 +2317,7 @@ impl Sidebar {
                     }),
             );
         }
-        self.popover_shell(70.0, content.pb(px(6.0)), colors, cx)
+        self.popover_shell(70.0, content.pb(px(6.0)), colors, window, cx)
     }
 
     fn directory_picker(
@@ -2292,8 +2340,8 @@ impl Sidebar {
                 let use_host = host.clone();
                 panel = panel.child(
                     div()
-                        .px(px(10.0))
-                        .py(px(7.0))
+                        .px(px(8.0))
+                        .py(px(6.0))
                         .flex()
                         .items_center()
                         .gap(px(8.0))
@@ -2334,7 +2382,7 @@ impl Sidebar {
                 let mut rows = div()
                     .id("directory-picker-list")
                     .track_scroll(&self.directory_scroll)
-                    .max_h(px(260.0))
+                    .max_h(px(232.0))
                     .overflow_y_scroll()
                     .flex()
                     .flex_col();
@@ -2642,6 +2690,31 @@ impl Sidebar {
                         "Local agents"
                     }),
             )
+            .child(div().mt(px(8.0)).h(px(1.0)).bg(colors.primary.alpha(0.06)))
+            .child(section_label("Help", colors))
+            .child(
+                div()
+                    .id("open-documentation")
+                    .debug_selector(|| "open-documentation".into())
+                    .mx(px(6.0))
+                    .px(px(8.0))
+                    .h(px(30.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .rounded(px(Radius::ROW))
+                    .cursor_pointer()
+                    .hover(move |element| element.bg(colors.primary.alpha(0.06)))
+                    .text_size(px(Typo::ROW.size))
+                    .text_color(colors.primary)
+                    .child(sf_symbol("link", 11.0, colors.secondary))
+                    .child(div().flex_1().child("Documentation"))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.ui.popover = None;
+                        cx.open_url(crate::settings::DOCS_URL);
+                        cx.notify();
+                    })),
+            )
             .child(
                 div()
                     .id("dismiss-account")
@@ -2670,6 +2743,7 @@ impl Sidebar {
         id: ProjectId,
         position: Option<Point<Pixels>>,
         colors: SemanticColors,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let (project, host, collapsed, pinned) = {
@@ -2727,12 +2801,25 @@ impl Sidebar {
             .child(menu_row(
                 if collapsed { "Expand" } else { "Collapse" },
                 colors,
+                cx.listener({
+                    let id = id.clone();
+                    move |this, _, _, cx| {
+                        let _ = this
+                            .store
+                            .write()
+                            .expect("session store lock poisoned")
+                            .toggle_project_collapsed(id.clone());
+                        this.ui.popover = None;
+                        cx.notify();
+                    }
+                }),
+            ))
+            .child(menu_divider(colors))
+            .child(menu_row(
+                "Remove Project",
+                colors,
                 cx.listener(move |this, _, _, cx| {
-                    let _ = this
-                        .store
-                        .write()
-                        .expect("session store lock poisoned")
-                        .toggle_project_collapsed(id.clone());
+                    this.remove_project(id.clone(), cx);
                     this.ui.popover = None;
                     cx.notify();
                 }),
@@ -2741,7 +2828,7 @@ impl Sidebar {
             Some(position) => {
                 self.popover_shell_at(position, Anchor::TopLeft, 200.0, content, colors, cx)
             }
-            None => self.popover_shell(96.0, content, colors, cx),
+            None => self.popover_shell(96.0, content, colors, window, cx),
         }
     }
 
@@ -3180,6 +3267,18 @@ impl Sidebar {
             .write()
             .expect("session store lock poisoned")
             .archive_sessions(ids);
+    }
+
+    /// Removes a workspace row and the sessions filed under it. Anything still
+    /// running raises the same confirmation a session close does.
+    fn remove_project(&mut self, id: ProjectId, cx: &mut Context<Self>) {
+        let mut store = self.store.write().expect("session store lock poisoned");
+        store.remove_project(id);
+        let raised = store.pending_close().is_some();
+        drop(store);
+        if raised {
+            cx.emit(SidebarEvent::ConfirmationChanged);
+        }
     }
 
     fn close_sessions(&mut self, ids: Vec<SessionId>, cx: &mut Context<Self>) {
@@ -3626,8 +3725,8 @@ fn menu_row(
     let label = label.into();
     div()
         .id(label.clone())
-        .px(px(8.0))
-        .h(px(28.0))
+        .px(px(7.0))
+        .h(px(Metrics::MENU_ROW_HEIGHT))
         .flex()
         .items_center()
         .rounded(px(Radius::ROW))
@@ -3649,11 +3748,11 @@ fn directory_row(
     let row_id = format!("directory-row-{label}");
     div()
         .id(row_id)
-        .px(px(10.0))
-        .h(px(30.0))
+        .px(px(8.0))
+        .h(px(Metrics::MENU_ROW_HEIGHT))
         .flex()
         .items_center()
-        .gap(px(8.0))
+        .gap(px(6.0))
         .rounded(px(Radius::ROW))
         .cursor_pointer()
         .hover(move |row| row.bg(colors.primary.alpha(0.06)))
@@ -3703,7 +3802,7 @@ fn should_resolve_active_repo(
 
 fn menu_divider(colors: SemanticColors) -> AnyElement {
     div()
-        .my(px(3.0))
+        .my(px(2.0))
         .child(HairlineDivider::horizontal(colors))
         .into_any_element()
 }
@@ -3735,8 +3834,8 @@ fn count_label(verb: &str, count: usize) -> String {
 fn section_label(label: &'static str, colors: SemanticColors) -> AnyElement {
     div()
         .px(px(14.0))
-        .pt(px(10.0))
-        .pb(px(3.0))
+        .pt(px(6.0))
+        .pb(px(2.0))
         .text_size(px(Typo::SECTION_HEADER.size))
         .font_weight(Typo::SECTION_HEADER.weight)
         .text_color(colors.tertiary)
@@ -3747,7 +3846,7 @@ fn section_label(label: &'static str, colors: SemanticColors) -> AnyElement {
 fn usage_row(label: &str, detail: &str, value: &str, colors: SemanticColors) -> AnyElement {
     div()
         .px(px(14.0))
-        .h(px(24.0))
+        .h(px(Metrics::MENU_ROW_HEIGHT))
         .flex()
         .items_center()
         .gap(px(8.0))
@@ -4299,6 +4398,33 @@ mod tests {
         );
         assert!(cx.debug_bounds("AGENT_OPTION_0").is_some());
         assert!(cx.debug_bounds("AGENT_OPTION_1").is_some());
+    }
+
+    #[gpui::test]
+    fn workspace_flow_reveals_sidebar_and_opens_compact_agent_picker(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| {
+            let sidebar = cx.new(|cx| {
+                let mut sidebar = Sidebar::new(None, true, PreviewScenario::Typical, cx);
+                sidebar.ui.visible = false;
+                sidebar
+            });
+            SidebarPopoverHarness { sidebar }
+        });
+        let sidebar = view.read_with(cx, |harness, _| harness.sidebar.clone());
+
+        sidebar.update(cx, |sidebar, cx| {
+            sidebar.show_new_agent_in_workspace("/work/atlas".to_owned(), cx);
+        });
+
+        assert!(sidebar.read_with(cx, |sidebar, _| sidebar.is_visible()));
+        assert_eq!(
+            sidebar.read_with(cx, |sidebar, _| sidebar.ui.popover.clone()),
+            Some(Popover::NewAgent {
+                directory: Some("/work/atlas".to_owned()),
+                host: None,
+            })
+        );
+        assert!(cx.debug_bounds("AGENT_OPTION_0").is_some());
     }
 
     #[gpui::test]

@@ -22,12 +22,12 @@ use zeus_proto::{AgentKind, AttentionLevel, RiskHint, SessionId, SessionRecord, 
 
 use crate::store::{SessionStore, StoreSnapshot};
 
-const POPUP_WIDTH: f64 = 344.0;
-const HEADER_HEIGHT: f64 = 46.0;
-const FOOTER_HEIGHT: f64 = 44.0;
-const ROW_HEIGHT: f64 = 28.0;
-const BODY_PADDING: f64 = 6.0;
-const EMPTY_BODY_HEIGHT: f64 = 92.0;
+const POPUP_WIDTH: f64 = 320.0;
+const HEADER_HEIGHT: f64 = 42.0;
+const FOOTER_HEIGHT: f64 = 40.0;
+const ROW_HEIGHT: f64 = 25.0;
+const BODY_PADDING: f64 = 5.0;
+const EMPTY_BODY_HEIGHT: f64 = 80.0;
 const MAX_BODY_ROWS: usize = 11;
 
 pub struct NativeMenuBar {

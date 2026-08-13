@@ -101,6 +101,12 @@ pub enum StoreEffect {
         id: SessionId,
         title: String,
     },
+    AddProject {
+        root: String,
+    },
+    RemoveProject {
+        id: ProjectId,
+    },
     Spawn(SessionSpawnParams),
     /// A shell owned by a workbench pane. Unlike a top-level spawn, its
     /// response must not replace the selected sidebar session.
@@ -151,6 +157,9 @@ pub struct StoreSnapshot {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PendingClose {
     pub ids: Vec<SessionId>,
+    /// Set when the close was raised by removing a project: the project row is
+    /// forgotten with its sessions, and only once the user confirms.
+    pub project: Option<ProjectId>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -456,6 +465,22 @@ impl SessionStore {
 
     pub fn projects(&self) -> &HashMap<ProjectId, Project> {
         &self.projects
+    }
+
+    /// Persist a workspace before it owns any sessions. `project.add` is
+    /// idempotent in the Engine, and the local guard avoids a needless RPC
+    /// when the welcome screen selects an existing sidebar project.
+    pub fn add_project(&mut self, root: String) {
+        if self.projects.values().any(|project| project.root == root) {
+            return;
+        }
+        self.emit(StoreEffect::AddProject { root });
+    }
+
+    fn finish_add_project(&mut self, project: Project) {
+        self.projects.insert(project.id.clone(), project);
+        self.invalidate_projection();
+        self.sync_sidebar_order();
     }
 
     pub fn selected_session_id(&self) -> Option<&SessionId> {
@@ -1433,15 +1458,61 @@ impl SessionStore {
                 .is_some_and(|session| !matches!(session.status, SessionStatus::Exited(_)))
         });
         if self.prefs.confirm_before_closing_session && has_running {
-            self.pending_close = Some(PendingClose { ids });
+            self.pending_close = Some(PendingClose { ids, project: None });
         } else {
             self.remove_sessions(ids);
         }
     }
 
+    /// Removes a workspace from the sidebar along with the sessions filed under
+    /// it. The sessions have to go: the projection re-synthesises a project row
+    /// from any session that still points at it, so leaving them would put the
+    /// row straight back.
+    pub fn remove_project(&mut self, id: ProjectId) {
+        let ids: Vec<SessionId> = self
+            .sessions
+            .values()
+            .filter(|session| session.project_id == id)
+            .map(|session| session.id.clone())
+            .collect();
+        let has_running = ids.iter().any(|id| {
+            self.sessions
+                .get(id)
+                .is_some_and(|session| !matches!(session.status, SessionStatus::Exited(_)))
+        });
+        if self.prefs.confirm_before_closing_session && has_running {
+            self.pending_close = Some(PendingClose {
+                ids,
+                project: Some(id),
+            });
+        } else {
+            self.forget_project(id, ids);
+        }
+    }
+
+    fn forget_project(&mut self, id: ProjectId, ids: Vec<SessionId>) {
+        self.remove_sessions(ids);
+        self.projects.remove(&id);
+        // Pin/collapse state is keyed by the root-derived project id, so a
+        // project re-added later would otherwise come back pinned or collapsed
+        // from its previous life.
+        let _ = self.update_preferences(|prefs| {
+            prefs.sidebar_pinned_projects.retain(|entry| entry != &id);
+            prefs
+                .sidebar_collapsed_projects
+                .retain(|entry| entry != &id);
+        });
+        self.emit(StoreEffect::RemoveProject { id });
+        self.invalidate_projection();
+        self.sync_sidebar_order();
+    }
+
     pub fn confirm_pending_close(&mut self) {
         if let Some(pending) = self.pending_close.take() {
-            self.remove_sessions(pending.ids);
+            match pending.project {
+                Some(project) => self.forget_project(project, pending.ids),
+                None => self.remove_sessions(pending.ids),
+            }
         }
     }
 
@@ -2277,6 +2348,17 @@ async fn run_effects(
             StoreEffect::Archive(id) => client.archive(&id).await,
             StoreEffect::Unarchive(id) => client.unarchive(&id).await,
             StoreEffect::Rename { id, title } => client.rename(&id, title).await,
+            StoreEffect::AddProject { root } => match client.project_add(root).await {
+                Ok(project) => {
+                    store
+                        .write()
+                        .expect("session store lock poisoned")
+                        .finish_add_project(project);
+                    Ok(())
+                }
+                Err(error) => Err(error),
+            },
+            StoreEffect::RemoveProject { id } => client.project_remove(id).await,
             StoreEffect::Spawn(params) => match client.spawn(params).await {
                 Ok(id) => {
                     // The authoritative record still arrives through session.updated.

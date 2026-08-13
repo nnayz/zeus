@@ -156,9 +156,9 @@ impl Render for SessionSurfaces {
     }
 }
 
-const SWITCHER_PREVIEW_WIDTH: f32 = 620.0;
-const SWITCHER_PREVIEW_HEIGHT: f32 = 348.0;
-const OVERVIEW_LANE_WIDTH: f32 = 272.0;
+const SWITCHER_PREVIEW_WIDTH: f32 = 560.0;
+const SWITCHER_PREVIEW_HEIGHT: f32 = 320.0;
+const OVERVIEW_LANE_WIDTH: f32 = 244.0;
 
 impl SessionSurfaces {
     pub(crate) fn handle_key_down(
@@ -497,7 +497,7 @@ impl SessionSurfaces {
             .flex_none()
             .items_center()
             .gap(px(10.0))
-            .h(px(50.0))
+            .h(px(44.0))
             .px(px(20.0))
             .child(
                 div()
@@ -630,7 +630,7 @@ impl SessionSurfaces {
             .size_full()
             .flex()
             .flex_col()
-            .pt(px(42.0))
+            .pt(px(36.0))
             .bg(colors.background)
             .overflow_hidden()
             .occlude()
@@ -1150,7 +1150,7 @@ impl SessionSurfaces {
                 div()
                     .flex_none()
                     .w(px(88.0))
-                    .h(px(50.0))
+                    .h(px(44.0))
                     .rounded(px(Radius::BADGE))
                     .overflow_hidden()
                     .bg(colors.background)

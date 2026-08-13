@@ -19,10 +19,18 @@ pub(crate) fn sidebar_colors(id: &str) -> SemanticColors {
 }
 
 fn semantic_colors(theme: TermTheme, sidebar_tones: bool) -> SemanticColors {
-    // A small foreground tint keeps chrome neutral and legible while making
-    // each terminal theme visibly continuous across the whole application.
-    let sidebar_surface = mix(theme.background, theme.foreground, 0.08, 0.92);
-    let floating_surface = mix(theme.background, theme.foreground, 0.13, 1.0);
+    // Zeus Dark follows an IDE-style three-surface hierarchy: subdued chrome,
+    // an editor canvas, then slightly lifted transient UI. Other catalog
+    // themes retain their derived surfaces so their individual tint carries
+    // through the application.
+    let (sidebar_surface, floating_surface) = if theme.id == TermTheme::ZEUS_DARK.id {
+        (hex(0x181818), hex(0x222222))
+    } else {
+        (
+            mix(theme.background, theme.foreground, 0.08, 0.92),
+            mix(theme.background, theme.foreground, 0.13, 1.0),
+        )
+    };
     SemanticColors::themed(
         match theme.appearance {
             ThemeAppearance::Dark => Appearance::Dark,
@@ -34,6 +42,15 @@ fn semantic_colors(theme: TermTheme, sidebar_tones: bool) -> SemanticColors {
         floating_surface,
         sidebar_tones,
     )
+}
+
+const fn hex(value: u32) -> Rgba {
+    Rgba {
+        r: ((value >> 16) & 0xff) as f32 / 255.0,
+        g: ((value >> 8) & 0xff) as f32 / 255.0,
+        b: (value & 0xff) as f32 / 255.0,
+        a: 1.0,
+    }
 }
 
 fn mix(background: Rgba, foreground: Rgba, amount: f32, alpha: f32) -> Rgba {
@@ -75,6 +92,16 @@ mod tests {
         let sidebar = sidebar_colors("tokyo-night");
         assert!(sidebar.secondary.a > base.secondary.a);
         assert!(sidebar.tertiary.a > base.tertiary.a);
+    }
+
+    #[test]
+    fn zeus_dark_uses_cursor_style_workbench_surfaces() {
+        let app = colors(TermTheme::ZEUS_DARK.id);
+
+        assert_eq!(app.background, hex(0x1f1f1f));
+        assert_eq!(app.primary, hex(0xcccccc));
+        assert_eq!(app.sidebar_surface(), hex(0x181818));
+        assert_eq!(app.floating_surface(), hex(0x222222));
     }
 
     #[test]

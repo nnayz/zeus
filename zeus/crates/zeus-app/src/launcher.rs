@@ -21,11 +21,11 @@ use crate::query_editor::{self, ClipboardEdit, Edit};
 use crate::store::SpawnOptions;
 
 const PANEL_WIDTH: f32 = 540.0;
-const TITLE_HEIGHT: f32 = 36.0;
-const TITLE_GAP: f32 = 22.0;
+const TITLE_HEIGHT: f32 = 30.0;
+const TITLE_GAP: f32 = 14.0;
 const CONTROL_SIZE: f32 = 32.0;
 const CONTROL_RADIUS: f32 = 9.0;
-const SHELF_HEIGHT: f32 = 40.0;
+const SHELF_HEIGHT: f32 = 34.0;
 const PICKER_HEIGHT: f32 = 200.0;
 
 /// Composer metrics. The text area is sized from the wrapped line count
@@ -38,10 +38,10 @@ const COMPOSER_LINE_HEIGHT: f32 = 19.0;
 const COMPOSER_MIN_LINES: usize = 3;
 const COMPOSER_MAX_LINES: usize = 9;
 const COMPOSER_INSET: f32 = 8.0;
-const COMPOSER_PADDING: f32 = 16.0;
-const COMPOSER_PAD_TOP: f32 = 12.0;
+const COMPOSER_PADDING: f32 = 12.0;
+const COMPOSER_PAD_TOP: f32 = 9.0;
 const COMPOSER_PAD_BOTTOM: f32 = 6.0;
-const COMPOSER_CONTROLS_HEIGHT: f32 = 44.0;
+const COMPOSER_CONTROLS_HEIGHT: f32 = 38.0;
 
 /// The width text actually wraps at, derived from the panel so the two cannot
 /// drift apart: the panel, less the composer's margin, padding and border.
@@ -477,7 +477,7 @@ impl LauncherOverlay {
                 div()
                     .id(format!("launcher-harness-{index}"))
                     .mx(px(6.0))
-                    .min_h(px(48.0))
+                    .min_h(px(42.0))
                     .px(px(9.0))
                     .flex()
                     .items_center()
@@ -566,7 +566,7 @@ impl LauncherOverlay {
                 div()
                     .id(format!("launcher-project-{index}"))
                     .mx(px(6.0))
-                    .min_h(px(44.0))
+                    .min_h(px(38.0))
                     .px(px(9.0))
                     .py(px(6.0))
                     .flex()
@@ -620,7 +620,7 @@ impl LauncherOverlay {
             div()
                 .id("launcher-project-choose-folder")
                 .mx(px(6.0))
-                .h(px(42.0))
+                .h(px(36.0))
                 .px(px(9.0))
                 .flex()
                 .items_center()

@@ -44,6 +44,16 @@ const GUTTER_WIDTH: f32 = 68.0;
 const REFRESH_INTERVAL: Duration = Duration::from_millis(1400);
 const SCROLLBAR_INSET: f32 = 4.0;
 const SCROLLBAR_MIN_THUMB: f32 = 34.0;
+/// Window-button lane the mirrored panel carries in its toolbar. The tab strip
+/// already starts 8pt in, which counts toward the window-space safe boundary.
+const TRAFFIC_LIGHT_LANE: f32 =
+    Metrics::TOOLBAR_TRAFFIC_LIGHT_SAFE_RIGHT - INSPECTOR_HEADER_LEADING_INSET;
+const INSPECTOR_HEADER_LEADING_INSET: f32 = 8.0;
+
+/// Narrowest width that still fits the whole tab strip and the close button.
+pub fn min_width(mirrored: bool) -> f32 {
+    300.0 + if mirrored { TRAFFIC_LIGHT_LANE } else { 0.0 }
+}
 
 #[derive(Clone, Copy)]
 struct DraggedDiffScrollbar;
@@ -701,6 +711,17 @@ impl WorkbenchInspector {
         }));
     }
 
+    /// Mirrored workbench puts this panel against the window's leading edge,
+    /// where the macOS window buttons float over its toolbar.
+    fn mirrored(&self) -> bool {
+        self.runtime
+            .store
+            .read()
+            .expect("session store lock poisoned")
+            .preferences()
+            .sidebar_on_right
+    }
+
     fn selected_session(&self) -> Option<SessionRecord> {
         self.runtime
             .store
@@ -816,11 +837,21 @@ impl WorkbenchInspector {
         div()
             .h(px(Metrics::TITLE_BAR))
             .flex_none()
-            .pl(px(8.0))
+            .pl(px(INSPECTOR_HEADER_LEADING_INSET))
             .pr(px(Metrics::TOOLBAR_EDGE_INSET))
             .flex()
             .items_center()
             .gap(px(Metrics::TOOLBAR_COMPACT_GAP))
+            // Optical safe area for the macOS window buttons, which land on
+            // this toolbar whenever the panel owns the window's leading edge.
+            .when(self.mirrored(), |bar| {
+                bar.child(
+                    div()
+                        .debug_selector(|| "INSPECTOR_TRAFFIC_LIGHT_LANE".to_owned())
+                        .w(px(TRAFFIC_LIGHT_LANE))
+                        .flex_none(),
+                )
+            })
             .child(tabs)
             .child(
                 div()
@@ -2323,7 +2354,7 @@ impl WorkbenchInspector {
 
         let toolbar = if remote {
             div()
-                .h(px(38.0))
+                .h(px(Metrics::TITLE_BAR))
                 .flex_none()
                 .px(px(10.0))
                 .flex()
@@ -2374,7 +2405,7 @@ impl WorkbenchInspector {
                 .into_any_element()
         } else {
             div()
-                .h(px(38.0))
+                .h(px(Metrics::TITLE_BAR))
                 .flex_none()
                 .px(px(9.0))
                 .flex()
@@ -4317,7 +4348,7 @@ mod tests {
     impl Render for InspectorHarness {
         fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
             div()
-                .w(px(300.0))
+                .w(px(min_width(true)))
                 .h_full()
                 .overflow_hidden()
                 .child(self.inspector.clone())
@@ -4533,6 +4564,9 @@ mod tests {
         });
         cx.run_until_parked();
 
+        let traffic_light_lane = cx
+            .debug_bounds("INSPECTOR_TRAFFIC_LIGHT_LANE")
+            .expect("traffic-light lane");
         let info = cx.debug_bounds("INSPECTOR_TAB_INFO").expect("Info tab");
         let changes = cx
             .debug_bounds("INSPECTOR_TAB_CHANGES")
@@ -4543,11 +4577,17 @@ mod tests {
             .expect("Artifacts tab");
         let close = cx.debug_bounds("INSPECTOR_CLOSE").expect("close button");
 
+        assert_eq!(
+            traffic_light_lane.right(),
+            px(Metrics::TOOLBAR_TRAFFIC_LIGHT_SAFE_RIGHT),
+            "the tab strip must begin after the complete macOS window-button cluster"
+        );
+        assert!(info.left() >= traffic_light_lane.right());
         assert!(info.right() <= changes.left());
         assert!(changes.right() <= code.left());
         assert!(code.right() <= artifacts.left());
         assert!(artifacts.right() <= close.left());
-        assert!(close.right() <= px(300.0));
+        assert!(close.right() <= px(min_width(true)));
 
         cx.simulate_click(changes.center(), Modifiers::none());
         let inspector = harness.read_with(cx, |harness, _| harness.inspector.clone());

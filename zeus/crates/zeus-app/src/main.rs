@@ -3,7 +3,6 @@ mod app_theme;
 mod clipboard_transfer;
 mod code_intelligence;
 mod code_viewer;
-mod composer;
 #[cfg(unix)]
 mod daemon_launch;
 mod dev_build;
@@ -13,7 +12,6 @@ pub mod fuzzy;
 mod git_review;
 pub mod history;
 mod inspector;
-mod launcher;
 pub mod markdown;
 mod markdown_view;
 pub mod navigation;
@@ -70,7 +68,7 @@ const MIN_WINDOW_HEIGHT: f32 = 560.0;
 const USAGE_REFRESH_DEBOUNCE: Duration = Duration::from_secs(2);
 const USAGE_RECONCILE_INTERVAL: Duration = Duration::from_secs(30 * 60);
 
-actions!(zeus_app, [Quit, HideApp, CloseWindow]);
+actions!(zeus_app, [Quit, HideApp, CloseWindow, OpenDocumentation]);
 
 /// Standard macOS app behaviors route through the application menu: without
 /// one, cmd-Q / cmd-H / cmd-W and the Edit menu simply do not exist.
@@ -90,8 +88,10 @@ fn install_app_menus(cx: &mut App) {
             let _ = window.update(cx, |_, window, _| window.remove_window());
         }
     });
+    cx.on_action(|_: &OpenDocumentation, cx| cx.open_url(settings::DOCS_URL));
     cx.bind_keys([
-        KeyBinding::new("cmd-n", root::OpenLauncher, None),
+        KeyBinding::new("cmd-o", root::OpenWorkspace, None),
+        KeyBinding::new("cmd-n", root::OpenNewAgent, None),
         KeyBinding::new("cmd-q", Quit, None),
         KeyBinding::new("cmd-h", HideApp, None),
         KeyBinding::new("cmd-w", root::CloseSession, None),
@@ -105,7 +105,11 @@ fn install_app_menus(cx: &mut App) {
             MenuItem::separator(),
             MenuItem::action("Quit zeus", Quit),
         ]),
-        Menu::new("File").items([MenuItem::action("New Session", root::OpenLauncher)]),
+        Menu::new("File").items([
+            MenuItem::action("Open…", root::OpenWorkspace),
+            MenuItem::separator(),
+            MenuItem::action("New Agent", root::OpenNewAgent),
+        ]),
         Menu::new("Edit").items([
             MenuItem::os_action("Copy", terminal_pane::CopySelection, OsAction::Copy),
             MenuItem::os_action("Paste", terminal_pane::Paste, OsAction::Paste),
@@ -115,6 +119,7 @@ fn install_app_menus(cx: &mut App) {
             MenuItem::action("Reopen Closed Session", root::ReopenSession),
             MenuItem::action("Close Window", CloseWindow),
         ]),
+        Menu::new("Help").items([MenuItem::action("Zeus Documentation", OpenDocumentation)]),
     ]);
 }
 

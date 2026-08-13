@@ -751,6 +751,13 @@ impl Platform for MacPlatform {
         self.foreground_executor()
             .spawn(async move {
                 unsafe {
+                    // Keep path selection owned by the active GPUI window. An
+                    // application-modal open panel is presented by AppKit as a
+                    // separate window, which is especially confusing for IDE
+                    // workspace selection: choosing a folder should continue
+                    // configuring the window the user is already in.
+                    let app = NSApplication::sharedApplication(nil);
+                    let parent_window: id = msg_send![app, keyWindow];
                     let panel = NSOpenPanel::openPanel(nil);
                     panel.setCanChooseDirectories_(options.directories.to_objc());
                     panel.setCanChooseFiles_(options.files.to_objc());
@@ -786,7 +793,17 @@ impl Platform for MacPlatform {
                         let _: () = msg_send![panel, setPrompt: ns_string(&prompt)];
                     }
 
-                    let _: () = msg_send![panel, beginWithCompletionHandler: block];
+                    if parent_window != nil {
+                        let _: () = msg_send![
+                            panel,
+                            beginSheetModalForWindow: parent_window
+                            completionHandler: block
+                        ];
+                    } else {
+                        // Headless callers and early-startup prompts may not
+                        // have a native parent yet.
+                        let _: () = msg_send![panel, beginWithCompletionHandler: block];
+                    }
                 }
             })
             .detach();

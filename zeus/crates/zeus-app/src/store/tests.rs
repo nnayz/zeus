@@ -257,6 +257,28 @@ fn a_new_session_and_a_new_project_land_at_the_bottom() {
     );
 }
 
+#[test]
+fn an_empty_added_project_remains_visible_before_its_first_agent() {
+    let (mut store, mut effects) = hydrated(Vec::new(), Vec::new(), Prefs::default());
+
+    store.add_project("/work/atlas".to_owned());
+    assert_eq!(
+        drain(&mut effects),
+        vec![StoreEffect::AddProject {
+            root: "/work/atlas".to_owned(),
+        }]
+    );
+
+    store.finish_add_project(project("atlas", "Atlas"));
+    let projection = store.sidebar_projection();
+    assert_eq!(projection.projects.len(), 1);
+    assert_eq!(projection.projects[0].project.root, "/work/atlas");
+    assert!(projection.projects[0].sessions.is_empty());
+
+    store.add_project("/work/atlas".to_owned());
+    assert!(drain(&mut effects).is_empty(), "project.add is idempotent");
+}
+
 /// The order is total, so a row dragged to the end of its group stays there.
 /// Under the old ranked-before-unranked comparator it sprang back above every
 /// sibling that had never been dragged.
@@ -877,6 +899,49 @@ fn close_confirmation_only_gates_running_sessions() {
     assert!(drain(&mut effects).is_empty());
     store.confirm_pending_close();
     assert!(drain(&mut effects).contains(&StoreEffect::Remove(id("running"))));
+}
+
+#[test]
+fn removing_a_project_takes_its_sessions_and_its_sidebar_prefs_with_it() {
+    let prefs = Prefs {
+        sidebar_pinned_projects: vec![pid("gone")],
+        sidebar_collapsed_projects: vec![pid("gone")],
+        ..Prefs::default()
+    };
+    let (mut store, mut effects) = hydrated(
+        vec![session("doomed", "gone", 2.0), session("kept", "stay", 1.0)],
+        vec![project("gone", "Gone"), project("stay", "Stay")],
+        prefs,
+    );
+    drain(&mut effects);
+
+    // A running session routes through the same confirmation a close does.
+    store.remove_project(pid("gone"));
+    assert_eq!(
+        store.pending_close.as_ref().map(|pending| &pending.project),
+        Some(&Some(pid("gone")))
+    );
+    assert!(store.projects().contains_key(&pid("gone")));
+    assert!(drain(&mut effects).is_empty());
+
+    store.confirm_pending_close();
+    let effects = drain(&mut effects);
+    assert!(effects.contains(&StoreEffect::Remove(id("doomed"))));
+    assert!(effects.contains(&StoreEffect::RemoveProject { id: pid("gone") }));
+    assert!(!store.projects().contains_key(&pid("gone")));
+    assert!(store.projects().contains_key(&pid("stay")));
+    assert!(store.sessions().contains_key(&id("kept")));
+    // Otherwise re-adding the folder brings it back pinned and collapsed.
+    assert!(store.preferences().sidebar_pinned_projects.is_empty());
+    assert!(store.preferences().sidebar_collapsed_projects.is_empty());
+    assert!(
+        !store
+            .sidebar_projection()
+            .projects
+            .iter()
+            .any(|row| row.project.id == pid("gone")),
+        "the projection must not re-synthesise the row from a leftover session"
+    );
 }
 
 #[test]

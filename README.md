@@ -51,7 +51,7 @@ diagnostics, local data, and uninstalling (`mdbook serve docs`).
 - **Agents can orchestrate agents.** An MCP server lets a running agent spawn another one,
   watch it, read its output, and answer its prompts.
 
-First-class status detection and resume are Claude Code and Codex. Cursor and Gemini run with
+Claude Code and Codex get first-class status detection and resume. Cursor and Gemini run with
 partial support, and anything else runs as a terminal with running/exited status.
 
 ## Architecture

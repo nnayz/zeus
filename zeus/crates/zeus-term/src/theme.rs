@@ -70,13 +70,16 @@ impl TermTheme {
         id: "zeus-dark",
         name: "Zeus Dark",
         appearance: ThemeAppearance::Dark,
-        background: rgba_f32(0.071, 0.075, 0.094, 1.0),
-        foreground: rgba_f32(0.90, 0.90, 0.90, 1.0),
-        cursor: rgba_f32(0.90, 0.90, 0.90, 0.85),
-        cursor_text: rgba_f32(0.05, 0.05, 0.05, 1.0),
-        selection: rgba_f32(0.28, 0.42, 0.62, 0.35),
-        find_match: rgba_f32(1.0, 0.8, 0.0, 0.35),
-        find_match_current: rgba_f32(1.0, 0.8, 0.0, 0.65),
+        // Cursor's dark workbench is neutral rather than blue-black. Keep the
+        // editor and terminal on the same canvas so switching between them
+        // does not expose a tinted seam.
+        background: hex(0x1f1f1f),
+        foreground: hex(0xcccccc),
+        cursor: with_alpha(hex(0xaeafad), 0.90),
+        cursor_text: hex(0x1f1f1f),
+        selection: with_alpha(hex(0x264f78), 0.80),
+        find_match: with_alpha(hex(0x9e6a03), 0.55),
+        find_match_current: with_alpha(hex(0x9e6a03), 0.85),
         ansi: [
             hex(0x000000),
             hex(0xcd3131),
@@ -559,9 +562,11 @@ mod tests {
             .map(|theme| theme.id)
             .collect::<std::collections::HashSet<_>>();
         assert_eq!(unique_ids.len(), TermTheme::CATALOG.len());
+        assert_rgba(TermTheme::ZEUS_DARK.background, hex(0x1f1f1f));
+        assert_rgba(TermTheme::ZEUS_DARK.foreground, hex(0xcccccc));
         assert_rgba(
-            TermTheme::ZEUS_DARK.background,
-            rgba_f32(0.071, 0.075, 0.094, 1.0),
+            TermTheme::ZEUS_DARK.selection,
+            with_alpha(hex(0x264f78), 0.80),
         );
         assert_eq!(TermTheme::VESPER.appearance, ThemeAppearance::Dark);
         assert_rgba(TermTheme::VESPER.background, hex(0x101010));

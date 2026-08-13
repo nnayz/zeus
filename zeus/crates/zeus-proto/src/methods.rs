@@ -2,7 +2,7 @@
 
 use crate::control::{JsonValue, WIRE_VERSION};
 use crate::model::{
-    AgentKind, DateMillis, PortInfo, Project, SessionArtifact, SessionId, SessionRecord,
+    AgentKind, DateMillis, PortInfo, Project, ProjectId, SessionArtifact, SessionId, SessionRecord,
     SessionStatus, WorktreeInfo,
 };
 use serde::{Deserialize, Serialize};
@@ -47,6 +47,7 @@ impl Method {
     pub const WORKTREE_REMOVE: &'static str = "worktree.remove";
     pub const WORKTREE_OVERVIEW: &'static str = "worktree.overview";
     pub const PROJECT_ADD: &'static str = "project.add";
+    pub const PROJECT_REMOVE: &'static str = "project.remove";
     pub const CLIENT_SET_ACTIVE: &'static str = "client.set_active";
     pub const GOVERNOR_CONFIGURE: &'static str = "governor.configure";
     pub const AGENT_READINESS: &'static str = "agent.readiness";
@@ -667,6 +668,13 @@ pub struct ProjectAddParams {
 }
 
 pub type ProjectAddResult = Project;
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct ProjectRemoveParams {
+    pub id: ProjectId,
+}
+
+pub type ProjectRemoveResult = EmptyResult;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct TestRunParams {

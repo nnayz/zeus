@@ -595,6 +595,7 @@ impl ControlServer {
             Method::SESSION_REOPEN_LAST => self.session_reopen_last(),
             Method::AGENT_READINESS => self.agent_readiness(),
             Method::PROJECT_ADD => self.project_add(params),
+            Method::PROJECT_REMOVE => self.project_remove(params),
             Method::SESSION_READ_DIFF => self.session_read_diff(params),
             Method::SESSION_HIBERNATE => self.session_hibernate(params),
             Method::SESSION_WAKE => self.session_wake(params),
@@ -2000,6 +2001,17 @@ impl ControlServer {
         let project = registry.add_project(&p.root);
         let _ = registry.persist();
         Ok(project)
+    }
+
+    /// Forgets a workspace the user removed from the sidebar. Nothing on disk
+    /// is touched: this drops the project record only, and the client removes
+    /// the project's Session records before calling.
+    fn project_remove(&self, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
+        let p: zeus_proto::ProjectRemoveParams = decode(params)?;
+        let mut registry = self.registry.lock().map_err(poisoned)?;
+        registry.remove_project(&p.id.0);
+        let _ = registry.persist();
+        Ok(json!({}))
     }
 
     /// The working tree's diff against a base ref, for the app's diff pane.

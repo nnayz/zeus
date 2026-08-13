@@ -12,7 +12,6 @@ use zeus_ui::{FloatingSurface, Ink, Radius, SemanticColors, Typo};
 
 use crate::AppServices;
 use crate::inspector::{InspectorEvent, WorkbenchInspector};
-use crate::launcher::{LauncherEvent, LauncherOverlay};
 use crate::macos::sf_symbols::{SymbolWeight, sf_symbol, sf_symbol_weighted};
 use crate::navigation::{
     NavigationEvent, NavigationOverlay, ToggleCommandPalette, ToggleQuickOpen,
@@ -24,7 +23,7 @@ use crate::sidebar::{PreviewScenario, Sidebar, SidebarEvent};
 use crate::sounds::{self, AfplayPlayer, SoundGate, StatusSound};
 use crate::store::SpawnOptions;
 use crate::surface_shell::UtilitySurfaces;
-use crate::terminal_pane::{TerminalPane, TerminalPaneEvent, TerminalViewport};
+use crate::terminal_pane::{ShellChrome, TerminalPane, TerminalPaneEvent, TerminalViewport};
 use crate::updates::UpdatePhase;
 use crate::workbench::WorkbenchLayout;
 
@@ -37,7 +36,10 @@ pub(crate) fn cached_window_overlay<T: Render>(view: Entity<T>) -> impl IntoElem
 #[cfg(target_os = "macos")]
 use crate::macos::{menu_bar::NativeMenuBar, notifier::NativeNotifier};
 
-actions!(zeus, [CloseSession, ReopenSession, OpenLauncher]);
+actions!(
+    zeus,
+    [CloseSession, ReopenSession, OpenWorkspace, OpenNewAgent]
+);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum NewSessionShortcut {
@@ -137,7 +139,6 @@ pub struct RootView {
     navigation: Option<Entity<NavigationOverlay>>,
     session_surfaces: Option<Entity<SessionSurfaces>>,
     utility_surfaces: Option<Entity<UtilitySurfaces>>,
-    launcher: Entity<LauncherOverlay>,
     inspector: Option<Entity<WorkbenchInspector>>,
     services: Arc<AppServices>,
     focus: FocusHandle,
@@ -205,7 +206,11 @@ impl RootView {
         let terminal = (!preview).then(|| {
             let runtime = Arc::clone(&services.store);
             let tokio = Arc::clone(&services.tokio);
-            cx.new(|cx| TerminalPane::new(runtime, tokio, window, cx))
+            cx.new(|cx| {
+                let mut terminal = TerminalPane::new(runtime, tokio, window, cx);
+                terminal.show_startup_welcome();
+                terminal
+            })
         });
         let navigation = (!preview).then(|| {
             let runtime = Arc::clone(&services.store);
@@ -221,7 +226,6 @@ impl RootView {
             let updates = services.updates.clone();
             cx.new(|cx| UtilitySurfaces::new(runtime, tokio, updates, window, cx))
         });
-        let launcher = cx.new(|cx| LauncherOverlay::new(Arc::clone(&services), preview, cx));
         let inspector = (!preview || preview_scenario == PreviewScenario::Artifacts).then(|| {
             let runtime = Arc::clone(&services.store);
             let tokio = Arc::clone(&services.tokio);
@@ -248,6 +252,17 @@ impl RootView {
                     this.sidebar.update(cx, |sidebar, cx| sidebar.toggle(cx));
                 }
                 TerminalPaneEvent::ToggleInspector => this.toggle_inspector(cx),
+                TerminalPaneEvent::OpenWorkspace { root } => {
+                    this.services
+                        .store
+                        .store
+                        .write()
+                        .expect("session store lock poisoned")
+                        .add_project(root.clone());
+                    this.sidebar.update(cx, |sidebar, cx| {
+                        sidebar.show_new_agent_in_workspace(root.clone(), cx);
+                    });
+                }
                 TerminalPaneEvent::OpenFileReference { reference, cwd, .. } => {
                     let inspector = this.inspector.clone();
                     this.reveal_inspector(cx);
@@ -264,8 +279,18 @@ impl RootView {
             if matches!(event, SidebarEvent::SessionActivated)
                 && let Some(terminal) = &this.terminal
             {
-                terminal.update(cx, |terminal, cx| terminal.focus(window, cx));
+                terminal.update(cx, |terminal, cx| {
+                    terminal.dismiss_startup_welcome(cx);
+                    terminal.focus(window, cx);
+                });
                 this.sync_auxiliary_terminal(window, cx);
+            }
+            if matches!(event, SidebarEvent::AgentSpawnRequested)
+                && let Some(terminal) = &this.terminal
+            {
+                terminal.update(cx, |terminal, cx| {
+                    terminal.dismiss_startup_welcome(cx);
+                });
             }
             if let SidebarEvent::Update(command) = event {
                 this.services.updates.send(command.clone());
@@ -287,21 +312,6 @@ impl RootView {
             }
             cx.notify();
         })
-        .detach();
-        cx.subscribe_in(
-            &launcher,
-            window,
-            |this, _, _: &LauncherEvent, window, cx| {
-                if let Some(terminal) = &this.terminal {
-                    terminal.update(cx, |terminal, cx| terminal.focus(window, cx));
-                } else {
-                    window.focus(&this.focus, cx);
-                }
-                // The launcher is a main-pane destination, so closing it must
-                // make RootView swap the terminal branch back into the row.
-                cx.notify();
-            },
-        )
         .detach();
         if let Some(navigation) = &navigation {
             cx.subscribe(navigation, |this, _, event, cx| match event {
@@ -530,7 +540,6 @@ impl RootView {
             navigation,
             session_surfaces,
             utility_surfaces,
-            launcher,
             inspector,
             services,
             focus: cx.focus_handle(),
@@ -619,19 +628,27 @@ impl RootView {
         crate::app_theme::colors(&store.preferences().terminal_theme)
     }
 
+    /// Narrowest useful inspector. A mirrored panel also carries the macOS
+    /// window-button lane in its toolbar, so it needs that much more before the
+    /// tab strip starts clipping.
+    fn inspector_min_width(&self) -> f32 {
+        crate::inspector::min_width(self.sidebar_on_right()).min(self.inspector_max_width)
+    }
+
+    /// Mirrored workbench: sidebar trailing, inspector leading. Read from
+    /// preferences the same way colors are, so a Settings toggle takes effect
+    /// on the next paint without any extra plumbing.
+    fn sidebar_on_right(&self) -> bool {
+        self.services
+            .store
+            .store
+            .read()
+            .expect("session store lock poisoned")
+            .preferences()
+            .sidebar_on_right
+    }
+
     fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.launcher.read(cx).is_open() {
-            let reopen = event.keystroke.modifiers.platform
-                && event.keystroke.key == "n"
-                && !event.keystroke.modifiers.shift;
-            self.launcher.update(cx, |launcher, cx| {
-                launcher.handle_key_down(event, _window, cx);
-            });
-            if !reopen {
-                cx.stop_propagation();
-            }
-            return;
-        }
         if let Some(surfaces) = &self.utility_surfaces
             && surfaces.read(cx).is_open()
         {
@@ -1038,17 +1055,17 @@ impl RootView {
             .update(cx, |sidebar, cx| sidebar.reopen_last(cx));
     }
 
-    fn open_launcher(&mut self, _: &OpenLauncher, window: &mut Window, cx: &mut Context<Self>) {
-        self.launcher
-            .update(cx, |launcher, cx| launcher.open(window, cx));
-        // Opening changes which main-pane branch RootView renders.
-        cx.notify();
-        // The launcher was not mounted while the terminal branch was active.
-        // Focus it on the next frame, after GPUI has installed its focus node.
-        let launcher = self.launcher.clone();
-        cx.defer_in(window, move |_, window, cx| {
-            launcher.update(cx, |launcher, cx| launcher.focus(window, cx));
-        });
+    fn open_new_agent(&mut self, _: &OpenNewAgent, _window: &mut Window, cx: &mut Context<Self>) {
+        self.sidebar
+            .update(cx, |sidebar, cx| sidebar.show_new_agent(cx));
+    }
+
+    fn open_workspace(&mut self, _: &OpenWorkspace, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(terminal) = &self.terminal {
+            terminal.update(cx, |terminal, cx| {
+                terminal.choose_workspace_folder(window, cx);
+            });
+        }
     }
 
     fn on_key_up(&mut self, event: &KeyUpEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -1229,7 +1246,7 @@ impl RootView {
         let Some((origin_x, base_width)) = self.resize_origin else {
             return;
         };
-        let width = base_width + pointer_x - origin_x;
+        let width = dragged_panel_width(base_width, pointer_x - origin_x, !self.sidebar_on_right());
         self.sidebar
             .update(cx, |sidebar, cx| sidebar.set_width(width, cx));
     }
@@ -1345,7 +1362,9 @@ impl RootView {
                         MouseButton::Left,
                         cx.listener(|this, event: &gpui::MouseUpEvent, _, cx| {
                             if event.click_count == 2 {
-                                this.inspector_width = 440.0_f32.min(this.inspector_max_width);
+                                this.inspector_width = 400.0_f32
+                                    .max(this.inspector_min_width())
+                                    .min(this.inspector_max_width);
                             }
                             this.finish_inspector_resize(cx);
                         }),
@@ -1362,10 +1381,8 @@ impl RootView {
         let Some((origin_x, base_width)) = self.inspector_resize_origin else {
             return;
         };
-        self.inspector_width = (base_width - pointer_x + origin_x).clamp(
-            300.0_f32.min(self.inspector_max_width),
-            self.inspector_max_width,
-        );
+        let width = dragged_panel_width(base_width, pointer_x - origin_x, self.sidebar_on_right());
+        self.inspector_width = width.clamp(self.inspector_min_width(), self.inspector_max_width);
         cx.notify();
     }
 
@@ -1449,6 +1466,28 @@ impl RootView {
         };
         let card_width = (f32::from(bounds.size.width) - sidebar_width - inspector_width).max(0.0);
         let card_height = f32::from(bounds.size.height).max(0.0);
+        let mirrored = self.sidebar_on_right();
+        // Window-space origin of the card: whichever panel sits to its left.
+        let card_x = if mirrored {
+            inspector_width
+        } else {
+            sidebar_width
+        };
+        // Corner radii follow the painted seams of whatever panel is on that
+        // side this frame, so mirroring only has to swap which seam is which.
+        let (leading_seam, trailing_seam) = if mirrored {
+            (inspector_seam, seam)
+        } else {
+            (seam, inspector_seam)
+        };
+        let chrome = ShellChrome {
+            sidebar_visible: visible_sidebar,
+            inspector_open: self.inspector_open,
+            // Nothing to the card's left means the macOS window buttons land
+            // on its own toolbar.
+            traffic_light_lane: card_x <= 0.0,
+            mirrored,
+        };
         let selected = self
             .services
             .store
@@ -1468,11 +1507,14 @@ impl RootView {
             .flex_col()
             .h_full()
             .min_w(px(0.0))
-            .when(seam <= 0.0, |card| card.rounded_tl(px(Radius::CARD)))
-            .when(inspector_seam <= 0.0, |card| {
+            .when(leading_seam <= 0.0, |card| {
+                card.rounded_tl(px(Radius::CARD))
+            })
+            .when(trailing_seam <= 0.0, |card| {
                 card.rounded_tr(px(Radius::CARD))
             })
-            .rounded_bl(px(Radius::CARD))
+            .when(mirrored, |card| card.rounded_br(px(Radius::CARD)))
+            .when(!mirrored, |card| card.rounded_bl(px(Radius::CARD)))
             .bg(terminal.background)
             .overflow_hidden()
             .text_color(terminal.primary);
@@ -1483,11 +1525,14 @@ impl RootView {
         let card_outline = div()
             .absolute()
             .inset_0()
-            .when(seam <= 0.0, |outline| outline.rounded_tl(px(Radius::CARD)))
-            .when(inspector_seam <= 0.0, |outline| {
+            .when(leading_seam <= 0.0, |outline| {
+                outline.rounded_tl(px(Radius::CARD))
+            })
+            .when(trailing_seam <= 0.0, |outline| {
                 outline.rounded_tr(px(Radius::CARD))
             })
-            .rounded_bl(px(Radius::CARD))
+            .when(mirrored, |outline| outline.rounded_br(px(Radius::CARD)))
+            .when(!mirrored, |outline| outline.rounded_bl(px(Radius::CARD)))
             .border_1()
             .border_color(terminal.primary.alpha(0.10));
 
@@ -1499,10 +1544,10 @@ impl RootView {
             let heights = self.workbench_layout.pane_heights(available_height);
             if let Some(primary) = &self.terminal {
                 primary.update(cx, |terminal, cx| {
-                    terminal.set_shell_chrome(visible_sidebar, self.inspector_open, cx);
+                    terminal.set_shell_chrome(chrome, cx);
                     terminal.set_viewport(
                         TerminalViewport {
-                            x: sidebar_width,
+                            x: card_x,
                             y: 0.0,
                             width: card_width,
                             height: heights.primary,
@@ -1533,7 +1578,7 @@ impl RootView {
                 terminal.update(cx, |terminal, cx| {
                     terminal.set_viewport(
                         TerminalViewport {
-                            x: sidebar_width,
+                            x: card_x,
                             y: heights.primary + 1.0,
                             width: card_width,
                             height: heights.auxiliary,
@@ -1590,10 +1635,10 @@ impl RootView {
         } else if let Some(primary) = &self.terminal {
             self.terminal_available_height = card_height;
             primary.update(cx, |terminal, cx| {
-                terminal.set_shell_chrome(visible_sidebar, self.inspector_open, cx);
+                terminal.set_shell_chrome(chrome, cx);
                 terminal.set_viewport(
                     TerminalViewport {
-                        x: sidebar_width,
+                        x: card_x,
                         y: 0.0,
                         width: card_width,
                         height: card_height,
@@ -1867,31 +1912,46 @@ impl RootView {
 impl Render for RootView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = self.colors();
-        let launcher_open = self.launcher.read(cx).is_open();
         let sidebar_visible = self.sidebar.read(cx).is_visible();
         let sidebar_width = self.sidebar.read(cx).width();
+        let startup_welcome_visible = self
+            .terminal
+            .as_ref()
+            .is_some_and(|terminal| terminal.read(cx).is_startup_welcome_visible());
+        let has_selected_session = self
+            .services
+            .store
+            .store
+            .read()
+            .expect("session store lock poisoned")
+            .selected_session_id()
+            .is_some();
         let window_width = f32::from(window.inner_window_bounds().get_bounds().size.width);
         let occupied_sidebar_width = if sidebar_visible { sidebar_width } else { 0.0 };
         self.inspector_max_width =
             (window_width - occupied_sidebar_width - 320.0).clamp(0.0, 720.0);
         // The inspector's own width, whether or not it is currently shown --
         // the panel keeps painting at full width while it slides away.
-        let inspector_panel_width = self.inspector_width.min(self.inspector_max_width);
-        let inspector_width = if self.inspector_open && !launcher_open {
-            inspector_panel_width
-        } else {
-            0.0
-        };
+        let inspector_panel_width = self
+            .inspector_width
+            .max(self.inspector_min_width())
+            .min(self.inspector_max_width);
+        let inspector_width =
+            if self.inspector_open && !startup_welcome_visible && has_selected_session {
+                inspector_panel_width
+            } else {
+                0.0
+            };
         let now = Instant::now();
         self.sidebar_seam =
             advance_seam(&mut self.sidebar_slide, occupied_sidebar_width, now, window);
         self.inspector_seam = advance_seam(&mut self.inspector_slide, inspector_width, now, window);
         let seam = self.sidebar_seam;
         let inspector_seam = self.inspector_seam;
-        // Each panel keeps its full width and is pinned to the wrapper edge it
-        // lives against -- the sidebar's right, the inspector's left -- so
-        // narrowing a wrapper slides its panel out under the clip instead of
-        // squeezing every row's contents down with it.
+        let mirrored = self.sidebar_on_right();
+        // Each panel keeps its full width and is pinned to the window edge it
+        // lives against -- so narrowing a wrapper slides its panel out under
+        // the clip instead of squeezing every row's contents down with it.
         let sidebar_wrapper = div()
             .relative()
             .flex_none()
@@ -1903,7 +1963,8 @@ impl Render for RootView {
                     div()
                         .absolute()
                         .top(px(0.0))
-                        .right(px(0.0))
+                        .when(mirrored, |panel| panel.left(px(0.0)))
+                        .when(!mirrored, |panel| panel.right(px(0.0)))
                         .h_full()
                         .w(px(sidebar_width))
                         // A reactive boundary: the sidebar re-renders on its
@@ -1932,7 +1993,8 @@ impl Render for RootView {
             .capture_key_up(cx.listener(Self::on_key_up))
             .on_action(cx.listener(Self::close_selected_session))
             .on_action(cx.listener(Self::reopen_last_session))
-            .on_action(cx.listener(Self::open_launcher))
+            .on_action(cx.listener(Self::open_workspace))
+            .on_action(cx.listener(Self::open_new_agent))
             .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))
             // Fires for every move once the seam drag starts, wherever the
             // pointer wanders -- unlike hover-gated move listeners.
@@ -1950,27 +2012,42 @@ impl Render for RootView {
                 |this, event: &DragMoveEvent<DraggedInspectorEdge>, _, cx| {
                     this.drag_inspector_resize(f32::from(event.event.position.x), cx);
                 },
-            ))
-            .child(sidebar_wrapper)
-            .when(seam > 0.0, |root| root.child(self.resize_handle(cx)));
-        if launcher_open {
-            // Command-N behaves like an unsaved new tab: preserve the app
-            // shell, but replace the live session pane instead of floating a
-            // dialog above it or manufacturing another session/tab up front.
-            root = root.child(
+            ));
+        let inspector_wrapper = (inspector_seam > 0.0)
+            .then_some(self.inspector.as_ref())
+            .flatten()
+            .map(|inspector| {
                 div()
                     .relative()
-                    .flex_1()
+                    .flex_none()
                     .h_full()
-                    .min_w(px(0.0))
+                    .w(px(inspector_seam))
                     .overflow_hidden()
+                    .when(mirrored, |wrapper| wrapper.border_r_1())
+                    .when(!mirrored, |wrapper| wrapper.border_l_1())
+                    .border_color(colors.primary.alpha(0.08))
                     .child(
-                        self.launcher
-                            .clone()
-                            .cached(StyleRefinement::default().size_full()),
-                    ),
-            );
-        } else {
+                        div()
+                            .absolute()
+                            .top(px(0.0))
+                            .when(mirrored, |panel| panel.right(px(0.0)))
+                            .when(!mirrored, |panel| panel.left(px(0.0)))
+                            .h_full()
+                            .w(px(inspector_panel_width))
+                            .child(
+                                inspector
+                                    .clone()
+                                    .cached(StyleRefinement::default().size_full()),
+                            ),
+                    )
+            });
+        // Each seam handle is a zero-width strip centred on the boundary it
+        // owns, so it works on either side of its panel; only the order of the
+        // row changes when the workbench is mirrored.
+        if mirrored {
+            if let Some(wrapper) = inspector_wrapper {
+                root = root.child(wrapper).child(self.inspector_resize_handle(cx));
+            }
             root = root.child(self.terminal_card(
                 sidebar_visible,
                 seam,
@@ -1979,33 +2056,25 @@ impl Render for RootView {
                 window,
                 cx,
             ));
-        }
-        if inspector_seam > 0.0 {
-            root = root.child(self.inspector_resize_handle(cx));
-            if let Some(inspector) = &self.inspector {
-                root = root.child(
-                    div()
-                        .relative()
-                        .flex_none()
-                        .h_full()
-                        .w(px(inspector_seam))
-                        .overflow_hidden()
-                        .border_l_1()
-                        .border_color(colors.primary.alpha(0.08))
-                        .child(
-                            div()
-                                .absolute()
-                                .top(px(0.0))
-                                .left(px(0.0))
-                                .h_full()
-                                .w(px(inspector_panel_width))
-                                .child(
-                                    inspector
-                                        .clone()
-                                        .cached(StyleRefinement::default().size_full()),
-                                ),
-                        ),
-                );
+            if seam > 0.0 {
+                root = root.child(self.resize_handle(cx));
+            }
+            root = root.child(sidebar_wrapper);
+        } else {
+            root = root.child(sidebar_wrapper);
+            if seam > 0.0 {
+                root = root.child(self.resize_handle(cx));
+            }
+            root = root.child(self.terminal_card(
+                sidebar_visible,
+                seam,
+                inspector_width,
+                inspector_seam,
+                window,
+                cx,
+            ));
+            if let Some(wrapper) = inspector_wrapper {
+                root = root.child(self.inspector_resize_handle(cx)).child(wrapper);
             }
         }
         if self.resize_origin.is_some()
@@ -2036,6 +2105,17 @@ impl Render for RootView {
             root = root.child(dev_build_marker(build.marker_label(), colors));
         }
         root
+    }
+}
+
+/// Panel width part-way through a seam drag. A panel pinned to the window's
+/// leading edge widens as the pointer travels right; one pinned to the trailing
+/// edge widens as it travels left.
+fn dragged_panel_width(base_width: f32, travel: f32, grows_rightward: bool) -> f32 {
+    if grows_rightward {
+        base_width + travel
+    } else {
+        base_width - travel
     }
 }
 
@@ -2134,6 +2214,18 @@ mod tests {
             platform: true,
             ..Modifiers::default()
         }
+    }
+
+    /// The mirrored workbench flips which way each seam widens its panel: the
+    /// sidebar grows rightward only while it is on the leading edge, and the
+    /// inspector only once it is.
+    #[test]
+    fn seam_drags_widen_panels_away_from_the_edge_they_sit_against() {
+        let sidebar_leading = dragged_panel_width(232.0, 40.0, true);
+        let sidebar_trailing = dragged_panel_width(232.0, 40.0, false);
+        assert_eq!(sidebar_leading, 272.0);
+        assert_eq!(sidebar_trailing, 192.0);
+        assert_eq!(dragged_panel_width(400.0, -60.0, false), 460.0);
     }
 
     #[test]

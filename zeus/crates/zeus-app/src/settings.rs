@@ -8,6 +8,9 @@ use zeus_term::theme::TermTheme;
 
 use crate::store::Prefs;
 
+/// Public product documentation opened from Settings, Help, and the palette.
+pub const DOCS_URL: &str = "https://docs.zeus.nasrul.info";
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SettingsTab {
     #[default]

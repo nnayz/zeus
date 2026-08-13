@@ -95,6 +95,15 @@ impl QueryEditor {
         self.anchor = 0;
     }
 
+    /// Replaces the complete buffer without filtering its contents. This is
+    /// used by document-like fields that load trusted UTF-8 from disk rather
+    /// than accepting a single-line user insertion.
+    pub fn reset(&mut self, text: impl Into<String>, cursor: usize) {
+        self.text = text.into();
+        self.cursor = self.floor_boundary(cursor);
+        self.anchor = self.cursor;
+    }
+
     pub fn select_all(&mut self) {
         self.anchor = 0;
         self.cursor = self.text.len();
@@ -116,6 +125,16 @@ impl QueryEditor {
         let filtered: String = insertion
             .chars()
             .filter(|character| !character.is_control() || *character == '\n')
+            .collect();
+        self.replace_selection(&filtered)
+    }
+
+    /// Inserts source-document text. Newlines and indentation tabs are valid
+    /// document content; other control characters remain excluded.
+    pub fn insert_document(&mut self, insertion: &str) -> bool {
+        let filtered: String = insertion
+            .chars()
+            .filter(|character| !character.is_control() || matches!(*character, '\n' | '\r' | '\t'))
             .collect();
         self.replace_selection(&filtered)
     }
@@ -440,6 +459,16 @@ mod tests {
         let mut editor = QueryEditor::default();
         assert!(editor.insert_multiline("first\nsecond\tthird"));
         assert_eq!(editor.text(), "first\nsecondthird");
+    }
+
+    #[test]
+    fn document_content_preserves_line_endings_and_indentation_tabs() {
+        let mut editor = QueryEditor::default();
+        editor.reset("one\r\ntwo", 5);
+        assert_eq!(editor.text(), "one\r\ntwo");
+        assert_eq!(editor.cursor(), 5);
+        assert!(editor.insert_document("\tindented\n"));
+        assert_eq!(editor.text(), "one\r\n\tindented\ntwo");
     }
 
     #[test]

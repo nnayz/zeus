@@ -9,16 +9,16 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     AnyElement, App, ClickEvent, ClipboardEntry, ClipboardItem, Context, Entity, EventEmitter,
-    FocusHandle, KeyBinding, KeyDownEvent, KeyUpEvent, ModifiersChangedEvent, MouseButton, Render,
-    ScrollDelta, ScrollWheelEvent, SharedString, StatefulInteractiveElement, Task, Window, actions,
-    div, font, prelude::*, px, rgba,
+    FocusHandle, KeyBinding, KeyDownEvent, KeyUpEvent, ModifiersChangedEvent, MouseButton,
+    PathPromptOptions, Render, ScrollDelta, ScrollWheelEvent, SharedString,
+    StatefulInteractiveElement, Task, Window, actions, div, font, prelude::*, px, rgba,
 };
 use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 use zeus_client::attachment::{SessionAttachment, TerminalChunk};
 use zeus_proto::grid::GridUpdate;
 use zeus_proto::{
-    AgentKind as ProtoAgentKind, ArtifactKind, ExitReason, PrCheck, PullRequestStatus,
+    AgentKind as ProtoAgentKind, ArtifactKind, ExitReason, PrCheck, Project, PullRequestStatus,
     Resumability, RiskHint, SessionArtifact, SessionId, SessionRecord, SessionStatus,
 };
 use zeus_term::buffer::GridBuffer;
@@ -92,6 +92,7 @@ const ANCHOR_SLACK: f32 = 1.0;
 /// caches are rebuilt on promotion — so the ceiling is a memory bound, not a
 /// residency one.
 const PARKED_GRID_CAP: usize = 12;
+const WELCOME_RECENT_LIMIT: usize = 6;
 actions!(
     zeus_terminal,
     [
@@ -111,6 +112,9 @@ actions!(
 pub enum TerminalPaneEvent {
     ToggleSidebar,
     ToggleInspector,
+    OpenWorkspace {
+        root: String,
+    },
     OpenFileReference {
         reference: String,
         cwd: String,
@@ -331,10 +335,12 @@ fn toolbar_chip_width(chip: &PaneChip) -> f32 {
     (label_width + 34.0).clamp(68.0, TOOLBAR_LINK_MAX_WIDTH)
 }
 
+/// `plain_toolbar` means neither the traffic-light lane nor the sidebar reveal
+/// button is in the row; which side they sit on does not change their cost.
 fn toolbar_visible_chip_count(
     chips: &[PaneChip],
     viewport_width: f32,
-    sidebar_visible: bool,
+    plain_toolbar: bool,
 ) -> usize {
     if chips.is_empty() {
         return 0;
@@ -342,7 +348,7 @@ fn toolbar_visible_chip_count(
 
     // Protect a readable session title, branch/host metadata, agent identity,
     // and (when needed) the macOS traffic-light lane + sidebar reveal button.
-    let fixed_chrome = if sidebar_visible { 560.0 } else { 673.0 };
+    let fixed_chrome = if plain_toolbar { 560.0 } else { 673.0 };
     let budget = (viewport_width - fixed_chrome).clamp(TOOLBAR_OVERFLOW_WIDTH, 720.0);
     let limit = chips.len().min(TOOLBAR_MAX_VISIBLE_LINKS);
     let mut used = 0.0;
@@ -481,6 +487,19 @@ impl ReflowHold {
     }
 }
 
+/// What the surrounding workbench looks like this frame, so the pane's toolbar
+/// can offer the right controls. `traffic_light_lane` is set when the card is
+/// flush against the window's leading edge and therefore has to keep the macOS
+/// window buttons clear; `mirrored` puts the sidebar on the trailing edge and
+/// the inspector on the leading one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ShellChrome {
+    pub sidebar_visible: bool,
+    pub inspector_open: bool,
+    pub traffic_light_lane: bool,
+    pub mirrored: bool,
+}
+
 /// Window-space allocation supplied by the workbench. Terminal input needs
 /// the origin while PTY sizing needs the local width and height.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -534,9 +553,12 @@ pub struct TerminalPane {
     /// daemon-created id asynchronously, so this transition is also the
     /// reliable point at which keyboard focus can leave the picker.
     observed_selected_id: Option<SessionId>,
+    /// The welcome canvas is an explicit startup destination, not merely the
+    /// absence of a session. RootView enables it for the primary pane so a
+    /// restored selection cannot skip the workspace choice on launch.
+    startup_welcome: bool,
     viewport: Option<TerminalViewport>,
-    sidebar_visible: bool,
-    inspector_open: bool,
+    chrome: ShellChrome,
     navigation: Option<Entity<NavigationOverlay>>,
     utility_surfaces: Option<Entity<UtilitySurfaces>>,
     local_clipboard_images: Vec<StagedClipboardImage>,
@@ -664,9 +686,12 @@ impl TerminalPane {
             repaint_pacer: RepaintPacer::new(ACTIVE_REPAINT_INTERVAL),
             session_source,
             observed_selected_id,
+            startup_welcome: false,
             viewport: None,
-            sidebar_visible: true,
-            inspector_open: false,
+            chrome: ShellChrome {
+                sidebar_visible: true,
+                ..ShellChrome::default()
+            },
             navigation: None,
             utility_surfaces: None,
             local_clipboard_images: Vec::new(),
@@ -818,6 +843,22 @@ impl TerminalPane {
         window.focus(&self.focus, cx);
     }
 
+    pub fn show_startup_welcome(&mut self) {
+        self.startup_welcome = true;
+    }
+
+    pub fn dismiss_startup_welcome(&mut self, cx: &mut Context<Self>) {
+        if !self.startup_welcome {
+            return;
+        }
+        self.startup_welcome = false;
+        cx.notify();
+    }
+
+    pub const fn is_startup_welcome_visible(&self) -> bool {
+        self.startup_welcome
+    }
+
     pub fn set_viewport(&mut self, viewport: TerminalViewport, cx: &mut Context<Self>) {
         if self.viewport == Some(viewport) {
             return;
@@ -826,17 +867,11 @@ impl TerminalPane {
         cx.notify();
     }
 
-    pub fn set_shell_chrome(
-        &mut self,
-        sidebar_visible: bool,
-        inspector_open: bool,
-        cx: &mut Context<Self>,
-    ) {
-        if self.sidebar_visible == sidebar_visible && self.inspector_open == inspector_open {
+    pub fn set_shell_chrome(&mut self, chrome: ShellChrome, cx: &mut Context<Self>) {
+        if self.chrome == chrome {
             return;
         }
-        self.sidebar_visible = sidebar_visible;
-        self.inspector_open = inspector_open;
+        self.chrome = chrome;
         cx.notify();
     }
 
@@ -1126,6 +1161,259 @@ impl TerminalPane {
             .sessions()
             .get(&id)
             .map(Arc::clone)
+    }
+
+    fn recent_workspaces(&self) -> Vec<Project> {
+        let store = self
+            .runtime
+            .store
+            .read()
+            .expect("session store lock poisoned");
+        let mut updated_at = HashMap::new();
+        for session in store.sessions().values() {
+            updated_at
+                .entry(session.project_id.clone())
+                .and_modify(|value: &mut f64| *value = value.max(session.updated_at.0))
+                .or_insert(session.updated_at.0);
+        }
+        let projects = store
+            .projects()
+            .values()
+            .cloned()
+            .map(|project| {
+                let updated = updated_at
+                    .get(&project.id)
+                    .copied()
+                    .unwrap_or(f64::NEG_INFINITY);
+                (project, updated)
+            })
+            .collect();
+        ordered_recent_workspaces(projects)
+    }
+
+    pub(crate) fn choose_workspace_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let paths = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Open Folder".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let selected = match paths.await {
+                Ok(Ok(Some(mut paths))) => paths.pop(),
+                _ => None,
+            };
+            let Some(root) = selected.map(|path| path.to_string_lossy().into_owned()) else {
+                return;
+            };
+            let _ = this.update_in(cx, |_, _window, cx| {
+                cx.emit(TerminalPaneEvent::OpenWorkspace { root });
+            });
+        })
+        .detach();
+    }
+
+    fn render_workspace_welcome(
+        &self,
+        colors: SemanticColors,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let workspaces = self.recent_workspaces();
+        let mut recent = div()
+            .id("welcome-recent-workspaces")
+            .w_full()
+            .min_w(px(0.0))
+            .flex()
+            .flex_col()
+            .gap(px(4.0));
+        if workspaces.is_empty() {
+            recent = recent.child(
+                div()
+                    .h(px(44.0))
+                    .px(px(10.0))
+                    .flex()
+                    .items_center()
+                    .rounded(px(Radius::ROW))
+                    .border_1()
+                    .border_color(colors.primary.alpha(0.06))
+                    .text_size(px(Typo::ROW.size))
+                    .text_color(colors.tertiary)
+                    .child("Folders you open will appear here."),
+            );
+        } else {
+            for (index, workspace) in workspaces.into_iter().enumerate() {
+                let root = workspace.root.clone();
+                recent = recent.child(
+                    div()
+                        .id(SharedString::from(format!("welcome-workspace-{index}")))
+                        .h(px(44.0))
+                        .px(px(10.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .rounded(px(Radius::ROW))
+                        .cursor_pointer()
+                        .hover(move |row| row.bg(colors.primary.alpha(0.06)))
+                        .active(move |row| row.bg(colors.primary.alpha(0.09)))
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            cx.emit(TerminalPaneEvent::OpenWorkspace { root: root.clone() });
+                        }))
+                        .child(
+                            div()
+                                .size(px(26.0))
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(Radius::BADGE))
+                                .bg(colors.primary.alpha(0.06))
+                                .child(sf_symbol("folder", 12.0, colors.secondary)),
+                        )
+                        .child(
+                            div()
+                                .min_w(px(0.0))
+                                .flex_1()
+                                .flex()
+                                .flex_col()
+                                .gap(px(2.0))
+                                .child(
+                                    div()
+                                        .whitespace_nowrap()
+                                        .overflow_hidden()
+                                        .text_ellipsis()
+                                        .text_size(px(Typo::ROW_EMPHASIZED.size))
+                                        .font_weight(Typo::ROW_EMPHASIZED.weight)
+                                        .text_color(colors.primary.alpha(0.90))
+                                        .child(workspace.name),
+                                )
+                                .child(
+                                    div()
+                                        .whitespace_nowrap()
+                                        .overflow_hidden()
+                                        .text_ellipsis()
+                                        .text_size(px(Typo::META.size))
+                                        .text_color(colors.tertiary)
+                                        .child(workspace.root),
+                                ),
+                        )
+                        .child(sf_symbol("chevron.right", 9.0, colors.tertiary)),
+                );
+            }
+        }
+
+        div()
+            .id("workspace-welcome")
+            .debug_selector(|| "workspace-welcome".into())
+            .flex_1()
+            .h_full()
+            .px(px(32.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                div()
+                    .w_full()
+                    .max_w(px(640.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(28.0))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(6.0))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(8.0))
+                                    .child(sf_symbol("sparkle", 18.0, colors.primary))
+                                    .child(
+                                        div()
+                                            .text_size(px(22.0))
+                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            .text_color(colors.primary)
+                                            .child("Welcome to Zeus"),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(Typo::ROW.size))
+                                    .text_color(colors.secondary)
+                                    .child(
+                                        "Open a folder to choose where your agents should work.",
+                                    ),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .items_start()
+                            .gap(px(36.0))
+                            .child(
+                                div()
+                                    .w(px(220.0))
+                                    .flex_none()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(8.0))
+                                    .child(welcome_section_label("Start", colors))
+                                    .child(
+                                        div()
+                                            .id("welcome-open-folder")
+                                            .debug_selector(|| "welcome-open-folder".into())
+                                            .h(px(36.0))
+                                            .px(px(10.0))
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(8.0))
+                                            .rounded(px(Radius::ROW))
+                                            .cursor_pointer()
+                                            .border_1()
+                                            .border_color(colors.primary.alpha(0.09))
+                                            .bg(colors.primary.alpha(0.045))
+                                            .hover(move |button| {
+                                                button.bg(colors.primary.alpha(0.08))
+                                            })
+                                            .active(move |button| {
+                                                button.bg(colors.primary.alpha(0.11))
+                                            })
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.choose_workspace_folder(window, cx);
+                                            }))
+                                            .child(sf_symbol("folder", 13.0, colors.secondary))
+                                            .child(
+                                                div()
+                                                    .text_size(px(Typo::ROW_EMPHASIZED.size))
+                                                    .font_weight(Typo::ROW_EMPHASIZED.weight)
+                                                    .text_color(colors.primary)
+                                                    .child("Open Folder…"),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(Typo::META.size))
+                                            .line_height(px(15.0))
+                                            .text_color(colors.tertiary)
+                                            .child(
+                                                "Choose a repository or any directory on this Mac.",
+                                            ),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .min_w(px(0.0))
+                                    .flex_1()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(8.0))
+                                    .child(welcome_section_label("Recent workspaces", colors))
+                                    .child(recent),
+                            ),
+                    ),
+            )
+            .into_any_element()
     }
 
     fn open_find(&mut self, _: &OpenFind, window: &mut Window, cx: &mut Context<Self>) {
@@ -1773,37 +2061,46 @@ impl TerminalPane {
         }
     }
 
+    /// Keeps the macOS window buttons clear when the card owns the window's
+    /// leading edge. The visible lights need more breathing room than their
+    /// native frames imply, so this is an intentional optical safe area.
+    fn render_traffic_light_lane(&self) -> AnyElement {
+        div()
+            // The header supplies its own leading edge inset. Reserve only
+            // the balance needed to reach the shared window-space boundary.
+            .w(px(
+                Metrics::TOOLBAR_TRAFFIC_LIGHT_SAFE_RIGHT - Metrics::TOOLBAR_EDGE_INSET
+            ))
+            .flex_none()
+            .into_any_element()
+    }
+
     fn render_sidebar_reveal_control(
         &self,
         colors: SemanticColors,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let icon = if self.chrome.mirrored {
+            "sidebar.right"
+        } else {
+            "sidebar.left"
+        };
         div()
+            .id("show-sidebar")
+            .debug_selector(|| "show-sidebar".into())
+            .size(px(Metrics::TOOLBAR_CONTROL_SIZE))
             .flex_none()
             .flex()
             .items_center()
-            .gap(px(Metrics::TOOLBAR_ITEM_GAP))
-            // The visible lights need more breathing room than their native
-            // frames imply, so this is an intentional optical safe area.
-            .child(div().w(px(Metrics::TOOLBAR_TRAFFIC_LIGHT_LANE)).flex_none())
-            .child(
-                div()
-                    .id("show-sidebar")
-                    .debug_selector(|| "show-sidebar".into())
-                    .size(px(Metrics::TOOLBAR_CONTROL_SIZE))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(Radius::BADGE))
-                    .cursor_pointer()
-                    .hover(move |button| button.bg(Fill::subtle(colors)))
-                    .child(sf_symbol("sidebar.left", 15.0, colors.secondary))
-                    .on_click(cx.listener(|_, _, _, cx| {
-                        cx.emit(TerminalPaneEvent::ToggleSidebar);
-                        cx.stop_propagation();
-                    })),
-            )
+            .justify_center()
+            .rounded(px(Radius::BADGE))
+            .cursor_pointer()
+            .hover(move |button| button.bg(Fill::subtle(colors)))
+            .child(sf_symbol(icon, 15.0, colors.secondary))
+            .on_click(cx.listener(|_, _, _, cx| {
+                cx.emit(TerminalPaneEvent::ToggleSidebar);
+                cx.stop_propagation();
+            }))
             .into_any_element()
     }
 
@@ -1826,9 +2123,21 @@ impl TerminalPane {
         });
         let kind = ui_agent_kind(session.effective_kind());
         let shell_controls = matches!(self.session_source, SessionSource::FollowSelection);
-        let show_sidebar = shell_controls && !self.sidebar_visible;
-        let sidebar_reveal = show_sidebar.then(|| self.render_sidebar_reveal_control(colors, cx));
-        let inspector_open = self.inspector_open;
+        let mirrored = self.chrome.mirrored;
+        let show_sidebar = shell_controls && !self.chrome.sidebar_visible;
+        // The reveal button belongs beside the edge the sidebar returns to.
+        let leading_reveal =
+            (show_sidebar && !mirrored).then(|| self.render_sidebar_reveal_control(colors, cx));
+        let trailing_reveal =
+            (show_sidebar && mirrored).then(|| self.render_sidebar_reveal_control(colors, cx));
+        let traffic_light_lane = (shell_controls && self.chrome.traffic_light_lane)
+            .then(|| self.render_traffic_light_lane());
+        let inspector_open = self.chrome.inspector_open;
+        let inspector_icon = if mirrored {
+            "sidebar.left"
+        } else {
+            "sidebar.right"
+        };
         let visible_chip_count = visible_chip_count.min(chips.len());
         let overflow_count = chips.len().saturating_sub(visible_chip_count);
         let mut toolbar_links = div()
@@ -1881,7 +2190,8 @@ impl TerminalPane {
                     .items_center()
                     .gap(px(Metrics::TOOLBAR_ITEM_GAP))
                     .overflow_hidden()
-                    .when_some(sidebar_reveal, |title, control| title.child(control))
+                    .when_some(traffic_light_lane, |title, lane| title.child(lane))
+                    .when_some(leading_reveal, |title, control| title.child(control))
                     .child(sf_symbol("terminal", 15.0, colors.secondary))
                     .child(
                         div()
@@ -1967,7 +2277,7 @@ impl TerminalPane {
                                 .when(inspector_open, |button| button.bg(Fill::subtle(colors)))
                                 .hover(move |button| button.bg(Fill::subtle(colors)))
                                 .child(sf_symbol(
-                                    "sidebar.right",
+                                    inspector_icon,
                                     15.0,
                                     if inspector_open {
                                         colors.primary
@@ -1980,7 +2290,8 @@ impl TerminalPane {
                                     cx.stop_propagation();
                                 })),
                         )
-                    }),
+                    })
+                    .when_some(trailing_reveal, |trailing, control| trailing.child(control)),
             )
             .into_any_element()
     }
@@ -2712,6 +3023,27 @@ impl TerminalPane {
     }
 }
 
+fn ordered_recent_workspaces(mut projects: Vec<(Project, f64)>) -> Vec<Project> {
+    projects.sort_by(|(left, left_updated), (right, right_updated)| {
+        left.pinned_order
+            .unwrap_or(i64::MAX)
+            .cmp(&right.pinned_order.unwrap_or(i64::MAX))
+            .then_with(|| right_updated.total_cmp(left_updated))
+            .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+            .then_with(|| left.root.cmp(&right.root))
+    });
+    projects.truncate(WELCOME_RECENT_LIMIT);
+    projects.into_iter().map(|(project, _)| project).collect()
+}
+
+fn welcome_section_label(label: &'static str, colors: SemanticColors) -> gpui::Div {
+    div()
+        .text_size(px(Typo::SECTION_HEADER.size))
+        .font_weight(Typo::SECTION_HEADER.weight)
+        .text_color(colors.secondary)
+        .child(label)
+}
+
 impl Render for TerminalPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.reconcile_residency();
@@ -2732,14 +3064,16 @@ impl Render for TerminalPane {
         self.sync_status_glyphs(colors, window, cx);
         self.update_selected_geometry(window, cx);
 
-        let selected = self.selected_session();
+        let selected = (!self.startup_welcome)
+            .then(|| self.selected_session())
+            .flatten();
 
         let content = if let Some(session) = selected {
             let chips = PaneChip::for_session(&session);
             let visible_chip_count = toolbar_visible_chip_count(
                 &chips,
                 self.viewport.map_or(900.0, |viewport| viewport.width),
-                self.sidebar_visible,
+                self.chrome.sidebar_visible && !self.chrome.traffic_light_lane,
             );
             if visible_chip_count >= chips.len() {
                 self.overflow_open = false;
@@ -2784,17 +3118,39 @@ impl Render for TerminalPane {
             }
             pane.into_any_element()
         } else {
-            let show_sidebar = matches!(self.session_source, SessionSource::FollowSelection)
-                && !self.sidebar_visible;
+            let follows_selection = matches!(self.session_source, SessionSource::FollowSelection);
+            let show_sidebar = follows_selection && !self.chrome.sidebar_visible;
             let sidebar_reveal =
                 show_sidebar.then(|| self.render_sidebar_reveal_control(sidebar_colors, cx));
+            let welcome_lane = (follows_selection && self.chrome.traffic_light_lane)
+                .then(|| self.render_traffic_light_lane());
+            // The strip exists for either control, and for the window buttons
+            // alone when the welcome canvas owns the window's leading edge.
+            let welcome_bar = (sidebar_reveal.is_some() || welcome_lane.is_some()).then_some((
+                sidebar_reveal,
+                welcome_lane,
+                self.chrome.mirrored,
+            ));
+            let empty_content = if follows_selection {
+                self.render_workspace_welcome(colors, cx)
+            } else {
+                div()
+                    .flex_1()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(Typo::ROW.size))
+                    .text_color(colors.tertiary)
+                    .child("Opening terminal…")
+                    .into_any_element()
+            };
             div()
                 .flex_1()
                 .h_full()
                 .flex()
                 .flex_col()
                 .bg(theme.background)
-                .when_some(sidebar_reveal, |pane, control| {
+                .when_some(welcome_bar, |pane, (reveal, lane, mirrored)| {
                     pane.child(
                         div()
                             .h(px(Metrics::TITLE_BAR))
@@ -2802,20 +3158,15 @@ impl Render for TerminalPane {
                             .px(px(Metrics::TOOLBAR_EDGE_INSET))
                             .flex()
                             .items_center()
+                            .gap(px(Metrics::TOOLBAR_ITEM_GAP))
+                            .justify_between()
                             .bg(sidebar_colors.sidebar_surface())
-                            .child(control),
+                            .when_some(lane, |bar, lane| bar.child(lane))
+                            .when(mirrored, |bar| bar.child(div().flex_1()))
+                            .when_some(reveal, |bar, control| bar.child(control)),
                     )
                 })
-                .child(
-                    div()
-                        .flex_1()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_size(px(13.0))
-                        .text_color(sidebar_colors.tertiary)
-                        .child("Start a terminal from the sidebar"),
-                )
+                .child(empty_content)
                 .into_any_element()
         };
 
@@ -3664,7 +4015,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn an_empty_terminal_pane_keeps_the_sidebar_reveal_control(cx: &mut TestAppContext) {
+    fn an_empty_terminal_pane_shows_workspace_welcome_and_sidebar_control(cx: &mut TestAppContext) {
         let runtime = Arc::new(StoreRuntime::inert());
         let tokio = Arc::new(
             tokio::runtime::Builder::new_current_thread()
@@ -3675,7 +4026,7 @@ mod tests {
 
         let (pane, cx) = cx.add_window_view(move |window, cx| {
             let mut pane = TerminalPane::new(runtime, tokio, window, cx);
-            pane.set_shell_chrome(false, false, cx);
+            pane.set_shell_chrome(ShellChrome::default(), cx);
             pane
         });
 
@@ -3683,10 +4034,65 @@ mod tests {
             pane.read_with(cx, |pane, _| pane.selected_session().is_none()),
             "fixture must exercise the empty terminal state"
         );
+        assert!(cx.debug_bounds("workspace-welcome").is_some());
+        assert!(cx.debug_bounds("welcome-open-folder").is_some());
         assert!(
             cx.debug_bounds("show-sidebar").is_some(),
             "collapsing the sidebar must leave a way to reveal it"
         );
+    }
+
+    #[gpui::test]
+    fn startup_welcome_precedes_a_restored_session_until_dismissed(cx: &mut TestAppContext) {
+        let runtime = Arc::new(StoreRuntime::inert());
+        let session = fixture_session();
+        {
+            let mut store = runtime.store.write().expect("session store lock poisoned");
+            store.upsert_session(session.clone());
+            store.select(session.id);
+        }
+        let tokio = Arc::new(
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime"),
+        );
+
+        let (pane, cx) = cx.add_window_view(move |window, cx| {
+            let mut pane = TerminalPane::new(runtime, tokio, window, cx);
+            pane.show_startup_welcome();
+            pane
+        });
+
+        assert!(cx.debug_bounds("workspace-welcome").is_some());
+        assert!(pane.read_with(cx, |pane, _| pane.is_startup_welcome_visible()));
+
+        pane.update(cx, |pane, cx| pane.dismiss_startup_welcome(cx));
+
+        assert!(cx.debug_bounds("workspace-welcome").is_none());
+        assert!(!pane.read_with(cx, |pane, _| pane.is_startup_welcome_visible()));
+    }
+
+    #[test]
+    fn workspace_welcome_prioritizes_pins_and_bounds_the_recent_list() {
+        let mut projects: Vec<_> = (0..8)
+            .map(|index| Project {
+                id: zeus_proto::ProjectId::new(format!("project-{index}")),
+                root: format!("/work/project-{index}"),
+                name: format!("Project {index}"),
+                pinned_order: None,
+            })
+            .zip(0..8)
+            .map(|(project, updated)| (project, f64::from(updated)))
+            .collect();
+        projects[7].0.name = "Pinned".to_owned();
+        projects[7].0.pinned_order = Some(0);
+
+        let recent = ordered_recent_workspaces(projects);
+
+        assert_eq!(recent.len(), WELCOME_RECENT_LIMIT);
+        assert_eq!(recent[0].name, "Pinned");
+        assert_eq!(recent[1].name, "Project 6");
     }
 
     #[gpui::test]

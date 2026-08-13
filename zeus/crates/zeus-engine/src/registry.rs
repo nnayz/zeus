@@ -785,6 +785,17 @@ impl Registry {
         self.ensure_session_project(root, None)
     }
 
+    /// Forgets a project record, reporting whether one was there. Callers must
+    /// remove the project's Session records first: `load` re-derives a project
+    /// from any surviving record, so a leftover session resurrects the row on
+    /// the next daemon start.
+    pub fn remove_project(&mut self, id: &str) -> bool {
+        let before = self.projects.len();
+        self.projects
+            .retain(|project| project.get("id").and_then(|value| value.as_str()) != Some(id));
+        self.projects.len() != before
+    }
+
     /// Ensures every Session has a concrete first-level Project record. The
     /// host remains an execution property of Sessions; the project id carries
     /// the location namespace and prevents cross-host path collisions.

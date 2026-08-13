@@ -97,6 +97,9 @@ pub struct Prefs {
     /// Whether the leading sidebar was mounted when the app last ran.
     pub sidebar_visible: bool,
     pub sidebar_width: f32,
+    /// Mirrored workbench: projects sidebar on the trailing edge and the
+    /// inspector on the leading one. This is the default arrangement.
+    pub sidebar_on_right: bool,
     /// Whether the trailing workbench inspector is mounted.
     pub inspector_open: bool,
     /// Width of the trailing workbench inspector in points.
@@ -136,9 +139,10 @@ impl Default for Prefs {
             terminal_font_size: 13.0,
             window_placement: None,
             sidebar_visible: true,
-            sidebar_width: 248.0,
+            sidebar_width: 232.0,
+            sidebar_on_right: true,
             inspector_open: true,
-            inspector_width: 440.0,
+            inspector_width: 400.0,
             inspector_tab: InspectorTab::Info,
             workbench_primary_fraction: crate::workbench::DEFAULT_PRIMARY_FRACTION,
             quick_open_roots: String::new(),
@@ -226,12 +230,21 @@ impl Prefs {
                 self.window_placement = None;
             }
         }
-        if !self.sidebar_width.is_finite() {
-            self.sidebar_width = 248.0;
+        // Carry installations that still have the former untouched defaults
+        // into the compact layout, while preserving any width the user
+        // actually resized to.
+        if self.sidebar_width == 248.0 {
+            self.sidebar_width = 232.0;
         }
-        self.sidebar_width = self.sidebar_width.clamp(200.0, 400.0);
+        if !self.sidebar_width.is_finite() {
+            self.sidebar_width = 232.0;
+        }
+        self.sidebar_width = self.sidebar_width.clamp(184.0, 360.0);
+        if self.inspector_width == 440.0 {
+            self.inspector_width = 400.0;
+        }
         if !self.inspector_width.is_finite() {
-            self.inspector_width = 440.0;
+            self.inspector_width = 400.0;
         }
         self.inspector_width = self.inspector_width.clamp(300.0, 720.0);
         if !self.workbench_primary_fraction.is_finite() {
@@ -241,5 +254,48 @@ impl Prefs {
         if self.terminal_theme.is_empty() {
             self.terminal_theme = DEFAULT_THEME.to_owned();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Prefs;
+
+    #[test]
+    fn former_panel_defaults_migrate_to_compact_widths() {
+        let mut prefs = Prefs {
+            sidebar_width: 248.0,
+            inspector_width: 440.0,
+            ..Prefs::default()
+        };
+
+        prefs.normalize();
+
+        assert_eq!(prefs.sidebar_width, 232.0);
+        assert_eq!(prefs.inspector_width, 400.0);
+    }
+
+    /// Preferences written before the mirrored workbench existed have no
+    /// `sidebarOnRight` key, and must still land on the new default.
+    #[test]
+    fn saved_preferences_without_a_layout_choice_adopt_the_mirrored_default() {
+        let restored: Prefs = serde_json::from_str(r#"{"sidebarWidth": 232.0}"#).expect("prefs");
+
+        assert!(restored.sidebar_on_right);
+        assert!(Prefs::default().sidebar_on_right);
+    }
+
+    #[test]
+    fn explicit_panel_widths_survive_compact_normalization() {
+        let mut prefs = Prefs {
+            sidebar_width: 276.0,
+            inspector_width: 512.0,
+            ..Prefs::default()
+        };
+
+        prefs.normalize();
+
+        assert_eq!(prefs.sidebar_width, 276.0);
+        assert_eq!(prefs.inspector_width, 512.0);
     }
 }

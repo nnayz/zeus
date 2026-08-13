@@ -43,8 +43,8 @@ Or download the DMG from [the latest release](https://github.com/nnayz/zeus/rele
 Either way you get the same universal build, signed and notarized, so it opens
 without a Gatekeeper prompt.
 
-The cask lives in the monorepo's [`homebrew-zeus`](../homebrew-zeus/) directory;
-the explicit tap URL above is required because it is not a separate GitHub
+The cask lives in the monorepo's root [`Casks`](../Casks/) directory; the
+explicit tap URL above is required because it is not a separate GitHub
 repository. It declares `auto_updates true`, so Homebrew installs zeus once and
 then leaves it alone — zeus updates itself after that, and `brew upgrade` will
 not clobber a build the app moved itself to. See [UPDATING.md](UPDATING.md) and

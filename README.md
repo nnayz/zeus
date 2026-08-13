@@ -19,9 +19,9 @@ Or download the latest DMG from [Releases](https://github.com/nnayz/zeus/release
 open it, and drag Zeus to Applications. Either way it is the same universal build (Apple
 silicon and Intel), signed and notarized. Zeus updates itself from there.
 
-Zeus keeps its Homebrew tap [inside this monorepo](homebrew-zeus/). The explicit
-tap URL is required because there is no separate `nnayz/homebrew-zeus`
-repository. The root `Casks` link exposes that in-tree tap to Homebrew.
+Zeus keeps its Homebrew cask in this monorepo's root [`Casks`](Casks/)
+directory. The explicit tap URL tells Homebrew to use this repository as the
+`nnayz/zeus` tap.
 
 macOS 15 or newer.
 

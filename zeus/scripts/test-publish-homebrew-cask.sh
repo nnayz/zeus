@@ -26,13 +26,13 @@ git init -q --bare "${remote}"
 git init -q "${seed}"
 git -C "${seed}" config user.name "Release Test"
 git -C "${seed}" config user.email "release-test@example.test"
-mkdir -p "${seed}/homebrew-zeus/Casks"
+mkdir -p "${seed}/Casks"
 printf '%s\n' \
     'cask "zeus" do' \
     '  version "0.4.6"' \
     '  sha256 "132816bd668a47af945bdca39c252c0e82313a0b6114b9ddb5cabf2292815087"' \
-    'end' > "${seed}/homebrew-zeus/Casks/zeus.rb"
-git -C "${seed}" add homebrew-zeus/Casks/zeus.rb
+    'end' > "${seed}/Casks/zeus.rb"
+git -C "${seed}" add Casks/zeus.rb
 git -C "${seed}" commit -q -m "zeus 0.4.6"
 git -C "${seed}" branch -M main
 git -C "${seed}" remote add origin "${remote}"
@@ -57,8 +57,8 @@ chmod +x "${fake_gh}"
 # when there is no new diff to commit during this recovery run.
 /usr/bin/sed -i '' -E \
     -e "s|^  sha256 \".*\"$|  sha256 \"${expected_sha}\"|" \
-    "${checkout}/homebrew-zeus/Casks/zeus.rb"
-git -C "${checkout}" add homebrew-zeus/Casks/zeus.rb
+    "${checkout}/Casks/zeus.rb"
+git -C "${checkout}" add Casks/zeus.rb
 git -C "${checkout}" commit -q -m "zeus 0.4.6"
 
 TEST_PUBLISHED_SHA="${expected_sha}" \
@@ -66,7 +66,7 @@ GH_BIN="${fake_gh}" \
 GH_REPO="example/zeus" \
     "${publisher}" 0.4.6 "${dmg}" "${checkout}"
 
-remote_cask="$(git -C "${remote}" show refs/heads/main:homebrew-zeus/Casks/zeus.rb)"
+remote_cask="$(git -C "${remote}" show refs/heads/main:Casks/zeus.rb)"
 grep -q "^  version \"0.4.6\"$" <<<"${remote_cask}" \
     || fail "remote cask version was not updated"
 grep -q "^  sha256 \"${expected_sha}\"$" <<<"${remote_cask}" \

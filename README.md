@@ -1,4 +1,4 @@
-<h1><img src="docs/images/zeus-wordmark.png" alt="Zeus" width="300"></h1>
+<h1><img src="docs/src/images/zeus-pixel-art.png" alt="Zeus" width="300"></h1>
 
 [![CI](https://github.com/nnayz/zeus/actions/workflows/ci.yml/badge.svg)](https://github.com/nnayz/zeus/actions/workflows/ci.yml)
 [![GitHub release](https://img.shields.io/github/v/release/nnayz/zeus)](https://github.com/nnayz/zeus/releases/latest)
@@ -8,11 +8,10 @@ shells in parallel — across git worktrees or on remote hosts — each with a l
 (working / needs-you / done) and tmux-like persistence: closing the app never kills a session,
 and a daemon restart brings conversations back.
 
-![Zeus](docs/images/zeus.png)
-
 ## Install
 
 ```sh
+brew tap nnayz/zeus https://github.com/nnayz/zeus.git
 brew install --cask nnayz/zeus/zeus
 ```
 
@@ -20,9 +19,9 @@ Or download the latest DMG from [Releases](https://github.com/nnayz/zeus/release
 open it, and drag Zeus to Applications. Either way it is the same universal build (Apple
 silicon and Intel), signed and notarized. Zeus updates itself from there.
 
-The tap has to be named in full — a bare `zeus` resolves only against Homebrew's default
-taps. The cask lives in [nnayz/homebrew-zeus](https://github.com/nnayz/homebrew-zeus)
-rather than `homebrew-cask`, which requires a notability threshold Zeus does not meet yet.
+Zeus keeps its Homebrew tap [inside this monorepo](homebrew-zeus/). The explicit
+tap URL is required because there is no separate `nnayz/homebrew-zeus`
+repository. The root `Casks` link exposes that in-tree tap to Homebrew.
 
 macOS 15 or newer.
 
@@ -37,13 +36,13 @@ macOS 15 or newer.
 4. Quit and reopen zeus. The daemon keeps each PTY alive and replays the session
    when you return.
 
-The [getting-started guide](docs/GETTING_STARTED.md) covers remote hosts, MCP
-orchestration, diagnostics, local data, and uninstalling.
+The [docs book](docs/) covers getting started, remote hosts, MCP orchestration,
+diagnostics, local data, and uninstalling (`mdbook serve docs`).
 
 ## What it does
 
 - **Many agents at once.** Each session is a real terminal with a real PTY. Group them by
-  project, split them across git worktrees, or run them on a remote host over ssh+tmux.
+  project, split them across git worktrees, or run them on a remote host over SSH.
 - **Status you can trust.** zeus reads what an agent actually painted on its screen and tells
   you which ones are working, which are waiting on you, and which are done — so you can watch
   ten sessions without reading ten terminals.
@@ -67,20 +66,19 @@ Two processes, one wire protocol:
   headless terminal emulator for status detection, the session registry and persistence,
   worktrees, and the control socket.
 
-`zeusctl` is a small CLI: the MCP shim injected into agents, the hook and notify forwarders, and
+`zeus` is also the CLI: the MCP shim injected into agents, the hook and notify forwarders, and
 `status`/`doctor`. `zeusd-holder` owns the PTY master so sessions survive a daemon restart.
 
 > **A Rust port of the engine is in progress** in `zeus/crates/zeus-engine`, so that zeus can run
 > on Linux and Windows. It is not shipped — the released app runs the Swift daemon above. See
 > [`zeus/PORT.md`](zeus/PORT.md) for what is done and what is left.
 
-## Adding an agent
+## Agent manifests
 
 Agent support is data, not code. Each agent is one JSON file in
 `Sources/ZeusCore/Resources/manifests/` describing how to spawn it, how to resume, which keys
 approve or deny a prompt, and the screen rules that decide whether it is working, waiting, or
-done. Copy the closest existing manifest and adjust it — no Swift or Rust required. This is the
-easiest way to contribute.
+done.
 
 ## Building from source
 
@@ -103,22 +101,13 @@ Run the same core checks as CI with one command:
 ./scripts/check.sh
 ```
 
-[`zeus/PACKAGING.md`](zeus/PACKAGING.md) covers signing and notarization,
-[`zeus/UPDATING.md`](zeus/UPDATING.md) the updater and release flow,
-[`zeus/NODE.md`](zeus/NODE.md) running agents on a remote VPS node.
+User docs are the [mdBook under `docs/`](docs/). Packaging and release notes:
+[`zeus/PACKAGING.md`](zeus/PACKAGING.md),
+[`zeus/UPDATING.md`](zeus/UPDATING.md).
 
-The [documentation index](docs/README.md) links user and engineering guides.
+## Support
 
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md). Bug reports, fixes, docs, and new agent
-manifests are all welcome. New contributors can start with
-[`good first issue`](https://github.com/nnayz/zeus/labels/good%20first%20issue)
-or [`help wanted`](https://github.com/nnayz/zeus/labels/help%20wanted).
-
-Questions belong in [Discussions](https://github.com/nnayz/zeus/discussions),
-reproducible bugs in [Issues](https://github.com/nnayz/zeus/issues), and
-vulnerabilities in [private security reports](SECURITY.md). See the
-[roadmap](ROADMAP.md), [support guide](SUPPORT.md), [privacy notice](PRIVACY.md),
-and [governance](GOVERNANCE.md) for project expectations.
-
+Email **[hi@nasrul.info](mailto:hi@nasrul.info)** for help, bugs, feedback, or
+security reports. See also [support](docs/src/support.md),
+[privacy](docs/src/privacy.md), [security](SECURITY.md), and the
+[roadmap](docs/src/roadmap.md).

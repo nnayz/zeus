@@ -1,6 +1,6 @@
+use gpui::Rgba;
 use zeus_term::theme::{TermTheme, ThemeAppearance};
 use zeus_ui::{Appearance, SemanticColors};
-use gpui::Rgba;
 
 /// Resolves persisted theme ids in one place for both terminal and app chrome.
 pub(crate) fn terminal_theme(id: &str) -> TermTheme {

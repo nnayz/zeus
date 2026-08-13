@@ -2,10 +2,10 @@ use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
 
-use zeus_proto::LoginMode;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use zeus_proto::LoginMode;
 
 use crate::error::{NodeError, NodeResult};
 

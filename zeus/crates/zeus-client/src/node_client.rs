@@ -2,6 +2,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+use serde_json::{Value, json};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::TcpStream;
 use zeus_proto::control::{
     ControlMessage, JsonValue, MAX_CONTROL_LINE_BYTES, decode_line, encode_line,
 };
@@ -15,11 +20,6 @@ use zeus_proto::{
     ProviderCallParams, ProviderCallResult, ProviderKind, SessionHandoffResult, TransferMode,
     UsageEvent, UsageQueryParams, UsageQueryResult, UsageRecordParams,
 };
-use serde::Serialize;
-use serde::de::DeserializeOwned;
-use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::TcpStream;
 
 use crate::client::{CLIENT_BUILD, ClientError};
 

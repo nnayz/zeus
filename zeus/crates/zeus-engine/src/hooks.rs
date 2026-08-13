@@ -8,8 +8,8 @@
 //!
 //! Ported from the Swift `HookParsing`.
 
-use zeus_proto::{NeedsInputDetail, NeedsInputKind, NeedsInputSource};
 use serde_json::Value;
+use zeus_proto::{NeedsInputDetail, NeedsInputKind, NeedsInputSource};
 
 use crate::detect::redact;
 use crate::status::{ClaudeHook, StatusSignal, classify_risk};
@@ -209,8 +209,8 @@ fn string(value: &Value, key: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zeus_proto::RiskHint;
     use serde_json::json;
+    use zeus_proto::RiskHint;
 
     fn now() -> std::time::SystemTime {
         std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000)

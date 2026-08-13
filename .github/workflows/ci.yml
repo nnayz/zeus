@@ -9,6 +9,28 @@ permissions:
   contents: read
 
 jobs:
+  homebrew-cask:
+    name: Homebrew cask
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5.0.0
+      - name: Verify monorepo tap layout
+        run: |
+          test -L Casks
+          test "$(readlink Casks)" = "homebrew-zeus/Casks"
+          test -f Casks/zeus.rb
+      - name: Check cask syntax and style
+        run: |
+          ruby -c Casks/zeus.rb
+          brew style Casks/zeus.rb
+      - name: Validate cask metadata
+        run: |
+          casks="$(find homebrew-zeus/Casks -maxdepth 1 -type f -name '*.rb' | sort)"
+          test "${casks}" = "homebrew-zeus/Casks/zeus.rb"
+          grep -q 'github.com/nnayz/zeus/releases' Casks/zeus.rb
+          grep -q 'app "zeus.app"' Casks/zeus.rb
+
   engine:
     name: Swift engine (daemon + CLI)
     runs-on: macos-15

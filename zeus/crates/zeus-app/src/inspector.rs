@@ -10,6 +10,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use gpui::{
+    Animation, AnimationExt, AnyElement, App, Context, DragMoveEvent, Entity, EventEmitter,
+    FocusHandle, Focusable, FontWeight, KeyDownEvent, ListHorizontalSizingBehavior, MouseButton,
+    Render, ScrollStrategy, SharedString, StatefulInteractiveElement, Task,
+    UniformListScrollHandle, Window, div, ease_out_quint, point, prelude::*, px, rgba,
+    uniform_list,
+};
 use zeus_proto::{
     AgentKind as ProtoAgentKind, ArtifactKind, PrCheck, PrDiscussionItem, PullRequestStatus,
     SessionArtifact, SessionDiffBase, SessionId, SessionRecord, SessionStatus,
@@ -17,13 +24,6 @@ use zeus_proto::{
 use zeus_ui::{
     AgentKind, AgentLogo, Fill, FloatingSurface, Ink, LoadingIndicator, Metrics, Radius,
     SemanticColors, Typo,
-};
-use gpui::{
-    Animation, AnimationExt, AnyElement, App, Context, DragMoveEvent, Entity, EventEmitter,
-    FocusHandle, Focusable, FontWeight, KeyDownEvent, ListHorizontalSizingBehavior, MouseButton,
-    Render, ScrollStrategy, SharedString, StatefulInteractiveElement, Task,
-    UniformListScrollHandle, Window, div, ease_out_quint, point, prelude::*, px, rgba,
-    uniform_list,
 };
 
 use crate::code_viewer::CodeViewer;
@@ -4307,8 +4307,8 @@ fn render_row(
 mod tests {
     use super::*;
     use crate::sidebar::{PreviewScenario, SidebarPreviewFixture};
-    use zeus_proto::DateMillis;
     use gpui::{Entity, Modifiers, TestAppContext};
+    use zeus_proto::DateMillis;
 
     struct InspectorHarness {
         inspector: Entity<WorkbenchInspector>,

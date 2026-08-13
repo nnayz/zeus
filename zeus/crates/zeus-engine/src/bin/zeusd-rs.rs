@@ -333,8 +333,7 @@ fn anonymous_capture_file() -> std::io::Result<std::fs::File> {
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
-        let path =
-            std::env::temp_dir().join(format!("zeus-path-{}-{suffix}", std::process::id()));
+        let path = std::env::temp_dir().join(format!("zeus-path-{}-{suffix}", std::process::id()));
         match std::fs::OpenOptions::new()
             .read(true)
             .write(true)

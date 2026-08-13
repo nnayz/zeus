@@ -5,8 +5,8 @@ use std::fmt;
 use std::io::Read;
 use std::path::PathBuf;
 
-use zeus_proto::remote_pty::{HelperProbe, PROTOCOL_MAJOR};
 use sha2::{Digest, Sha256};
+use zeus_proto::remote_pty::{HelperProbe, PROTOCOL_MAJOR};
 
 pub const PLATFORM_PROBE_MARKER: &[u8] = b"__ZEUS_PLATFORM_V1__\0";
 pub const PLATFORM_PROBE_COMMAND: &str =

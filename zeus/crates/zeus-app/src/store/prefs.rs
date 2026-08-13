@@ -2,8 +2,8 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use zeus_proto::{AgentKind, ProjectId, SessionId};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use zeus_proto::{AgentKind, ProjectId, SessionId};
 
 const DEFAULT_THEME: &str = "zeus-dark";
 

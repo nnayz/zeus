@@ -1365,165 +1365,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "zeus-app"
-version = "0.5.0"
-dependencies = [
- "block2 0.6.2",
- "zeus-client",
- "zeus-proto",
- "zeus-term",
- "zeus-ui",
- "zeus-updater",
- "zeus-usage",
- "gpui",
- "gpui_platform",
- "image",
- "notify",
- "nucleo-matcher",
- "objc2 0.6.4",
- "objc2-app-kit 0.3.2",
- "objc2-foundation 0.3.2",
- "objc2-user-notifications",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "smallvec",
- "tempfile",
- "tokio",
- "unicode-segmentation",
- "url",
-]
-
-[[package]]
-name = "zeus-client"
-version = "0.1.0"
-dependencies = [
- "zeus-proto",
- "futures-core",
- "getrandom 0.4.3",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
-]
-
-[[package]]
-name = "zeus-engine"
-version = "0.1.0"
-dependencies = [
- "alacritty_terminal",
- "base64 0.23.1",
- "zeus-proto",
- "zeus-pty",
- "zeus-terminal-state",
- "getrandom 0.4.3",
- "libc",
- "objc2 0.6.4",
- "objc2-app-kit 0.3.2",
- "objc2-foundation 0.3.2",
- "plist",
- "regex",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "tempfile",
-]
-
-[[package]]
-name = "zeus-node"
-version = "0.1.0"
-dependencies = [
- "zeus-client",
- "zeus-proto",
- "zeus-usage",
- "getrandom 0.4.3",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "tempfile",
- "tokio",
-]
-
-[[package]]
-name = "zeus-proto"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "tempfile",
- "zeroize",
-]
-
-[[package]]
-name = "zeus-pty"
-version = "0.1.0"
-dependencies = [
- "libc",
-]
-
-[[package]]
-name = "zeus-remote"
-version = "0.1.0"
-dependencies = [
- "zeus-engine",
- "zeus-proto",
- "zeus-pty",
- "zeus-terminal-state",
- "getrandom 0.4.3",
- "libc",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "tempfile",
-]
-
-[[package]]
-name = "zeus-term"
-version = "0.1.0"
-dependencies = [
- "zeus-proto",
- "gpui",
- "gpui_platform",
-]
-
-[[package]]
-name = "zeus-terminal-state"
-version = "0.1.0"
-dependencies = [
- "alacritty_terminal",
- "zeus-proto",
-]
-
-[[package]]
-name = "zeus-ui"
-version = "0.1.0"
-dependencies = [
- "gpui",
- "gpui_platform",
-]
-
-[[package]]
-name = "zeus-updater"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
-name = "zeus-usage"
-version = "0.1.0"
-
-[[package]]
-name = "zeus-mcp"
-version = "0.1.0"
-dependencies = [
- "serde_json",
-]
-
-[[package]]
 name = "dirs"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7431,6 +7272,165 @@ dependencies = [
  "quote",
  "syn 2.0.119",
 ]
+
+[[package]]
+name = "zeus-app"
+version = "0.5.0"
+dependencies = [
+ "block2 0.6.2",
+ "gpui",
+ "gpui_platform",
+ "image",
+ "notify",
+ "nucleo-matcher",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
+ "objc2-user-notifications",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "smallvec",
+ "tempfile",
+ "tokio",
+ "unicode-segmentation",
+ "url",
+ "zeus-client",
+ "zeus-proto",
+ "zeus-term",
+ "zeus-ui",
+ "zeus-updater",
+ "zeus-usage",
+]
+
+[[package]]
+name = "zeus-client"
+version = "0.1.0"
+dependencies = [
+ "futures-core",
+ "getrandom 0.4.3",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "zeus-proto",
+]
+
+[[package]]
+name = "zeus-engine"
+version = "0.1.0"
+dependencies = [
+ "alacritty_terminal",
+ "base64 0.23.1",
+ "getrandom 0.4.3",
+ "libc",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
+ "plist",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "zeus-proto",
+ "zeus-pty",
+ "zeus-terminal-state",
+]
+
+[[package]]
+name = "zeus-mcp"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
+name = "zeus-node"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.4.3",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "tokio",
+ "zeus-client",
+ "zeus-proto",
+ "zeus-usage",
+]
+
+[[package]]
+name = "zeus-proto"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "zeroize",
+]
+
+[[package]]
+name = "zeus-pty"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
+name = "zeus-remote"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.4.3",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "zeus-engine",
+ "zeus-proto",
+ "zeus-pty",
+ "zeus-terminal-state",
+]
+
+[[package]]
+name = "zeus-term"
+version = "0.1.0"
+dependencies = [
+ "gpui",
+ "gpui_platform",
+ "zeus-proto",
+]
+
+[[package]]
+name = "zeus-terminal-state"
+version = "0.1.0"
+dependencies = [
+ "alacritty_terminal",
+ "zeus-proto",
+]
+
+[[package]]
+name = "zeus-ui"
+version = "0.1.0"
+dependencies = [
+ "gpui",
+ "gpui_platform",
+]
+
+[[package]]
+name = "zeus-updater"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "zeus-usage"
+version = "0.1.0"
 
 [[package]]
 name = "zmij"

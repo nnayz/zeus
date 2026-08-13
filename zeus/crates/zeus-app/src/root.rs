@@ -2,13 +2,13 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use zeus_proto::{AgentKind, SessionId};
-use zeus_ui::{FloatingSurface, Ink, Radius, SemanticColors, Typo};
 use gpui::{
     AnyElement, App, Context, CursorStyle, DragMoveEvent, Entity, FocusHandle, Focusable,
     FontWeight, KeyDownEvent, KeyUpEvent, Modifiers, ModifiersChangedEvent, MouseButton, Render,
     StyleRefinement, Subscription, Task, Window, actions, deferred, div, prelude::*, px, rgba,
 };
+use zeus_proto::{AgentKind, SessionId};
+use zeus_ui::{FloatingSurface, Ink, Radius, SemanticColors, Typo};
 
 use crate::AppServices;
 use crate::inspector::{InspectorEvent, WorkbenchInspector};

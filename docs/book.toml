@@ -1,0 +1,26 @@
+[book]
+title = "Zeus"
+description = "Native macOS orchestrator for coding agents"
+authors = ["Nasrul Huda"]
+language = "en"
+src = "src"
+
+[build]
+build-dir = "book"
+create-missing = false
+
+[output.html]
+default-theme = "light"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/nnayz/zeus"
+site-url = "/zeus/"
+no-section-label = true
+fold.enable = true
+fold.level = 1
+
+[output.html.search]
+enable = true
+
+[output.html.playground]
+editable = false
+copyable = true

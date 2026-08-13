@@ -45,7 +45,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dev_build::DevBuildIdentity;
-use zeus_client::DaemonClient;
 use gpui::{
     App, AppContext as _, Bounds, KeyBinding, Menu, MenuItem, OsAction, SystemMenuType,
     TitlebarOptions, Window, WindowBackgroundAppearance, WindowBounds, WindowOptions, actions,
@@ -56,6 +55,7 @@ use root::RootView;
 use sidebar::{PreviewScenario, SidebarPreviewFixture};
 use terminal_pane::bind_terminal_keys;
 use tokio::runtime::{Builder as RuntimeBuilder, Runtime};
+use zeus_client::DaemonClient;
 
 use crate::store::{StoreRuntime, WindowMode, WindowPlacement};
 use crate::updates::UpdateHandle;

@@ -5,8 +5,8 @@
 //! here gives PR descriptions, discussions, and future agent notes one
 //! consistent readable measure and typographic hierarchy.
 
-use zeus_ui::{Ink, Radius, SemanticColors};
 use gpui::{AnyElement, FontWeight, SharedString, div, prelude::*, px, rgba};
+use zeus_ui::{Ink, Radius, SemanticColors};
 
 use crate::markdown::{InlineText, MarkdownBlock, MarkdownDocument};
 

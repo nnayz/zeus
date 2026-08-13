@@ -8,8 +8,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use zeus_proto::{DateMillis, ExitInfo, ExitReason, SessionRecord, SessionStatus, TitleSource};
 use serde::{Deserialize, Serialize};
+use zeus_proto::{DateMillis, ExitInfo, ExitReason, SessionRecord, SessionStatus, TitleSource};
 
 use crate::detect::ManifestEngine;
 use crate::holder::{HolderClient, HolderManagerPaths, HolderPaths};

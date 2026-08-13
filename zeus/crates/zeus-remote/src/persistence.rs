@@ -8,10 +8,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use serde::{Deserialize, Serialize};
 use zeus_proto::remote_pty::{
     PersistenceProbeAction, PersistenceProbeRequest, PersistenceProbeResult,
 };
-use serde::{Deserialize, Serialize};
 
 use crate::holder::read_limited_json;
 use crate::paths::{StatePaths, create_private_file, ensure_private_dir, reject_symlink};

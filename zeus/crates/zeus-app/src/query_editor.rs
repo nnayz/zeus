@@ -420,7 +420,7 @@ mod tests {
         assert_eq!(editor.text(), "zeus");
         assert_eq!(editor.cursor(), 4);
         editor.delete_backward(Motion::Character);
-        assert_eq!(editor.text(), "dir");
+        assert_eq!(editor.text(), "zeu");
         assert!(editor.selection().is_none());
     }
 
@@ -574,7 +574,7 @@ mod tests {
         let mut editor = seeded("zeus");
         press(&mut editor, "a", "^");
         press(&mut editor, "d", "^"); // forward delete
-        assert_eq!(editor.text(), "iri");
+        assert_eq!(editor.text(), "eus");
         press(&mut editor, "k", "^"); // kill to end
         assert_eq!(editor.text(), "");
     }

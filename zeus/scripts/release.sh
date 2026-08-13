@@ -5,9 +5,9 @@
 #
 # Env overrides:
 #   ZEUS_SIGN_IDENTITY  "Developer ID Application: ..." (default: auto-detected)
-#   NOTARY_PROFILE      notarytool keychain profile (default: zeusctl-notary)
+#   NOTARY_PROFILE      notarytool keychain profile (default: zeus-notary)
 #   GH_REPO             GitHub repo to publish to (default: nnayz/zeus)
-#   TAP_DIR             Homebrew tap checkout (default: ../../homebrew-zeus)
+#   TAP_DIR             Zeus monorepo checkout (default: repository root)
 #   SKIP_CASK=1         explicitly publish without updating the Homebrew cask
 #   SKIP_GATES=1        skip cargo test/clippy (for re-running a failed publish)
 #   SKIP_PERF_GATE=1   skip packaged app memory/idle-CPU probe
@@ -40,10 +40,10 @@ DMG="$DIST/zeus-$VERSION-universal.dmg"
 ZIP="$DIST/zeus-$VERSION-universal.zip"
 MANIFEST="$WORKSPACE/crates/zeus-app/Cargo.toml"
 
-NOTARY_PROFILE="${NOTARY_PROFILE:-zeusctl-notary}"
+NOTARY_PROFILE="${NOTARY_PROFILE:-zeus-notary}"
 GH_REPO="${GH_REPO:-nnayz/zeus}"
-# Homebrew tap checkout, bumped in lockstep with each release (step 6).
-TAP_DIR="${TAP_DIR:-$ROOT/../homebrew-zeus}"
+# The in-tree Homebrew cask is bumped in lockstep with each release (step 6).
+TAP_DIR="${TAP_DIR:-$ROOT}"
 TAG="v$VERSION"
 FEED="$DIST/appcast.json"
 CHECKSUMS="$DIST/SHA256SUMS"
@@ -91,13 +91,14 @@ if ! command -v gh >/dev/null 2>&1; then
     echo "error: the GitHub CLI (gh) is required to publish" >&2
     exit 1
 fi
-if [ "${SKIP_CASK:-0}" != "1" ] && [ ! -f "$TAP_DIR/Casks/zeus.rb" ]; then
+if [ "${SKIP_CASK:-0}" != "1" ] \
+    && [ ! -f "$TAP_DIR/homebrew-zeus/Casks/zeus.rb" ]; then
     cat >&2 <<EOF
-error: Homebrew tap checkout is missing Casks/zeus.rb: $TAP_DIR
+error: Zeus checkout is missing homebrew-zeus/Casks/zeus.rb: $TAP_DIR
 
-Set TAP_DIR to a clean nnayz/homebrew-zeus checkout. The release cannot
-claim success unless its cask is pushed and verified. Use SKIP_CASK=1 only when
-you intentionally do not want this release offered through Homebrew.
+Set TAP_DIR to a clean nnayz/zeus monorepo checkout. The release cannot claim
+success unless its in-tree cask is pushed and verified. Use SKIP_CASK=1 only
+when you intentionally do not want this release offered through Homebrew.
 EOF
     exit 1
 fi
@@ -107,15 +108,15 @@ fi
 # ----------------------------------------------------------------------------
 # The updater compares against CARGO_PKG_VERSION, so the manifest is the single
 # source of truth for what version this build claims to be. Version bumps go
-# through a normal pull request; a release must build the exact remote main
-# commit rather than creating an unpushed release-only commit.
+# on main first; a release must build the exact remote main commit rather than
+# creating an unpushed release-only commit.
 CURRENT="$(sed -n 's/^version = "\(.*\)"/\1/p' "$MANIFEST" | head -1)"
 if [ "$CURRENT" != "$VERSION" ]; then
     cat >&2 <<EOF
 error: zeus-app is $CURRENT, not $VERSION
 
-Open and merge a version-bump pull request first, then run this script from the
-clean main checkout. Release artifacts must map to a reviewed source commit.
+Bump zeus-app to $VERSION on main first, then run this script from a clean
+main checkout. Release artifacts must map to that source commit.
 EOF
     exit 1
 fi

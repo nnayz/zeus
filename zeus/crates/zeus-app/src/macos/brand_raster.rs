@@ -9,7 +9,6 @@ use std::collections::HashMap;
 use std::ptr;
 use std::sync::{Arc, LazyLock, Mutex};
 
-use zeus_ui::{BrandMarkKind, PathCommand};
 use gpui::{AnyElement, IntoElement, RenderImage, Rgba, img, prelude::*, px};
 use image::{Frame, RgbaImage};
 use objc2::{AnyThread, MainThreadMarker};
@@ -18,6 +17,7 @@ use objc2_app_kit::{
     NSGraphicsContext,
 };
 use objc2_foundation::NSPoint;
+use zeus_ui::{BrandMarkKind, PathCommand};
 
 const RASTER_SCALE: f32 = 2.0;
 

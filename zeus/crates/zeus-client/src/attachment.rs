@@ -11,16 +11,16 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use zeus_proto::frames::{Frame, FrameCodec, FrameType};
-use zeus_proto::grid::GridUpdate;
-use zeus_proto::methods::{AttachRequest, ClientRole};
-use zeus_proto::model::SessionId;
 use futures_core::Stream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, MissedTickBehavior};
+use zeus_proto::frames::{Frame, FrameCodec, FrameType};
+use zeus_proto::grid::GridUpdate;
+use zeus_proto::methods::{AttachRequest, ClientRole};
+use zeus_proto::model::SessionId;
 
 const READ_BUFFER_BYTES: usize = 64 * 1024;
 const KEEPALIVE_CHECK_EVERY: Duration = Duration::from_secs(5);
@@ -336,6 +336,12 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+    use serde::Serialize;
+    use serde::de::DeserializeOwned;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixStream;
+    use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
+    use tokio::time::timeout;
     use zeus_proto::control::{ControlMessage, decode_line, encode_line};
     use zeus_proto::grid::GridCell;
     use zeus_proto::methods::{
@@ -343,12 +349,6 @@ mod tests {
     };
     use zeus_proto::model::{AgentKind, SessionId, SessionRecord};
     use zeus_proto::paths::{ZeusEnv, ZeusPaths};
-    use serde::Serialize;
-    use serde::de::DeserializeOwned;
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-    use tokio::net::UnixStream;
-    use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
-    use tokio::time::timeout;
 
     use super::{SessionAttachment, TerminalChunk};
 

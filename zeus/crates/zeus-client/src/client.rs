@@ -5,14 +5,14 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
-use zeus_proto::control::{ControlError, ControlMessage, JsonValue, encode_line};
-use zeus_proto::methods::*;
-use zeus_proto::model::{Project, SessionId, SessionRecord, WorktreeInfo};
-use zeus_proto::paths::ZeusPaths;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
+use zeus_proto::control::{ControlError, ControlMessage, JsonValue, encode_line};
+use zeus_proto::methods::*;
+use zeus_proto::model::{Project, SessionId, SessionRecord, WorktreeInfo};
+use zeus_proto::paths::ZeusPaths;
 
 use crate::connection::ActiveConnection;
 use crate::state::{ConnectionState, EventEnvelope};
@@ -907,11 +907,11 @@ async fn run_once(core: Arc<ClientCore>, shutdown: &mut watch::Receiver<bool>) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zeus_proto::methods::EventName;
-    use zeus_proto::model::AgentKind;
     use std::error::Error;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
+    use zeus_proto::methods::EventName;
+    use zeus_proto::model::AgentKind;
 
     #[tokio::test]
     async fn live_daemon_control_round_trip() -> Result<(), Box<dyn Error>> {

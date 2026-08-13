@@ -4,11 +4,11 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::Path;
 
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use zeus_proto::remote_pty::{
     LaunchRequest, PersistenceCapability, RemoteProcessState, SessionInspection, SessionToken,
 };
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use crate::BUILD_ID;
 use crate::paths::{SessionPaths, create_private_file, open_private_file, reject_symlink};

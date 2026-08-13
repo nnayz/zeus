@@ -3,13 +3,13 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use zeus_proto::{AgentKind, Project};
-use zeus_ui::{
-    AgentKind as UiAgentKind, AgentLogo, Fill, FloatingSurface, Palette, Radius, SemanticColors,
-};
 use gpui::{
     AnyElement, App, Context, EventEmitter, FocusHandle, Focusable, FontWeight, HighlightStyle,
     KeyDownEvent, MouseButton, PathPromptOptions, Render, Task, Window, div, prelude::*, px, rgba,
+};
+use zeus_proto::{AgentKind, Project};
+use zeus_ui::{
+    AgentKind as UiAgentKind, AgentLogo, Fill, FloatingSurface, Palette, Radius, SemanticColors,
 };
 
 use crate::AppServices;

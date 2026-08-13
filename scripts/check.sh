@@ -21,7 +21,7 @@ esac
 
 for tool in bash cargo python3 swift; do
     if ! command -v "${tool}" >/dev/null 2>&1; then
-        echo "error: ${tool} is required; see CONTRIBUTING.md" >&2
+        echo "error: ${tool} is required; see README.md" >&2
         exit 1
     fi
 done
@@ -63,4 +63,4 @@ if [[ "${run_browser}" == "1" ]]; then
     ZEUS_RUN_BROWSER_TESTS=1 swift test --package-path "${root}" --filter BrowserPoolTests
 fi
 
-echo "All contributor checks passed."
+echo "All checks passed."

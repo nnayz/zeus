@@ -17,8 +17,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use zeus_proto::JsonValue;
 use serde_json::json;
+use zeus_proto::JsonValue;
 
 /// The synthetic hole marker. Its seq is 0 — outside the published seq space,
 /// which starts at 1 — so a consumer tracking `lastSeq` for gapless resume

@@ -8,8 +8,8 @@
 
 use std::sync::LazyLock;
 
-use zeus_proto::{ArtifactKind, DateMillis, SessionArtifact};
 use regex::Regex;
+use zeus_proto::{ArtifactKind, DateMillis, SessionArtifact};
 
 pub const MAX_ARTIFACTS: usize = 50;
 

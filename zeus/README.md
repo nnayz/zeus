@@ -1,11 +1,12 @@
 # zeus
 
 For first-party VPS execution, per-node Claude/Codex accounts, fleet usage,
-and transactional local↔cloud handoff, see [NODE.md](NODE.md).
+and transactional local↔cloud handoff, see
+[Remote nodes](../docs/src/remote-nodes.md).
 
 `zeus` is the Rust + GPUI desktop app, shipped self-contained: the app bundle
 carries the daemon (`zeusd`), the session holders that keep agents alive
-across daemon restarts and upgrades, the `zeusctl` CLI, and the MCP proxy. The
+across daemon restarts and upgrades, the `zeus` CLI, and the MCP proxy. The
 workspace holds the protocol/client core, the session engine, terminal
 renderer, shared design system, session store, usage accounting, and
 window/sidebar shell. [`PLAN.md`](PLAN.md) is the historical record of the
@@ -34,6 +35,7 @@ gaps that keep the Swift daemon the default for now.
 ## Install
 
 ```sh
+brew tap nnayz/zeus https://github.com/nnayz/zeus.git
 brew install --cask nnayz/zeus/zeus
 ```
 
@@ -41,12 +43,12 @@ Or download the DMG from [the latest release](https://github.com/nnayz/zeus/rele
 Either way you get the same universal build, signed and notarized, so it opens
 without a Gatekeeper prompt.
 
-The cask lives in [nnayz/homebrew-zeus](https://github.com/nnayz/homebrew-zeus)
-rather than `homebrew-cask`, which requires a notability threshold the project
-does not meet yet. It declares `auto_updates true`, so Homebrew installs zeus
-once and then leaves it alone — zeus updates itself after that, and
-`brew upgrade` will not clobber a build the app moved itself to. See
-[UPDATING.md](UPDATING.md) for how that works.
+The cask lives in the monorepo's [`homebrew-zeus`](../homebrew-zeus/) directory;
+the explicit tap URL above is required because it is not a separate GitHub
+repository. It declares `auto_updates true`, so Homebrew installs zeus once and
+then leaves it alone — zeus updates itself after that, and `brew upgrade` will
+not clobber a build the app moved itself to. See [UPDATING.md](UPDATING.md) and
+the user-facing [Updates](../docs/src/updates.md) page.
 
 ## Toolchain and GPUI pin
 

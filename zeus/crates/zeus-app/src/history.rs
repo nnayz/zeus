@@ -10,8 +10,8 @@ use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use zeus_proto::{AgentKind, DateMillis, HistoryEntry, SessionSpawnParams};
 use serde_json::Value;
+use zeus_proto::{AgentKind, DateMillis, HistoryEntry, SessionSpawnParams};
 
 const MAX_ENTRIES: usize = 500;
 const CLAUDE_HEAD_CAP: usize = 8 << 20;
@@ -383,8 +383,8 @@ mod tests {
     use std::fs;
     use std::time::Duration;
 
-    use zeus_client::DaemonClient;
     use tempfile::TempDir;
+    use zeus_client::DaemonClient;
 
     use super::*;
 

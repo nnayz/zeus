@@ -1,13 +1,13 @@
 use std::time::{Duration, Instant};
 
-use zeus_proto::grid::{ChangedRow, GridCell, GridUpdate, TermColor, TermStyle};
-use zeus_term::buffer::GridBuffer;
-use zeus_term::element::TerminalElement;
 use gpui::{
     App, Bounds, Context, FocusHandle, MouseButton, Render, Task, Window,
     WindowBackgroundAppearance, WindowBounds, WindowOptions, div, prelude::*, px, size,
 };
 use gpui_platform::application;
+use zeus_proto::grid::{ChangedRow, GridCell, GridUpdate, TermColor, TermStyle};
+use zeus_term::buffer::GridBuffer;
+use zeus_term::element::TerminalElement;
 
 const COLS: u16 = 104;
 const ROWS: u16 = 28;

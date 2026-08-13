@@ -1,13 +1,13 @@
-use zeus_ui::{
-    AgentKind, AgentLogo, AttentionDot, AttentionLevel, BrandMark, BrandMarkKind, Fill,
-    FloatingSurface, HairlineDivider, Icon, IconName, IconSize, Ink, Metrics, Motion, Palette,
-    Radius, RowFill, SemanticColors, Space, StatusGlyph, StatusState, TextTone, Typo,
-};
 use gpui::{
     App, AppContext as _, Bounds, Context, Entity, FontWeight, Render, TitlebarOptions, Window,
     WindowBackgroundAppearance, WindowBounds, WindowOptions, div, point, prelude::*, px, size,
 };
 use gpui_platform::application;
+use zeus_ui::{
+    AgentKind, AgentLogo, AttentionDot, AttentionLevel, BrandMark, BrandMarkKind, Fill,
+    FloatingSurface, HairlineDivider, Icon, IconName, IconSize, Ink, Metrics, Motion, Palette,
+    Radius, RowFill, SemanticColors, Space, StatusGlyph, StatusState, TextTone, Typo,
+};
 
 const DARK: SemanticColors = SemanticColors::dark();
 const LIGHT: SemanticColors = SemanticColors::light();

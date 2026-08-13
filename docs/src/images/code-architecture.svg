@@ -1,0 +1,169 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 900" width="1280" height="900" role="img" aria-label="Zeus code architecture">
+  <defs>
+    <style>
+      @font-face {
+        font-family: "Diagram Sans";
+        src: local("Helvetica Neue"), local("Helvetica Neue Regular"), local("Arial"), local("sans-serif");
+        font-weight: 400;
+      }
+      @font-face {
+        font-family: "Diagram Sans";
+        src: local("Helvetica Neue Medium"), local("Helvetica Neue"), local("Arial"), local("sans-serif");
+        font-weight: 500;
+      }
+      @font-face {
+        font-family: "Diagram Sans";
+        src: local("Helvetica Neue Bold"), local("Helvetica Neue"), local("Arial Bold"), local("sans-serif");
+        font-weight: 700;
+      }
+      text { font-family: "Diagram Sans", "Helvetica Neue", Helvetica, Arial, sans-serif; }
+      .h1 { font-size: 28px; font-weight: 500; fill: #0a0a0a; letter-spacing: -0.03em; }
+      .h2 { font-size: 11px; font-weight: 500; fill: #0a0a0a; letter-spacing: 0.14em; }
+      .body { font-size: 13px; font-weight: 400; fill: #0a0a0a; letter-spacing: -0.01em; }
+      .muted { font-size: 12px; font-weight: 400; fill: #737373; letter-spacing: -0.01em; }
+      .small { font-size: 11px; font-weight: 400; fill: #737373; letter-spacing: -0.01em; }
+      .crate { font-size: 13px; font-weight: 500; fill: #0a0a0a; letter-spacing: -0.02em; }
+      .edge { font-size: 10px; font-weight: 400; fill: #737373; letter-spacing: 0.04em; }
+      .note { font-size: 12px; font-weight: 400; fill: #525252; letter-spacing: -0.01em; }
+    </style>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M1 1 L9 5 L1 9" fill="none" stroke="#0a0a0a" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="arrMuted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M1 1 L9 5 L1 9" fill="none" stroke="#a3a3a3" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+
+  <!-- canvas -->
+  <rect width="1280" height="900" fill="#fafafa"/>
+
+  <!-- title -->
+  <text x="64" y="56" class="h1">Zeus</text>
+  <text x="140" y="56" class="muted" style="font-size:28px;font-weight:400;letter-spacing:-0.03em;">Code architecture</text>
+  <line x1="64" y1="80" x2="1216" y2="80" stroke="#e5e5e5" stroke-width="1"/>
+
+  <!-- ========== COLUMN 1: Desktop ========== -->
+  <text x="64" y="120" class="h2">DESKTOP</text>
+
+  <rect x="64" y="140" width="340" height="56" rx="2" fill="#fff" stroke="#0a0a0a" stroke-width="1.25"/>
+  <text x="84" y="164" class="crate">zeus-app</text>
+  <text x="84" y="182" class="small">bin · GPUI shell</text>
+
+  <!-- deps under app -->
+  <rect x="64" y="220" width="160" height="48" rx="2" fill="#fff" stroke="#d4d4d4" stroke-width="1"/>
+  <text x="80" y="249" class="crate" style="font-weight:400;">zeus-term</text>
+
+  <rect x="244" y="220" width="160" height="48" rx="2" fill="#fff" stroke="#d4d4d4" stroke-width="1"/>
+  <text x="260" y="249" class="crate" style="font-weight:400;">zeus-ui</text>
+
+  <rect x="64" y="284" width="160" height="48" rx="2" fill="#fff" stroke="#d4d4d4" stroke-width="1"/>
+  <text x="80" y="313" class="crate" style="font-weight:400;">zeus-client</text>
+
+  <rect x="244" y="284" width="160" height="48" rx="2" fill="#fff" stroke="#d4d4d4" stroke-width="1"/>
+  <text x="260" y="313" class="crate" style="font-weight:400;">zeus-usage</text>
+
+  <rect x="64" y="348" width="340" height="48" rx="2" fill="#fff" stroke="#d4d4d4" stroke-width="1"/>
+  <text x="80" y="377" class="crate" style="font-weight:400;">zeus-updater</text>
+
+  <!-- app to children -->
+  <line x1="234" y1="196" x2="144" y2="220" stroke="#a3a3a3" stroke-width="1"/>
+  <line x1="234" y1="196" x2="324" y2="220" stroke="#a3a3a3" stroke-width="1"/>
+  <line x1="234" y1="196" x2="144" y2="284" stroke="#a3a3a3" stroke-width="1"/>
+  <line x1="234" y1="196" x2="324" y2="284" stroke="#a3a3a3" stroke-width="1"/>
+  <line x1="234" y1="196" x2="234" y2="348" stroke="#a3a3a3" stroke-width="1"/>
+
+  <!-- ========== COLUMN 2: Engine ========== -->
+  <text x="470" y="120" class="h2">ENGINE</text>
+
+  <rect x="470" y="140" width="340" height="56" rx="2" fill="#fff" stroke="#0a0a0a" stroke-width="1.25"/>
+  <text x="490" y="164" class="crate">zeus-engine</text>
+  <text x="490" y="182" class="small">control plane · sessions · status</text>
+
+  <!-- modules as quiet list -->
+  <rect x="470" y="220" width="340" height="176" rx="2" fill="#fff" stroke="#d4d4d4" stroke-width="1"/>
+  <text x="490" y="248" class="small">modules</text>
+  <text x="490" y="276" class="body">control</text>
+  <text x="600" y="276" class="body">registry</text>
+  <text x="710" y="276" class="body">session</text>
+  <text x="490" y="304" class="body">holder/*</text>
+  <text x="600" y="304" class="body">remote/*</text>
+  <text x="710" y="304" class="body">agent</text>
+  <text x="490" y="332" class="body">detect</text>
+  <text x="600" y="332" class="body">git</text>
+  <text x="710" y="332" class="body">history</text>
+  <text x="490" y="360" class="body">events</text>
+  <text x="600" y="360" class="body">hosts</text>
+
+  <!-- local holder -->
+  <rect x="470" y="420" width="340" height="56" rx="2" fill="#fff" stroke="#0a0a0a" stroke-width="1"/>
+  <text x="490" y="444" class="crate" style="font-weight:400;">Local Holder</text>
+  <text x="490" y="462" class="small">1 process · 1 UDS · 1 PTY · 1 agent</text>
+
+  <line x1="640" y1="396" x2="640" y2="420" stroke="#0a0a0a" stroke-width="1" marker-end="url(#arr)"/>
+
+  <!-- ========== COLUMN 3: Remote ========== -->
+  <text x="876" y="120" class="h2">REMOTE</text>
+
+  <rect x="876" y="140" width="340" height="56" rx="2" fill="#fff" stroke="#d4d4d4" stroke-width="1"/>
+  <text x="896" y="164" class="crate" style="font-weight:400;">ssh -T</text>
+  <text x="896" y="182" class="small">authenticated byte transport</text>
+
+  <rect x="876" y="220" width="340" height="56" rx="2" fill="#fff" stroke="#0a0a0a" stroke-width="1.25"/>
+  <text x="896" y="244" class="crate">zeus-remote</text>
+  <text x="896" y="262" class="small">probe · launch · attach · inspect</text>
+
+  <rect x="876" y="300" width="340" height="56" rx="2" fill="#fff" stroke="#0a0a0a" stroke-width="1"/>
+  <text x="896" y="324" class="crate" style="font-weight:400;">Remote Holder</text>
+  <text x="896" y="342" class="small">1 process · 1 UDS · 1 PTY · 1 agent</text>
+
+  <line x1="1046" y1="196" x2="1046" y2="220" stroke="#0a0a0a" stroke-width="1" marker-end="url(#arr)"/>
+  <line x1="1046" y1="276" x2="1046" y2="300" stroke="#0a0a0a" stroke-width="1" marker-end="url(#arr)"/>
+
+  <!-- runtime edges across columns -->
+  <!-- client -> engine -->
+  <path d="M404 308 H440 V168 H470" fill="none" stroke="#0a0a0a" stroke-width="1.25" stroke-dasharray="4 3" marker-end="url(#arr)"/>
+  <text x="412" y="290" class="edge">UDS</text>
+
+  <!-- engine -> remote -->
+  <path d="M810 168 H850 V168 H876" fill="none" stroke="#0a0a0a" stroke-width="1.25" stroke-dasharray="4 3" marker-end="url(#arr)"/>
+  <text x="818" y="156" class="edge">bootstrap</text>
+
+  <!-- ========== SHARED STRIP ========== -->
+  <line x1="64" y1="520" x2="1216" y2="520" stroke="#e5e5e5" stroke-width="1"/>
+  <text x="64" y="556" class="h2">SHARED</text>
+
+  <rect x="64" y="576" width="360" height="72" rx="2" fill="#fff" stroke="#0a0a0a" stroke-width="1.25"/>
+  <text x="84" y="608" class="crate">zeus-proto</text>
+  <text x="84" y="628" class="small">models · methods · remote_pty</text>
+
+  <rect x="460" y="576" width="360" height="72" rx="2" fill="#fff" stroke="#0a0a0a" stroke-width="1.25"/>
+  <text x="480" y="608" class="crate">zeus-terminal-state</text>
+  <text x="480" y="628" class="small">parser · grid · snapshot · diff</text>
+
+  <rect x="856" y="576" width="360" height="72" rx="2" fill="#fff" stroke="#0a0a0a" stroke-width="1.25"/>
+  <text x="876" y="608" class="crate">zeus-pty</text>
+  <text x="876" y="628" class="small">PTY primitives</text>
+
+  <!-- compile deps down -->
+  <line x1="234" y1="396" x2="234" y2="560" stroke="#a3a3a3" stroke-width="1" stroke-dasharray="2 3"/>
+  <line x1="234" y1="560" x2="244" y2="576" stroke="#a3a3a3" stroke-width="1" marker-end="url(#arrMuted)"/>
+  <line x1="640" y1="476" x2="640" y2="576" stroke="#a3a3a3" stroke-width="1" marker-end="url(#arrMuted)"/>
+  <line x1="1046" y1="356" x2="1046" y2="560" stroke="#a3a3a3" stroke-width="1" stroke-dasharray="2 3"/>
+  <line x1="1046" y1="560" x2="1036" y2="576" stroke="#a3a3a3" stroke-width="1" marker-end="url(#arrMuted)"/>
+
+  <!-- terminal-state and pty depend on proto (subtle) -->
+  <path d="M460 612 H424" fill="none" stroke="#d4d4d4" stroke-width="1" marker-end="url(#arrMuted)"/>
+  <path d="M856 612 H820" fill="none" stroke="#d4d4d4" stroke-width="1"/>
+  <path d="M820 612 V650 H244 V648" fill="none" stroke="#d4d4d4" stroke-width="1" marker-end="url(#arrMuted)"/>
+
+  <!-- ========== FOOTER NOTES ========== -->
+  <line x1="64" y1="692" x2="1216" y2="692" stroke="#e5e5e5" stroke-width="1"/>
+
+  <text x="64" y="732" class="h2">BOUNDARIES</text>
+  <text x="64" y="764" class="note">App never owns PTYs or runs SSH — only zeus-client talks to the Engine.</text>
+  <text x="64" y="788" class="note">Engine is the control plane. Holders own the data plane: PTY, process tree, terminal grid.</text>
+  <text x="64" y="812" class="note">zeus-remote depends on proto, terminal-state, and pty only — never app, client, or engine.</text>
+
+  <text x="64" y="860" class="small">Heavy border = binary · Light border = library · Dashed = runtime · Gray = compile dep</text>
+</svg>

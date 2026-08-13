@@ -12,3 +12,9 @@ zeus/target/
 
 # Agent worktrees created by Claude Code (EnterWorktree) — never committed.
 .claude/worktrees/
+
+.serena
+.tokensave
+
+# mdBook output
+docs/book/

@@ -9,6 +9,7 @@ use std::os::unix::process::CommandExt;
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
+use serde::{Deserialize, Serialize};
 use zeus_proto::frames::{Frame, FrameType, MAX_FRAME_BYTES};
 use zeus_proto::remote_pty::{
     ControlGranted, ControlRevoked, FullSnapshot, GridDelta, Hello, HelloAck, LaunchRequest,
@@ -17,7 +18,6 @@ use zeus_proto::remote_pty::{
 };
 use zeus_pty::{Exit, ExitWatcher, Pty, PtySpec, PtyStream};
 use zeus_terminal_state::HeadlessScreen;
-use serde::{Deserialize, Serialize};
 
 use crate::BUILD_ID;
 use crate::output_log::OutputLog;

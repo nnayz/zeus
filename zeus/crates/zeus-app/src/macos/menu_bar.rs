@@ -53,7 +53,7 @@ impl NativeMenuBar {
         let status_item =
             NSStatusBar::systemStatusBar().statusItemWithLength(NSSquareStatusItemLength);
         let button = status_item.button(mtm)?;
-        button.setToolTip(Some(&NSString::from_str("zeus")));
+        button.setToolTip(Some(&NSString::from_str("Zeus")));
 
         let panel = NSPanel::initWithContentRect_styleMask_backing_defer(
             NSPanel::alloc(mtm),
@@ -106,7 +106,7 @@ impl NativeMenuBar {
         surface.addSubview(&header_icon);
 
         let title_label = label(
-            "zeus",
+            "Zeus",
             13.0,
             FontStyle::Semibold,
             &NSColor::labelColor(),
@@ -141,7 +141,7 @@ impl NativeMenuBar {
         let target = MenuBarTarget::new(mtm, panel.clone(), button.clone(), store);
         let open_button = unsafe {
             NSButton::buttonWithTitle_target_action(
-                &NSString::from_str("Open zeus"),
+                &NSString::from_str("Open Zeus"),
                 Some(&*target as &AnyObject),
                 Some(sel!(openZeus:)),
                 mtm,
@@ -269,7 +269,7 @@ impl NativeMenuBar {
         };
         if let Some(image) = NSImage::imageWithSystemSymbolName_accessibilityDescription(
             &NSString::from_str(symbol),
-            Some(&NSString::from_str("zeus agent status")),
+            Some(&NSString::from_str("Zeus agent status")),
         ) {
             image.setTemplate(true);
             self.button.setImage(Some(&image));
@@ -555,7 +555,7 @@ impl NativeMenuBar {
         self.body.addSubview(&title);
 
         let hint = label(
-            "Open zeus to start an agent",
+            "Open Zeus to start an agent",
             11.0,
             FontStyle::Regular,
             &NSColor::tertiaryLabelColor(),

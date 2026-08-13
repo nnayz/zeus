@@ -13,13 +13,13 @@ use crate::quick_open::{
     RankedFolder,
 };
 use crate::store::{SessionStore, SpawnOptions, StoreRuntime};
-use zeus_proto::{AgentKind, AttentionLevel, SessionId, SessionRecord};
-use zeus_ui::{FloatingSurface, HairlineDivider, Palette, Radius, SemanticColors};
 use gpui::{
     AnyElement, App, Context, EventEmitter, FocusHandle, Focusable, FontWeight, HighlightStyle,
     KeyDownEvent, MouseButton, Pixels, Render, ScrollHandle, SharedString,
     StatefulInteractiveElement, StyledText, Task, Window, actions, div, prelude::*, px, rgba,
 };
+use zeus_proto::{AgentKind, AttentionLevel, SessionId, SessionRecord};
+use zeus_ui::{FloatingSurface, HairlineDivider, Palette, Radius, SemanticColors};
 
 actions!(zeus, [ToggleCommandPalette, ToggleQuickOpen]);
 

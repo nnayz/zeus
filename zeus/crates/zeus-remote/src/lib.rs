@@ -15,13 +15,13 @@ use std::io::{self, Read, Write};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use serde::Serialize;
+use sha2::{Digest, Sha256};
 use zeus_proto::remote_pty::{
     EnvironmentCaptureRequest, GcResult, HelperProbe, LaunchRequest, PHASE_ONE_HELPER_CAPABILITIES,
     PROTOCOL_MAJOR, PROTOCOL_MINOR, ProtocolVersion, RemoteProcessState, SessionInspection,
     SessionSelector,
 };
-use serde::Serialize;
-use sha2::{Digest, Sha256};
 
 pub use zeus_proto::remote_pty::HelperProbe as ProbeReport;
 

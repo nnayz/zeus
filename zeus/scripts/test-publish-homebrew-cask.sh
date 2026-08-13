@@ -16,7 +16,7 @@ fail() {
     exit 1
 }
 
-remote="${fixture_root}/homebrew-zeus.git"
+remote="${fixture_root}/zeus-monorepo.git"
 seed="${fixture_root}/seed"
 checkout="${fixture_root}/checkout"
 dmg="${fixture_root}/zeus-0.4.6-universal.dmg"
@@ -26,13 +26,13 @@ git init -q --bare "${remote}"
 git init -q "${seed}"
 git -C "${seed}" config user.name "Release Test"
 git -C "${seed}" config user.email "release-test@example.test"
-mkdir -p "${seed}/Casks"
+mkdir -p "${seed}/homebrew-zeus/Casks"
 printf '%s\n' \
     'cask "zeus" do' \
     '  version "0.4.6"' \
     '  sha256 "132816bd668a47af945bdca39c252c0e82313a0b6114b9ddb5cabf2292815087"' \
-    'end' > "${seed}/Casks/zeus.rb"
-git -C "${seed}" add Casks/zeus.rb
+    'end' > "${seed}/homebrew-zeus/Casks/zeus.rb"
+git -C "${seed}" add homebrew-zeus/Casks/zeus.rb
 git -C "${seed}" commit -q -m "zeus 0.4.6"
 git -C "${seed}" branch -M main
 git -C "${seed}" remote add origin "${remote}"
@@ -53,12 +53,12 @@ printf '%s\n' \
 chmod +x "${fake_gh}"
 
 # Reproduce issue #9 exactly: the cask edit is committed locally, but the tap's
-# remote branch still serves the old checksum. The publisher must push even
+# monorepo branch still serves the old checksum. The publisher must push even
 # when there is no new diff to commit during this recovery run.
 /usr/bin/sed -i '' -E \
     -e "s|^  sha256 \".*\"$|  sha256 \"${expected_sha}\"|" \
-    "${checkout}/Casks/zeus.rb"
-git -C "${checkout}" add Casks/zeus.rb
+    "${checkout}/homebrew-zeus/Casks/zeus.rb"
+git -C "${checkout}" add homebrew-zeus/Casks/zeus.rb
 git -C "${checkout}" commit -q -m "zeus 0.4.6"
 
 TEST_PUBLISHED_SHA="${expected_sha}" \
@@ -66,14 +66,14 @@ GH_BIN="${fake_gh}" \
 GH_REPO="example/zeus" \
     "${publisher}" 0.4.6 "${dmg}" "${checkout}"
 
-remote_cask="$(git -C "${remote}" show refs/heads/main:Casks/zeus.rb)"
+remote_cask="$(git -C "${remote}" show refs/heads/main:homebrew-zeus/Casks/zeus.rb)"
 grep -q "^  version \"0.4.6\"$" <<<"${remote_cask}" \
     || fail "remote cask version was not updated"
 grep -q "^  sha256 \"${expected_sha}\"$" <<<"${remote_cask}" \
     || fail "correct cask commit never reached the remote"
 test "$(git -C "${checkout}" rev-parse HEAD)" = \
     "$(git -C "${checkout}" rev-parse '@{upstream}')" \
-    || fail "tap checkout is still ahead of its upstream after publishing"
+    || fail "monorepo checkout is still ahead of its upstream after publishing"
 
 # Never update the tap from bytes that do not match the asset GitHub says it
 # published. This makes a partial or stale upload fail closed.

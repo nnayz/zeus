@@ -7,6 +7,14 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use gpui::{
+    AnyElement, App, ClickEvent, ClipboardEntry, ClipboardItem, Context, Entity, EventEmitter,
+    FocusHandle, KeyBinding, KeyDownEvent, KeyUpEvent, ModifiersChangedEvent, MouseButton, Render,
+    ScrollDelta, ScrollWheelEvent, SharedString, StatefulInteractiveElement, Task, Window, actions,
+    div, font, prelude::*, px, rgba,
+};
+use tokio::runtime::Handle;
+use tokio::sync::mpsc;
 use zeus_client::attachment::{SessionAttachment, TerminalChunk};
 use zeus_proto::grid::GridUpdate;
 use zeus_proto::{
@@ -28,14 +36,6 @@ use zeus_ui::{
     AgentKind as UiAgentKind, Fill, FloatingSurface, Ink, Metrics, Radius, SemanticColors,
     StatusGlyph, StatusState, Typo,
 };
-use gpui::{
-    AnyElement, App, ClickEvent, ClipboardEntry, ClipboardItem, Context, Entity, EventEmitter,
-    FocusHandle, KeyBinding, KeyDownEvent, KeyUpEvent, ModifiersChangedEvent, MouseButton, Render,
-    ScrollDelta, ScrollWheelEvent, SharedString, StatefulInteractiveElement, Task, Window, actions,
-    div, font, prelude::*, px, rgba,
-};
-use tokio::runtime::Handle;
-use tokio::sync::mpsc;
 
 use crate::clipboard_transfer::StagedClipboardImage;
 use crate::macos::sf_symbols::{SymbolWeight, sf_symbol, sf_symbol_weighted};
@@ -3353,10 +3353,10 @@ fn exit_description(session: &SessionRecord) -> String {
 
 #[cfg(test)]
 mod tests {
+    use gpui::{Image, ImageFormat, KeyDownEvent, Keystroke, Modifiers, TestAppContext, point};
     use zeus_proto::{
         DateMillis, ExitInfo, NeedsInputDetail, NeedsInputKind, NeedsInputSource, SessionListResult,
     };
-    use gpui::{Image, ImageFormat, KeyDownEvent, Keystroke, Modifiers, TestAppContext, point};
 
     use super::*;
 

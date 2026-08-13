@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use serde_json::{Value, json};
 use zeus_engine::detect::ManifestEngine;
 use zeus_engine::mcp::{McpServer, RegistryHost, tool_definitions};
 use zeus_engine::pty::PtySpec;
@@ -20,7 +21,6 @@ use zeus_proto::{
     AgentKind, DateMillis, ProjectId, Resumability, SessionId, SessionRecord, SessionStatus,
     TitleSource,
 };
-use serde_json::{Value, json};
 
 fn manifest_dir() -> PathBuf {
     zeus_engine::detect::bundled_manifest_dir()

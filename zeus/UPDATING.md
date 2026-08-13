@@ -1,5 +1,10 @@
 # zeus's auto-updater
 
+User-facing update behavior and trust model:
+**[Updates](../docs/src/updates.md)** in the docs book.
+
+This file is the release packaging and updater implementation reference.
+
 zeus updates itself. It does **not** use Sparkle — that framework is Swift-side
 and the Swift app's appcast carries EdDSA signatures tied to a keypair a Rust
 binary has no way to use. zeus ships its own updater in `crates/zeus-updater`,
@@ -78,8 +83,8 @@ If the app sits somewhere the user cannot write, the writability check fails
 One-time setup is the Developer ID cert and notary profile described in
 [PACKAGING.md](PACKAGING.md). No Sparkle keys.
 
-First open and merge a normal pull request that updates the `zeus-app` version
-and lockfile. Then check out the clean, current `main` branch and run:
+Bump the `zeus-app` version and lockfile on `main`, then from a clean checkout
+of current `origin/main` run:
 
 ```sh
 zeus/scripts/release.sh 0.4.1
@@ -103,11 +108,11 @@ recover without rebuilding the release:
 
 ```sh
 zeus/scripts/publish-homebrew-cask.sh \
-  0.4.1 zeus/dist/zeus-0.4.1-universal.dmg ../homebrew-zeus
+  0.4.1 zeus/dist/zeus-0.4.1-universal.dmg .
 ```
 
 That recovery command accepts the DMG only if its checksum matches GitHub,
-pushes the tap branch, and reads the remote cask back before succeeding.
+pushes the monorepo branch, and reads the remote cask back before succeeding.
 
 Release notes come from `dist/notes-<version>.md`. The script writes a default
 one if it is missing, so writing that file first — and re-running — is how you
@@ -137,9 +142,9 @@ bundle itself, which then goes into both the DMG and the update zip.
 ### Env overrides
 
 - `ZEUS_SIGN_IDENTITY` — Developer ID identity (default: auto-detected).
-- `NOTARY_PROFILE` — notarytool profile (default `zeusctl-notary`).
+- `NOTARY_PROFILE` — notarytool profile (default `zeus-notary`).
 - `GH_REPO` — repository to publish to (default `nnayz/zeus`).
-- `TAP_DIR` — clean Homebrew tap checkout (default `../../homebrew-zeus`).
+- `TAP_DIR` — clean Zeus monorepo checkout (default: the repository root).
 - `SKIP_CASK=1` — explicitly publish without offering the release via Homebrew.
 - `SKIP_GATES=1` — skip clippy/tests when re-running a failed publish.
 

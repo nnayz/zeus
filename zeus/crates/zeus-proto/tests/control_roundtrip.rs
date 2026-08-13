@@ -1,3 +1,5 @@
+use serde::{Serialize, de::DeserializeOwned};
+use serde_json::{Value, json};
 use zeus_proto::{
     AgentDescriptor, AgentKind, AgentReadinessResult, AttachRequest, ClientRole, ControlMessage,
     DateMillis, EventName, EventsSubscribeParams, ExitReason, HostInitializeParams, Method,
@@ -5,8 +7,6 @@ use zeus_proto::{
     SessionReadDiffParams, SessionReadDiffResult, SessionStatus, StateSnapshotResult,
     WorktreeListResult,
 };
-use serde::{Serialize, de::DeserializeOwned};
-use serde_json::{Value, json};
 
 const FIXTURES: &[&str] = &[
     include_str!("fixtures/hello_response.json"),

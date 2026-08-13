@@ -1,5 +1,5 @@
-use zeus_proto::{ProjectId, SessionId};
 use gpui::{Pixels, Point};
+use zeus_proto::{ProjectId, SessionId};
 
 use crate::query_editor::QueryEditor;
 

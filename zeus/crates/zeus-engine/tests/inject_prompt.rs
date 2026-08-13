@@ -10,11 +10,11 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use serde_json::json;
 use zeus_engine::control::ControlServer;
 use zeus_engine::detect::ManifestEngine;
 use zeus_engine::registry::Registry;
 use zeus_proto::ControlMessage;
-use serde_json::json;
 
 fn engine() -> Arc<ManifestEngine> {
     let dir = zeus_engine::detect::bundled_manifest_dir()

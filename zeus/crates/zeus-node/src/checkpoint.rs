@@ -5,12 +5,12 @@ use std::path::{Component, Path, PathBuf};
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
+use sha2::{Digest, Sha256};
 use zeus_proto::{
     BlobChunk, BlobHasParams, BlobHasResult, BlobPutParams, BlobReadParams, CheckpointFile,
     CheckpointManifest, CheckpointPrepareParams, CheckpointStageResult, MoveAbortParams,
     MoveCommitParams, MovePhase, MoveRecord, ProviderKind,
 };
-use sha2::{Digest, Sha256};
 
 use crate::accounts::now_seconds;
 use crate::config::{

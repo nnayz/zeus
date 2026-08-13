@@ -50,10 +50,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
 use zeus_proto::{
     ExitInfo, ExitReason, HostEntry, HostsConfig, Resumability, SessionRecord, SessionStatus,
 };
-use serde::{Deserialize, Serialize};
 
 use crate::hosts::{ShellOutput, shell_quote};
 use crate::registry::Registry;

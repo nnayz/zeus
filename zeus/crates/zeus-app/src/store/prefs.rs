@@ -115,6 +115,8 @@ pub struct Prefs {
     pub inspector_width: f32,
     /// Last selected tab in the trailing workbench inspector.
     pub inspector_tab: InspectorTab,
+    /// Shared soft-wrap preference for the inspector's Review and Code tabs.
+    pub inspector_word_wrap: bool,
     /// Fraction of the terminal workbench reserved for the primary pane when
     /// the lower terminal is open.
     pub workbench_primary_fraction: f32,
@@ -145,7 +147,7 @@ impl Default for Prefs {
             hibernate_after_minutes: 15,
             memory_hard_limit_gb: 6,
             terminal_theme: DEFAULT_THEME.to_owned(),
-            terminal_font_size: 13.0,
+            terminal_font_size: 16.0,
             window_placement: None,
             sidebar_visible: true,
             sidebar_width: 220.0,
@@ -154,6 +156,7 @@ impl Default for Prefs {
             inspector_open: true,
             inspector_width: 400.0,
             inspector_tab: InspectorTab::Info,
+            inspector_word_wrap: false,
             workbench_primary_fraction: crate::workbench::DEFAULT_PRIMARY_FRACTION,
             quick_open_roots: String::new(),
             sidebar_project_order: Vec::new(),
@@ -216,12 +219,12 @@ impl Prefs {
     }
 
     pub fn reset_terminal_zoom(&mut self) {
-        self.terminal_font_size = 13.0;
+        self.terminal_font_size = 16.0;
     }
 
     pub fn normalize(&mut self) {
         if !self.terminal_font_size.is_finite() {
-            self.terminal_font_size = 13.0;
+            self.terminal_font_size = 16.0;
         }
         self.terminal_font_size = self
             .terminal_font_size

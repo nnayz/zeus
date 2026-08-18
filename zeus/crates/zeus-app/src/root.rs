@@ -299,11 +299,6 @@ impl RootView {
             if let SidebarEvent::Update(command) = event {
                 this.services.updates.send(command.clone());
             }
-            if matches!(event, SidebarEvent::OpenSettings)
-                && let Some(surfaces) = &this.utility_surfaces
-            {
-                surfaces.update(cx, |surfaces, cx| surfaces.open_settings(cx));
-            }
             if matches!(event, SidebarEvent::AddRemoteHost)
                 && let Some(surfaces) = &this.utility_surfaces
             {
@@ -349,6 +344,11 @@ impl RootView {
                 window,
                 |this, _, event, window, cx| match event {
                     InspectorEvent::Close => this.set_inspector_open(false, cx),
+                    InspectorEvent::OpenSettings => {
+                        if let Some(surfaces) = &this.utility_surfaces {
+                            surfaces.update(cx, |surfaces, cx| surfaces.open_settings(cx));
+                        }
+                    }
                     InspectorEvent::AddRemoteHost => {
                         if let Some(surfaces) = &this.utility_surfaces {
                             surfaces.update(cx, |surfaces, cx| {
@@ -1415,6 +1415,11 @@ impl RootView {
         };
         let width = dragged_panel_width(base_width, pointer_x - origin_x, self.sidebar_on_right());
         self.inspector_width = width.clamp(self.inspector_min_width(), self.inspector_max_width);
+        if let Some(inspector) = &self.inspector {
+            inspector.update(cx, |inspector, cx| {
+                inspector.set_panel_width(self.inspector_width, cx)
+            });
+        }
         cx.notify();
     }
 
@@ -1423,6 +1428,9 @@ impl RootView {
             return;
         }
         let width = self.inspector_width;
+        if let Some(inspector) = &self.inspector {
+            inspector.update(cx, |inspector, cx| inspector.set_panel_width(width, cx));
+        }
         if let Err(error) = self
             .services
             .store
@@ -1950,14 +1958,25 @@ impl Render for RootView {
             .terminal
             .as_ref()
             .is_some_and(|terminal| terminal.read(cx).is_startup_welcome_visible());
-        let has_selected_session = self
-            .services
-            .store
-            .store
-            .read()
-            .expect("session store lock poisoned")
-            .selected_session_id()
-            .is_some();
+        let (has_selected_session, inspector_word_wrap) = {
+            let store = self
+                .services
+                .store
+                .store
+                .read()
+                .expect("session store lock poisoned");
+            (
+                store.selected_session_id().is_some(),
+                store.preferences().inspector_word_wrap,
+            )
+        };
+        if let Some(inspector) = &self.inspector
+            && inspector.read(cx).word_wrap_enabled() != inspector_word_wrap
+        {
+            inspector.update(cx, |inspector, cx| {
+                inspector.set_word_wrap(inspector_word_wrap, cx)
+            });
+        }
         let window_width = f32::from(window.inner_window_bounds().get_bounds().size.width);
         let occupied_sidebar_width = if sidebar_visible { sidebar_width } else { 0.0 };
         self.inspector_max_width =

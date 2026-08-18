@@ -1180,6 +1180,7 @@ fn prefs_round_trip_and_zoom_clamp() {
         sidebar_width: 284.0,
         inspector_width: 516.0,
         inspector_tab: InspectorTab::Artifacts,
+        inspector_word_wrap: true,
         last_selected_session: Some(id("s")),
         quick_open_roots: "~/fun\n~/src".to_owned(),
         sidebar_project_order: vec![pid("p")],
@@ -1195,7 +1196,7 @@ fn prefs_round_trip_and_zoom_clamp() {
     store.zoom_terminal(-100.0).unwrap();
     assert_eq!(store.prefs.terminal_font_size, 10.0);
     store.reset_terminal_zoom().unwrap();
-    assert_eq!(Prefs::load(&path).unwrap().terminal_font_size, 13.0);
+    assert_eq!(Prefs::load(&path).unwrap().terminal_font_size, 16.0);
 }
 
 #[test]

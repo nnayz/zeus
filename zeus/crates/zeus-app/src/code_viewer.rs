@@ -72,9 +72,18 @@ struct SourceRowContext {
     focused: bool,
     extension: String,
     content_width: f32,
+    word_wrap: bool,
     colors: SemanticColors,
     editor: gpui::Entity<CodeViewer>,
     caret_epoch: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SourceVisualRow {
+    line_index: usize,
+    range: Range<usize>,
+    first: bool,
+    last: bool,
 }
 
 impl SourceDocument {
@@ -277,6 +286,81 @@ fn normalize_line_endings(text: &str, line_ending: &str) -> String {
     }
 }
 
+/// Splits one logical line into display ranges while preserving every byte.
+/// Whitespace is preferred as a boundary, but long tokens still wrap so code
+/// cannot recreate a horizontal scrolling surface while wrapping is enabled.
+pub(crate) fn word_wrap_ranges(text: &str, columns: usize) -> Vec<Range<usize>> {
+    let columns = columns.max(1);
+    if text.is_empty() {
+        return std::iter::once(0..0).collect();
+    }
+
+    let mut ranges = Vec::new();
+    let mut start = 0;
+    while start < text.len() {
+        let mut end = start;
+        let mut boundary = None;
+        let mut used_columns = 0;
+        let mut seen_non_whitespace = false;
+        for (offset, character) in text[start..].char_indices() {
+            let character_columns = if character == '\t' { 4 } else { 1 };
+            if used_columns > 0 && used_columns + character_columns > columns {
+                break;
+            }
+            end = start + offset + character.len_utf8();
+            used_columns += character_columns;
+            if character.is_whitespace() {
+                if seen_non_whitespace {
+                    boundary = Some(end);
+                }
+            } else {
+                seen_non_whitespace = true;
+            }
+        }
+        if end == text.len() {
+            ranges.push(start..end);
+            break;
+        }
+        let split = boundary.filter(|boundary| *boundary > start).unwrap_or(end);
+        ranges.push(start..split);
+        start = split;
+    }
+    ranges
+}
+
+fn source_visual_rows(document: &SourceDocument, columns: usize) -> Vec<SourceVisualRow> {
+    let mut rows = Vec::new();
+    for (line_index, line) in document.lines.iter().enumerate() {
+        let source = document.editor.text()[line.range.clone()].trim_end_matches(['\r', '\n']);
+        let ranges = word_wrap_ranges(source, columns);
+        let last = ranges.len().saturating_sub(1);
+        rows.extend(
+            ranges
+                .into_iter()
+                .enumerate()
+                .map(|(index, range)| SourceVisualRow {
+                    line_index,
+                    range,
+                    first: index == 0,
+                    last: index == last,
+                }),
+        );
+    }
+    rows
+}
+
+fn source_visual_index(document: &SourceDocument, line_index: usize, columns: usize) -> usize {
+    document
+        .lines
+        .iter()
+        .take(line_index)
+        .map(|line| {
+            let source = document.editor.text()[line.range.clone()].trim_end_matches(['\r', '\n']);
+            word_wrap_ranges(source, columns).len()
+        })
+        .sum()
+}
+
 pub struct CodeViewer {
     tokio: tokio::runtime::Handle,
     focus: FocusHandle,
@@ -301,10 +385,17 @@ pub struct CodeViewer {
     /// caret back visibly before the next blink cycle begins.
     caret_epoch: u64,
     selection_dragging: bool,
+    word_wrap: bool,
+    viewport_width: f32,
 }
 
 impl CodeViewer {
-    pub fn new(tokio: tokio::runtime::Handle, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        tokio: tokio::runtime::Handle,
+        word_wrap: bool,
+        viewport_width: f32,
+        cx: &mut Context<Self>,
+    ) -> Self {
         Self {
             tokio,
             focus: cx.focus_handle(),
@@ -326,7 +417,50 @@ impl CodeViewer {
             pending_transition: None,
             caret_epoch: 0,
             selection_dragging: false,
+            word_wrap,
+            viewport_width,
         }
+    }
+
+    pub fn set_word_wrap(&mut self, word_wrap: bool, cx: &mut Context<Self>) {
+        if self.word_wrap == word_wrap {
+            return;
+        }
+        self.word_wrap = word_wrap;
+        self.recenter_scroll();
+        cx.notify();
+    }
+
+    pub fn set_viewport_width(&mut self, width: f32, cx: &mut Context<Self>) {
+        if (self.viewport_width - width).abs() < 0.5 {
+            return;
+        }
+        self.viewport_width = width;
+        if self.word_wrap {
+            self.recenter_scroll();
+            cx.notify();
+        }
+    }
+
+    fn recenter_scroll(&mut self) {
+        let logical_line = match &self.state {
+            ViewerState::Ready(document) => document.line_index_for_cursor(),
+            _ => 0,
+        };
+        let item = match &self.state {
+            ViewerState::Ready(document) if self.word_wrap => {
+                source_visual_index(document, logical_line, self.wrap_columns())
+            }
+            _ => logical_line,
+        };
+        self.scroll = UniformListScrollHandle::new();
+        self.scroll.scroll_to_item(item, ScrollStrategy::Center);
+    }
+
+    fn wrap_columns(&self) -> usize {
+        ((self.viewport_width - SOURCE_GUTTER_WIDTH - 24.0) / 7.1)
+            .floor()
+            .max(8.0) as usize
     }
 
     fn reveal_caret(&mut self) {
@@ -763,11 +897,17 @@ impl CodeViewer {
                                 this.history_index = this.history.len().saturating_sub(1);
                             }
                         }
-                        this.state = ViewerState::Ready(Box::new(SourceDocument::new(snapshot)));
+                        let document = SourceDocument::new(snapshot);
                         if let Some(line) = target_line {
-                            this.scroll
-                                .scroll_to_item(line.saturating_sub(1), ScrollStrategy::Center);
+                            let logical_line = line.saturating_sub(1);
+                            let item = if this.word_wrap {
+                                source_visual_index(&document, logical_line, this.wrap_columns())
+                            } else {
+                                logical_line
+                            };
+                            this.scroll.scroll_to_item(item, ScrollStrategy::Center);
                         }
+                        this.state = ViewerState::Ready(Box::new(document));
                     }
                     Err(message) => {
                         this.state = ViewerState::Error { reference, message };
@@ -1094,10 +1234,43 @@ impl CodeViewer {
             focused,
             extension,
             content_width: content_width.max(320.0),
+            word_wrap: self.word_wrap,
             colors,
             editor: editor.clone(),
             caret_epoch: self.caret_epoch,
         };
+        if self.word_wrap {
+            let visual_rows = Arc::new(source_visual_rows(document, self.wrap_columns()));
+            let visual_row_count = visual_rows.len();
+            return uniform_list(
+                "code-viewer-source-wrapped",
+                visual_row_count,
+                move |range, window, cx| {
+                    let viewer = editor.read(cx);
+                    let ViewerState::Ready(document) = &viewer.state else {
+                        return Vec::new();
+                    };
+                    let target = document.snapshot.target.map(|target| target.line);
+                    range
+                        .map(|display_index| {
+                            let visual = &visual_rows[display_index];
+                            source_row(
+                                document,
+                                display_index,
+                                visual,
+                                target == Some(visual.line_index + 1),
+                                &row_context,
+                                window,
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                },
+            )
+            .track_scroll(&self.scroll)
+            .size_full()
+            .into_any_element();
+        }
+
         uniform_list("code-viewer-source", rows, move |range, window, cx| {
             let viewer = editor.read(cx);
             let ViewerState::Ready(document) = &viewer.state else {
@@ -1106,9 +1279,19 @@ impl CodeViewer {
             let target = document.snapshot.target.map(|target| target.line);
             range
                 .map(|index| {
+                    let source_len = document.editor.text()[document.lines[index].range.clone()]
+                        .trim_end_matches(['\r', '\n'])
+                        .len();
+                    let visual = SourceVisualRow {
+                        line_index: index,
+                        range: 0..source_len,
+                        first: true,
+                        last: true,
+                    };
                     source_row(
                         document,
                         index,
+                        &visual,
                         target == Some(index + 1),
                         &row_context,
                         window,
@@ -1410,23 +1593,40 @@ fn source_offset_at_x(source: &str, x: gpui::Pixels, color: gpui::Rgba, window: 
 
 fn source_row(
     document: &SourceDocument,
-    index: usize,
+    display_index: usize,
+    visual: &SourceVisualRow,
     targeted: bool,
     context: &SourceRowContext,
     window: &Window,
 ) -> AnyElement {
-    let line = &document.lines[index];
-    let source = document.editor.text()[line.range.clone()]
+    let line_index = visual.line_index;
+    let visual_range = visual.range.clone();
+    let first = visual.first;
+    let last = visual.last;
+    let line = &document.lines[line_index];
+    let full_source = document.editor.text()[line.range.clone()]
         .trim_end_matches(['\r', '\n'])
         .to_owned();
     let selection = document.editor.selection().and_then(|selection| {
         let start = selection.start.max(line.range.start);
         let end = selection.end.min(line.range.end);
-        (start < end).then_some(start - line.range.start..end - line.range.start)
+        if start >= end {
+            return None;
+        }
+        let logical = start - line.range.start..end - line.range.start;
+        let start = logical.start.max(visual_range.start);
+        let end = logical.end.min(visual_range.end);
+        (start < end).then_some(start..end)
     });
-    let caret =
-        (context.focused && selection.is_none() && document.line_index_for_cursor() == index)
-            .then_some(document.editor.cursor().saturating_sub(line.range.start));
+    let logical_caret = document.editor.cursor().saturating_sub(line.range.start);
+    let caret_in_range = logical_caret >= visual_range.start
+        && (logical_caret < visual_range.end || last && logical_caret == visual_range.end);
+    let caret = (context.focused
+        && selection.is_none()
+        && document.line_index_for_cursor() == line_index
+        && caret_in_range)
+        .then_some(logical_caret.saturating_sub(visual_range.start));
+    let source = full_source[visual_range.clone()].to_owned();
     let caret_x = caret.map(|caret| {
         if source.is_empty() {
             return px(0.0);
@@ -1442,19 +1642,30 @@ fn source_row(
             .shape_line(source.clone().into(), px(11.5), &[run], None)
             .x_for_index(caret.min(source.len()))
     });
-    let styled = highlighted_source(source, &context.extension, selection);
+    let styled = highlighted_source_range(
+        &full_source,
+        visual_range.clone(),
+        &context.extension,
+        selection,
+    );
     let bounds_slot = Rc::new(Cell::new(None));
     let paint_bounds = Rc::clone(&bounds_slot);
     let click_bounds = Rc::clone(&bounds_slot);
     let drag_bounds = Rc::clone(&bounds_slot);
     let click_editor = context.editor.clone();
     let drag_editor = context.editor.clone();
+    let click_range = visual_range.clone();
+    let drag_range = visual_range;
     let colors = context.colors;
     div()
-        .id(index)
+        .id(display_index)
         .relative()
         .h(px(SOURCE_ROW_HEIGHT))
-        .min_w(px(context.content_width))
+        .min_w(px(if context.word_wrap {
+            0.0
+        } else {
+            context.content_width
+        }))
         .w_full()
         .flex()
         .items_center()
@@ -1485,15 +1696,21 @@ fn source_row(
                 } else {
                     colors.primary.alpha(0.26)
                 })
-                .child(line.number.to_string()),
+                .child(if first {
+                    line.number.to_string()
+                } else {
+                    String::new()
+                }),
         )
         .child(
             div()
                 .h_full()
                 .min_w(px(0.0))
+                .flex_1()
                 .pl(px(10.0))
                 .flex()
                 .items_center()
+                .whitespace_nowrap()
                 .font_family(crate::fonts::mono_family())
                 .text_size(px(11.5))
                 .text_color(rgba(0xd8dee9ff))
@@ -1531,18 +1748,21 @@ fn source_row(
                     let ViewerState::Ready(document) = &viewer.state else {
                         return;
                     };
-                    let Some(line) = document.lines.get(index) else {
+                    let Some(line) = document.lines.get(line_index) else {
                         return;
                     };
-                    document.editor.text()[line.range.clone()].to_owned()
+                    let source =
+                        document.editor.text()[line.range.clone()].trim_end_matches(['\r', '\n']);
+                    source[click_range.clone()].to_owned()
                 };
                 let x = event.position.x - bounds.left() - px(SOURCE_GUTTER_WIDTH) - px(10.0);
-                let local_offset = source_offset_at_x(&source, x, colors.primary, window);
+                let local_offset =
+                    click_range.start + source_offset_at_x(&source, x, colors.primary, window);
                 click_editor.update(cx, |this, cx| {
                     window.focus(&this.focus, cx);
                     this.selection_dragging = true;
                     this.place_cursor(
-                        index,
+                        line_index,
                         local_offset,
                         event.modifiers.shift,
                         event.click_count,
@@ -1567,15 +1787,18 @@ fn source_row(
                 let ViewerState::Ready(document) = &viewer.state else {
                     return;
                 };
-                let Some(line) = document.lines.get(index) else {
+                let Some(line) = document.lines.get(line_index) else {
                     return;
                 };
-                document.editor.text()[line.range.clone()].to_owned()
+                let source =
+                    document.editor.text()[line.range.clone()].trim_end_matches(['\r', '\n']);
+                source[drag_range.clone()].to_owned()
             };
             let x = event.position.x - bounds.left() - px(SOURCE_GUTTER_WIDTH) - px(10.0);
-            let local_offset = source_offset_at_x(&source, x, colors.primary, window);
+            let local_offset =
+                drag_range.start + source_offset_at_x(&source, x, colors.primary, window);
             drag_editor.update(cx, |this, cx| {
-                this.place_cursor(index, local_offset, true, 1, cx);
+                this.place_cursor(line_index, local_offset, true, 1, cx);
             });
             cx.stop_propagation();
         })
@@ -1590,13 +1813,23 @@ fn source_row(
         .into_any_element()
 }
 
-fn highlighted_source(
-    source: String,
+fn highlighted_source_range(
+    source: &str,
+    visual_range: Range<usize>,
     extension: &str,
     selection: Option<Range<usize>>,
 ) -> AnyElement {
-    let mut ranges = lexical_highlights(&source, extension);
+    let mut ranges = lexical_highlights(source, extension);
+    ranges = ranges
+        .into_iter()
+        .filter_map(|(range, style)| {
+            let start = range.start.max(visual_range.start);
+            let end = range.end.min(visual_range.end);
+            (start < end).then_some((start - visual_range.start..end - visual_range.start, style))
+        })
+        .collect();
     if let Some(selection) = selection {
+        let selection = selection.start - visual_range.start..selection.end - visual_range.start;
         ranges.retain(|(range, _)| range.end <= selection.start || range.start >= selection.end);
         ranges.push((
             selection,
@@ -1607,6 +1840,7 @@ fn highlighted_source(
         ));
         ranges.sort_by_key(|(range, _)| range.start);
     }
+    let source = source[visual_range].to_owned();
     if ranges.is_empty() {
         return div().child(source).into_any_element();
     }
@@ -1852,6 +2086,60 @@ mod tests {
         let source = "alpha  +  beta";
         assert_eq!(word_range_at(source, 7), None);
         assert_eq!(word_range_at(source, 8), None);
+    }
+
+    #[test]
+    fn word_wrap_ranges_preserve_text_and_utf8_boundaries() {
+        let source = "alpha beta café_and_a_very_long_token";
+        let ranges = word_wrap_ranges(source, 8);
+        let rebuilt = ranges
+            .iter()
+            .map(|range| &source[range.clone()])
+            .collect::<String>();
+
+        assert_eq!(rebuilt, source);
+        assert!(ranges.len() > 1);
+        assert!(
+            ranges
+                .iter()
+                .all(|range| source.is_char_boundary(range.start))
+        );
+        assert!(
+            ranges
+                .iter()
+                .all(|range| source.is_char_boundary(range.end))
+        );
+        assert!(
+            ranges
+                .iter()
+                .all(|range| source[range.clone()].chars().count() <= 8)
+        );
+    }
+
+    #[test]
+    fn word_wrap_keeps_indentation_with_the_first_code_fragment() {
+        let source = "        alpha_beta_gamma";
+        let ranges = word_wrap_ranges(source, 12);
+
+        assert!(ranges.len() > 1);
+        assert_ne!(&source[ranges[0].clone()], "        ");
+        assert_eq!(
+            ranges
+                .iter()
+                .map(|range| &source[range.clone()])
+                .collect::<String>(),
+            source
+        );
+    }
+
+    #[test]
+    fn wrapped_source_rows_keep_logical_line_identity() {
+        let document = document("let short = 1;\nlet longer = alpha_beta_gamma;", None);
+        let rows = source_visual_rows(&document, 10);
+
+        assert_eq!(rows[0].line_index, 0);
+        assert!(rows.iter().filter(|row| row.line_index == 1).count() > 1);
+        assert_eq!(source_visual_index(&document, 1, 10), 2);
     }
 
     #[test]

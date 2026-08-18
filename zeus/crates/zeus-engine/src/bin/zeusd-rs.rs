@@ -478,10 +478,17 @@ fn copy_dir(source: &Path, dest: &Path) -> std::io::Result<()> {
 
 #[cfg(unix)]
 fn cli_helper_sources(exe_dir: &Path, name: &str) -> Vec<PathBuf> {
-    let mut sources = vec![exe_dir.join(name)];
+    let mut sources = Vec::new();
     if name == "zeus" {
+        // A loose Cargo build puts the desktop app at `target/*/zeus` and the
+        // automation CLI at `target/*/zeus-cli`. The stable helper must be the
+        // latter: zeus-mcp invokes it with `mcp-tools` / `mcp-call`, while the
+        // desktop binary enters its GPUI event loop and leaves `tools/list`
+        // unanswered. Packaged layouts name the CLI itself `zeus`, so the
+        // ordinary sibling remains the fallback immediately below.
         sources.push(exe_dir.join("zeus-cli"));
     }
+    sources.push(exe_dir.join(name));
     if let Ok(home) = std::env::var("HOME") {
         sources.push(
             Path::new(&home)
@@ -682,6 +689,29 @@ mod tests {
         running.read_to_string(&mut old).expect("old inode");
         assert_eq!(old, "old");
         assert_eq!(std::fs::read_to_string(&dest).expect("new path"), "new");
+    }
+
+    #[test]
+    fn cli_helper_install_prefers_cargo_cli_over_sibling_desktop_app() {
+        let temporary = tempfile::tempdir().expect("temp");
+        let executables = temporary.path().join("target/debug");
+        let app_support = temporary.path().join("app-support");
+        std::fs::create_dir_all(&executables).expect("executables");
+
+        let desktop = executables.join("zeus");
+        let cli = executables.join("zeus-cli");
+        std::fs::write(&desktop, b"desktop-app").expect("desktop");
+        std::fs::write(&cli, b"automation-cli").expect("cli");
+        set_executable(&desktop);
+        set_executable(&cli);
+
+        let installed = install_cli_helpers(&executables, &app_support);
+
+        assert_eq!(installed, app_support.join("bin/zeus"));
+        assert_eq!(
+            std::fs::read(installed).expect("installed helper"),
+            b"automation-cli"
+        );
     }
 
     #[test]

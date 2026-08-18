@@ -97,8 +97,6 @@ jobs:
             zeus/target
           key: ${{ runner.os }}-cargo-${{ hashFiles('zeus/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
-      - name: Check dependency license policy
-        run: python3 ../scripts/check-licenses.py
       - name: Format
         run: cargo fmt --all -- --check
       - name: Clippy

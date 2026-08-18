@@ -21,6 +21,7 @@ entitlements="${workspace_dir}/assets/zeus.entitlements"
 target_dir="${CARGO_TARGET_DIR:-${workspace_dir}/target}"
 universal_dir="${target_dir}/universal-apple-darwin/release"
 universal_binary="${universal_dir}/zeus"
+universal_cli_binary="${universal_dir}/zeus-cli"
 universal_mcp_binary="${universal_dir}/zeus-mcp"
 universal_engine_binary="${universal_dir}/zeusd-rs"
 universal_holder_binary="${universal_dir}/zeus-holder"
@@ -54,12 +55,12 @@ fi
 cd "${workspace_dir}"
 
 echo "==> Building zeus for Apple silicon"
-cargo build --release --package zeus-app --bin zeus --target aarch64-apple-darwin
-cargo build --release --package zeus-mcp --bin zeus-mcp --target aarch64-apple-darwin
+cargo build --release --package zeus-app --bin zeus --package zeus-cli --bin zeus-cli \
+    --package zeus-mcp --bin zeus-mcp --target aarch64-apple-darwin
 
 echo "==> Building zeus for Intel"
-cargo build --release --package zeus-app --bin zeus --target x86_64-apple-darwin
-cargo build --release --package zeus-mcp --bin zeus-mcp --target x86_64-apple-darwin
+cargo build --release --package zeus-app --bin zeus --package zeus-cli --bin zeus-cli \
+    --package zeus-mcp --bin zeus-mcp --target x86_64-apple-darwin
 
 echo "==> Creating universal executable"
 mkdir -p "${universal_dir}" "${dist_dir}"
@@ -68,6 +69,11 @@ lipo -create \
     "${target_dir}/x86_64-apple-darwin/release/zeus" \
     -output "${universal_binary}"
 lipo "${universal_binary}" -verify_arch arm64 x86_64
+lipo -create \
+    "${target_dir}/aarch64-apple-darwin/release/zeus-cli" \
+    "${target_dir}/x86_64-apple-darwin/release/zeus-cli" \
+    -output "${universal_cli_binary}"
+lipo "${universal_cli_binary}" -verify_arch arm64 x86_64
 lipo -create \
     "${target_dir}/aarch64-apple-darwin/release/zeus-mcp" \
     "${target_dir}/x86_64-apple-darwin/release/zeus-mcp" \
@@ -83,25 +89,11 @@ cargo packager \
     --binaries-dir "${universal_dir}" \
     --out-dir "${dist_dir}"
 
-# The Rust Engine is authoritative. The existing CLI remains packaged for
-# local automation/hooks, but no daemon, Holder, Agent manifest, or remote
-# transport artifact is sourced from a Swift product.
-repo_root="$(cd "${workspace_dir}/.." && pwd)"
-echo "==> Building the local automation CLI"
-swift build --package-path "${repo_root}" -c release --product zeus
-daemon_bin="$(swift build --package-path "${repo_root}" -c release --show-bin-path)"
 app_bin_dir="${app_path}/Contents/Resources/bin"
 echo "==> Bundling CLI and lightweight MCP proxy into Resources/bin"
 mkdir -p "${app_bin_dir}"
-cp "${daemon_bin}/zeus" "${app_bin_dir}/zeus"
+cp "${universal_cli_binary}" "${app_bin_dir}/zeus"
 cp "${universal_mcp_binary}" "${app_bin_dir}/zeus-mcp"
-core_bundle="${daemon_bin}/zeus_ZeusCore.bundle"
-if [[ ! -d "${core_bundle}" ]]; then
-    echo "error: Swift CLI resource bundle is missing: ${core_bundle}" >&2
-    exit 1
-fi
-rm -rf "${app_bin_dir}/zeus_ZeusCore.bundle"
-cp -R "${core_bundle}" "${app_bin_dir}/zeus_ZeusCore.bundle"
 
 # The Rust Engine is the authoritative daemon launched by zeus. The remote
 # Helper catalog below is consumed by this executable directly.

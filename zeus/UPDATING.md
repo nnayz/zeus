@@ -120,13 +120,10 @@ customize them.
 
 ### The bundled daemon does not update with the app
 
-`zeus.app` carries `zeusd` + `zeusd-holder` in `Contents/Resources/bin`,
-and the update zip carries them too — but `daemon_launch` is launch-only by
-design (PLAN.md §3.1: never restart a live daemon, to avoid ping-pong with a
-still-installed `Zeus.app`). After a self-update the *old* daemon keeps
-running from the replaced bundle, so a release that changes `zeusd` does not
-take effect until that daemon is restarted by other means. The app half updates
-immediately; the daemon half waits.
+`zeus.app` carries `zeusd-rs` + `zeus-holder` in `Contents/Resources/bin`,
+and the update zip carries them too. After a self-update a still-running Engine
+is replaced when its `executableHash` no longer matches the bundled
+`zeusd-rs`.
 
 The canonical release tag is `v<version>`. `gh release create` creates that tag
 at the verified `origin/main` commit; do not create a second `zeus-v<version>`

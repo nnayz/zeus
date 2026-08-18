@@ -8,8 +8,8 @@ These instructions apply to the whole repository. The active architecture decisi
 
 - The remote refactor is complete. Maintain the bootstrapped Remote PTY Holder as Zeus's only remote session transport; future remote work extends this architecture rather than reopening the transport migration.
 - Implement and maintain remote behavior entirely in the Rust workspace under `zeus/`.
-- For remote-refactor *design* decisions, treat `Sources/`, `Package.swift`, and Swift tests as nonexistent: do not derive architecture from them, modify them, add Swift compatibility adapters, or cite Swift build/test results as evidence.
-- That rule is about design, not about data the product still ships. `Sources/ZeusCore/Resources/manifests` remains the reference for **Agent catalog completeness** until the Rust catalog is proven at parity. Reading it to check coverage is required, not forbidden. Writing a Rust catalog from memory instead of porting is how the catalog silently shrank from 20 Agents to 7 — a missing manifest does not error, it spawns a bare login shell, and that has shipped to users before.
+- The product is Rust-only. Do not reintroduce Swift sources, a Swift daemon, or a Swift CLI.
+- `zeus/crates/zeus-engine/manifests` is the Agent catalog. A missing manifest does not error at runtime — it silently downgrades that agent to a bare login shell. Never shrink the catalog.
 - Existing Rust behavior is the implementation baseline. Historical comments about Swift compatibility do not create new requirements.
 - The former Rust SSH + `tmux` transport has been deleted. Never reintroduce it as `legacy_tmux`, a feature flag, a migration path, or a runtime fallback. Missing, corrupt, unsupported, or capability-incompatible Helper artifacts must fail closed with a structured error; an unavailable packaged transport reports `remote_transport_unavailable`.
 - When implementation and `zeus/REMOTE_PORT.md` disagree, stop and resolve the design mismatch explicitly instead of silently choosing one.
@@ -21,6 +21,7 @@ These instructions apply to the whole repository. The active architecture decisi
 - `zeus/crates/zeus-client`: local app-to-engine client. It should not execute SSH directly.
 - `zeus/crates/zeus-term`: GPUI terminal renderer and client-side terminal interaction.
 - `zeus/crates/zeus-app`: desktop UI. It requests remote actions through the local Engine.
+- `zeus/crates/zeus-cli`: shipped `zeus` automation CLI (hooks, notify, MCP backend, session/worktree commands).
 - `zeus/crates/zeus-node`: optional enhanced node mode. It is not a dependency of the default SSH bootstrap path.
 - `zeus/crates/zeus-terminal-state`: shared headless terminal parser/Grid/Snapshot/Diff implementation used by the local Engine and remote Holder.
 - `zeus/crates/zeus-remote`: minimal remote Helper binary. Keep it independent of GPUI, `zeus-app`, `zeus-client`, and `zeus-node`.
@@ -79,7 +80,7 @@ cargo test --workspace
 cargo build --workspace --release
 ```
 
-During iteration, run the narrowest relevant package/test first, then the full Rust checks before handoff when practical. Do not run Swift commands for the remote refactor.
+During iteration, run the narrowest relevant package/test first, then the full Rust checks before handoff when practical.
 
 Remote tests should be deterministic and not require a developer's real SSH host by default. Prefer fake `ssh` executables, fixture homes, Unix sockets, and spawned test PTYs. Cover at least:
 

@@ -1,24 +1,17 @@
 # Porting the engine to Rust
 
 The goal is a cross-platform zeus. The app is already portable — roughly 4% of
-`zeus-app` is macOS-specific and it is cfg-gated. What binds zeus to macOS is
-the *engine*: the Swift `zeusd` stack in `Sources/`, which owns PTYs,
-sessions, detection and the control socket.
-
-This is the record of replacing it with `crates/zeus-engine`.
+`zeus-app` is macOS-specific and it is cfg-gated. The Engine, CLI, and remote
+Helper are Rust. This is the record of replacing the retired Swift stack with
+`crates/zeus-engine`.
 
 ## Rules this port follows
 
-1. **Additive.** The Swift daemon keeps running and serving live sessions
-   throughout. Nothing in `Sources/` is modified or deleted until the Rust
-   engine is a proven replacement.
-2. **Formats are load-bearing.** A log, socket message or on-disk record
-   written by one engine must be readable by the other, or switching strands
-   whatever sessions were live at the time.
-3. **Rules stay data.** Detection manifests are read from
-   `Sources/ZeusCore/Resources/manifests/`, not copied. One source of truth,
-   no drift.
-4. **Platform gaps are named, not hidden.** Unix is implemented; Windows gaps
+1. **Formats are load-bearing.** A log, socket message or on-disk record
+   written by one Engine must stay readable across upgrades.
+2. **Rules stay data.** Detection manifests live in
+   `crates/zeus-engine/manifests`. One source of truth, no drift.
+3. **Platform gaps are named, not hidden.** Unix is implemented; Windows gaps
    sit behind a `cfg` with the specific API that fills them documented at the
    seam.
 
@@ -48,8 +41,9 @@ This is the record of replacing it with `crates/zeus-engine`.
 | Held sessions + adoption | **done** | `Session::spawn` goes through a holder when a `HolderConfig` is present; `Registry::restore` scans the holders directory and adopts live holders after a restart. Tested: a session survives its session object being dropped and a brand-new registry picks it up mid-flight |
 | History / resume | **done** | Claude and Codex transcript stores; verified against the real ones — 500 conversations in 0.9s |
 | Remote hosts (ssh + tmux) | **done** | argv, reattach naming, shell quoting verified through a real shell, scp handoff |
-| Rust daemon binary | **done** | `zeusd-rs`: same socket, lock singleton, state file, boot-log stamp, holder adoption, manifest bundle + overrides loading. Ships in `Resources/bin` beside the Swift daemon; opt in per machine with `ZEUSD_PATH=…/Resources/bin/zeusd-rs`. Verified live: the Swift `zeus` CLI spawned, typed into, read, waited on, and archived a session served entirely by the Rust engine |
-| Swift daemon retirement | in soak | Opt-in flag exists; flip the default (and delete `Sources/`) once the Rust daemon has parity on the remaining gaps below and soak time under real use |
+| Rust daemon binary | **done** | `zeusd-rs` is the only Engine the app launches |
+| Automation CLI + MCP | **done** | `zeus-cli` ships as `Resources/bin/zeus`; `zeus-mcp` stays the stdio proxy |
+| Swift retirement | **done** | `Sources/`, `Package.swift`, and the Swift test tree are gone |
 
 Since ported into `zeusd-rs` (2026-08-07 second pass): artifacts scanning
 + PR enrichment + listening ports, the full resource governor with all three
@@ -67,27 +61,16 @@ record; the app never calls `session.wake` itself. The polish trio landed the
 same day: screen-checkpoint restore, deferred launch at the settled client
 size, and verified initial-prompt injection (notes below).
 
-Remaining gaps in `zeusd-rs` (all answer clean errors):
-
-- **Mobile companion stack**: the remote TCP listener + token gate, and
-  role-based geometry arbitration (`session.set_owner` is an accepted no-op;
-  a phone attach behaves like a second desktop sink). One stack — without
-  the listener the phone can't reach this daemon, so the arbitration is
-  unreachable until both land together.
-- **Port forwarding**: the data-channel `ForwardRequest` mode (phone preview
-  tunnels) is unported — same mobile stack.
+Companion TCP (`session.set_owner`, `ForwardRequest`, phone preview tunnels)
+is not part of the Rust product. See `REMOTE_PORT.md`.
 - ~~Polish, not parity blockers~~ — the polish trio (screen-checkpoint
   restore, deferred launch, verified prompt injection) is ported; see the
   holder notes below.
 
 Holder-port notes, for whoever wires the daemon:
 
-- **The mixed-fleet upgrade works by construction**: paths, spec JSON, and the
-  log format are shared, so a Rust daemon adopts Swift-spawned holders (this
-  direction is what `tests/holder_interop.rs` proves against the real Swift
-  binary) and a Swift daemon would adopt Rust-spawned ones. The reverse
-  direction has no automated test — it only matters for a rollback, and would
-  need Swift-side test infrastructure.
+- Holder paths, spec JSON, and the log format stay shared so a restarted
+  Engine can adopt live holders.
 - **Screen checkpoints are ported** (2026-08-07). The held pump writes
   `<id>.screen.plist` after a 1s output settle — same binary-plist format
   and keys as `ScreenCheckpoint.swift`, proven against Apple's own parser

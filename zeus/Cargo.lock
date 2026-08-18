@@ -7304,6 +7304,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "zeus-cli"
+version = "0.0.1"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+ "zeus-proto",
+]
+
+[[package]]
 name = "zeus-client"
 version = "0.0.1"
 dependencies = [

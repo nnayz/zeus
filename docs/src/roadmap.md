@@ -10,7 +10,7 @@ Direction only — not a release calendar.
 
 ## Next
 
-- Rust engine feature parity with the shipped Swift daemon
+- Broader first-class agent manifests and cross-platform Engine coverage
 - Clearer remote-host and remote-node setup and diagnostics
 - Deeper end-to-end coverage for updates and session recovery
 

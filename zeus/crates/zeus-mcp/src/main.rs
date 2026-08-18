@@ -243,7 +243,7 @@ mod tests {
     }
 
     #[test]
-    fn serves_mcp_without_a_resident_swift_runtime() {
+    fn serves_mcp_without_a_resident_tool_runtime() {
         let mut backend = Fake;
         let listed = handle_message(
             json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}),

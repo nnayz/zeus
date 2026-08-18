@@ -612,6 +612,7 @@ mod tests {
                 "worktrees",
                 "toggle-sidebar",
                 "settings",
+                "documentation",
                 "check-for-updates",
             ]
         );

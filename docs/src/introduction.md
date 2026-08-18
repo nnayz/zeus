@@ -10,6 +10,7 @@ a session; a daemon restart brings conversations back.
 ## Install
 
 ```sh
+brew tap nnayz/zeus https://github.com/nnayz/zeus.git
 brew install --cask nnayz/zeus/zeus
 ```
 

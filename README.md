@@ -8,6 +8,8 @@ shells in parallel — across git worktrees or on remote hosts — each with a l
 (working / needs-you / done) and tmux-like persistence: closing the app never kills a session,
 and a daemon restart brings conversations back.
 
+![Zeus desktop app preview](docs/src/images/zeus-preview.png)
+
 ## Install
 
 ```sh
@@ -61,34 +63,27 @@ Two processes, one wire protocol:
 - **`zeus`** — the desktop app: Rust + [GPUI](https://github.com/zed-industries/zed). Owns the
   window, sidebar, terminal renderer, command palette, and usage accounting. Lives in
   [`zeus/`](zeus/).
-- **`zeusd`** — a headless Swift daemon, launched by the app and outliving it. Owns PTYs and
-  child agent processes, an offset-addressed output log per session (for detach and replay), a
-  headless terminal emulator for status detection, the session registry and persistence,
-  worktrees, and the control socket.
+- **`zeusd-rs`** — the local Engine, launched by the app and outliving it. Owns PTYs and
+  child agent processes, session registry and persistence, worktrees, and the control socket.
 
-`zeus` is also the CLI: the MCP shim injected into agents, the hook and notify forwarders, and
-`status`/`doctor`. `zeusd-holder` owns the PTY master so sessions survive a daemon restart.
-
-> **A Rust port of the engine is in progress** in `zeus/crates/zeus-engine`, so that zeus can run
-> on Linux and Windows. It is not shipped — the released app runs the Swift daemon above. See
-> [`zeus/PORT.md`](zeus/PORT.md) for what is done and what is left.
+`zeus` is also the CLI (a separate binary in `Resources/bin`): the MCP shim injected into agents,
+the hook and notify forwarders, and `status`/`doctor`. `zeus-holder` owns the PTY master so
+sessions survive an Engine restart.
 
 ## Agent manifests
 
 Agent support is data, not code. Each agent is one JSON file in
-`Sources/ZeusCore/Resources/manifests/` describing how to spawn it, how to resume, which keys
+`zeus/crates/zeus-engine/manifests/` describing how to spawn it, how to resume, which keys
 approve or deny a prompt, and the screen rules that decide whether it is working, waiting, or
 done.
 
 ## Building from source
 
-Needs both toolchains: Rust (pinned in `zeus/rust-toolchain.toml`) and Swift 6 with the Xcode
-command-line tools. The first Rust build compiles GPUI from a pinned Zed revision and takes a
-while.
+Needs Rust (pinned in `zeus/rust-toolchain.toml`). The first build compiles GPUI from a pinned
+Zed revision and takes a while.
 
 ```sh
-swift build && swift test                  # engine
-(cd zeus && cargo build)                   # app
+(cd zeus && cargo build)                   # workspace
 (cd zeus && cargo run -p zeus-app)         # run the app from source
 
 zeus/scripts/package.sh                    # full bundle

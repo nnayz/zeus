@@ -5,32 +5,21 @@ and transactional local↔cloud handoff, see
 [Remote nodes](../docs/src/remote-nodes.md).
 
 `zeus` is the Rust + GPUI desktop app, shipped self-contained: the app bundle
-carries the daemon (`zeusd`), the session holders that keep agents alive
-across daemon restarts and upgrades, the `zeus` CLI, and the MCP proxy. The
+carries the Engine (`zeusd-rs`), the session holders that keep agents alive
+across Engine restarts and upgrades, the `zeus` CLI, and the MCP proxy. The
 workspace holds the protocol/client core, the session engine, terminal
 renderer, shared design system, session store, usage accounting, and
 window/sidebar shell. [`PLAN.md`](PLAN.md) is the historical record of the
-port from the retired Swift client, kept for its architecture and coexistence
-notes.
+port from the retired Swift client.
 
 ## Engine
 
-Sessions are owned by *holder* processes, not the daemon: the daemon can
+Sessions are owned by *holder* processes, not the Engine: the Engine can
 crash, upgrade, or be swapped out and every live agent keeps running, to be
-adopted by whatever daemon starts next.
+adopted by whatever Engine starts next.
 
-Two daemons ship in the bundle. `zeusd` (Swift) is the default.
-`zeusd-rs` is the cross-platform Rust engine
-([`crates/zeus-engine`](crates/zeus-engine)) — same socket, same wire
-protocol, same on-disk state, same holders, so flipping between them never
-loses a session. Opt a machine in with:
-
-```sh
-ZEUSD_PATH=/Applications/zeus.app/Contents/Resources/bin/zeusd-rs open -a zeus
-```
-
-[`PORT.md`](PORT.md) tracks the port layer by layer, including the remaining
-gaps that keep the Swift daemon the default for now.
+`zeusd-rs` ([`crates/zeus-engine`](crates/zeus-engine)) is the only daemon. The
+app refuses any other `Hello` identity.
 
 ## Install
 

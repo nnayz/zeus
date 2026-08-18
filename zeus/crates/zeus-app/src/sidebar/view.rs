@@ -28,14 +28,12 @@ use crate::store::{
     ClickModifiers, DirectoryListingState, SessionStore, SpawnOptions, StoreEffect, StoreRuntime,
 };
 use crate::updates::{UpdateCommand, UpdatePhase, UpdateState};
-use crate::usage::{UsageFormat, UsageSnapshot};
 
 use super::{
     DragItem, Popover, PreviewScenario, SidebarPreviewFixture, SidebarUiState, move_before,
     move_to_end,
 };
 
-const PREVIEW_USAGE: f64 = 4.82;
 const SIDEBAR_TITLE_SIZE: f32 = 14.0;
 const SIDEBAR_SUBTITLE_SIZE: f32 = 12.0;
 const SIDEBAR_ROW_HEIGHT: f32 = 28.0;
@@ -107,7 +105,6 @@ pub struct Sidebar {
     shortcut_ranks: HashMap<SessionId, usize>,
     rename_focus: FocusHandle,
     hover_generation: u64,
-    usage: Option<UsageSnapshot>,
     update: UpdateState,
     /// When visibility last flipped, so a held ⌘B cannot outrun the slide.
     last_toggle: Option<Instant>,
@@ -185,13 +182,11 @@ impl Sidebar {
             shortcut_ranks: HashMap::new(),
             rename_focus: cx.focus_handle(),
             hover_generation: 0,
-            usage: None,
             update: UpdateState::default(),
             last_toggle: None,
             preview,
             directory_picker_open: false,
         };
-        sidebar.ui.preview_account = preview;
         // Preview-only hook so headless screenshots can verify popover layout.
         if preview && std::env::var("ZEUS_SIDEBAR_POPOVER").is_ok_and(|value| value == "new-agent")
         {
@@ -229,11 +224,6 @@ impl Sidebar {
 
     pub fn set_update(&mut self, state: UpdateState, cx: &mut Context<Self>) {
         self.update = state;
-        cx.notify();
-    }
-
-    pub fn set_usage(&mut self, snapshot: UsageSnapshot, cx: &mut Context<Self>) {
-        self.usage = Some(snapshot);
         cx.notify();
     }
 
@@ -1658,84 +1648,19 @@ impl Sidebar {
         Some(pill.into_any_element())
     }
 
-    fn account_footer(&self, colors: SemanticColors, cx: &mut Context<Self>) -> AnyElement {
-        let hovered = self.ui.hovered_control == Some("account");
-        let cost = if self.preview {
-            Some(PREVIEW_USAGE)
-        } else {
-            self.usage
-                .map(|snapshot| snapshot.today().cost)
-                .filter(|cost| *cost > 0.0)
-        };
-        div()
-            .flex_none()
-            .px(px(Space::INSET))
-            .pt(px(4.0))
-            .pb(px(6.0))
-            .border_t_1()
-            .border_color(colors.primary.alpha(0.06))
-            .children(self.update_pill(colors, cx))
-            .child(
-                div()
-                    .id("account")
-                    .px(px(Space::ROW_H))
-                    .h(px(SIDEBAR_ROW_HEIGHT))
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .rounded(px(Radius::ROW))
-                    .bg(Fill::hover(colors, hovered))
-                    .cursor_pointer()
-                    .on_hover(cx.listener(|this, is_hovered: &bool, _, cx| {
-                        this.ui.hovered_control = is_hovered.then_some("account");
-                        cx.notify();
-                    }))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.ui.popover = Some(Popover::Account);
-                        cx.notify();
-                    }))
-                    .child(
-                        div()
-                            .w(px(16.0))
-                            .text_center()
-                            .text_size(px(13.0))
-                            .text_color(colors.secondary)
-                            .child(sf_symbol("person.crop.circle", 12.5, colors.secondary)),
-                    )
-                    .child(
-                        div()
-                            .min_w(px(0.0))
-                            .flex_1()
-                            .whitespace_nowrap()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .text_size(px(SIDEBAR_TITLE_SIZE))
-                            .text_color(colors.text(zeus_ui::TextTone::Label))
-                            .child(if self.preview {
-                                "preview@zeus.local"
-                            } else {
-                                "Local agents"
-                            }),
-                    )
-                    .when_some(cost, |row, cost| {
-                        row.child(
-                            div()
-                                .font_family(crate::fonts::mono_family())
-                                .text_size(px(Typo::META_MONO.size))
-                                .text_color(colors.tertiary)
-                                .child(UsageFormat::money(cost)),
-                        )
-                    })
-                    .child(div().text_size(px(9.0)).text_color(colors.tertiary).child(
-                        sf_symbol_weighted(
-                            "chevron.up.chevron.down",
-                            8.5,
-                            SymbolWeight::Semibold,
-                            colors.tertiary,
-                        ),
-                    )),
-            )
-            .into_any_element()
+    fn update_footer(&self, colors: SemanticColors, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let pill = self.update_pill(colors, cx)?;
+        Some(
+            div()
+                .flex_none()
+                .px(px(Space::INSET))
+                .pt(px(4.0))
+                .pb(px(6.0))
+                .border_t_1()
+                .border_color(colors.primary.alpha(0.06))
+                .child(pill)
+                .into_any_element(),
+        )
     }
 
     fn popover(
@@ -1748,7 +1673,6 @@ impl Sidebar {
             Popover::NewAgent { directory, host } => {
                 Some(self.new_agent_popover(directory, host, colors, window, cx))
             }
-            Popover::Account => Some(self.account_popover(colors, window, cx)),
             Popover::ProjectActions { id, position } => {
                 Some(self.project_actions_popover(id, position, colors, window, cx))
             }
@@ -1791,19 +1715,6 @@ impl Sidebar {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let (position, anchor) = self.popover_edge(top, false, window);
-        self.popover_shell_at(position, anchor, 244.0, child, colors, cx)
-    }
-
-    /// Anchors above the account footer (Swift: popover opens upward).
-    fn popover_shell_above_footer(
-        &self,
-        child: impl IntoElement,
-        colors: SemanticColors,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let footer_top = f32::from(window.viewport_size().height) - (SIDEBAR_ROW_HEIGHT + 11.0);
-        let (position, anchor) = self.popover_edge(footer_top, true, window);
         self.popover_shell_at(position, anchor, 244.0, child, colors, cx)
     }
 
@@ -2501,247 +2412,6 @@ impl Sidebar {
         }
         panel.into_any_element()
     }
-
-    /// Version line in the account popover, doubling as the manual check.
-    ///
-    /// Whatever the pill is showing wins here, so the popover never contradicts
-    /// the footer two pixels above it; with nothing pending it falls back to
-    /// the running version and a click starts a check.
-    fn update_menu_row(&self, colors: SemanticColors, cx: &mut Context<Self>) -> AnyElement {
-        let unsupported = matches!(self.update.phase, UpdatePhase::Unsupported(_));
-        let command = match &self.update.phase {
-            UpdatePhase::Available(_) => Some(UpdateCommand::Download),
-            UpdatePhase::Ready(_) => Some(UpdateCommand::Install),
-            UpdatePhase::Checking | UpdatePhase::Downloading { .. } | UpdatePhase::Installing => {
-                None
-            }
-            _ if unsupported => None,
-            _ => Some(UpdateCommand::Check {
-                user_initiated: true,
-            }),
-        };
-        let label = if self.preview {
-            format!("zeus {}", crate::updates::CURRENT_VERSION)
-        } else {
-            self.update.summary()
-        };
-        let mut row = div()
-            .id("account-version")
-            .mx(px(6.0))
-            .px(px(8.0))
-            .h(px(28.0))
-            .flex()
-            .items_center()
-            .justify_between()
-            .gap(px(8.0))
-            .rounded(px(Radius::ROW))
-            .text_size(px(Typo::ROW.size))
-            .text_color(if unsupported {
-                colors.tertiary
-            } else {
-                colors.primary
-            })
-            .child(
-                div()
-                    .min_w(px(0.0))
-                    .flex_1()
-                    .whitespace_nowrap()
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .child(label),
-            );
-        if let Some(command) = command {
-            let action = match command {
-                UpdateCommand::Download => "Download",
-                UpdateCommand::Install => "Restart",
-                _ => "Check",
-            };
-            row = row
-                .cursor_pointer()
-                .hover(move |element| element.bg(colors.primary.alpha(0.06)))
-                .child(
-                    div()
-                        .flex_none()
-                        .text_size(px(Typo::META.size))
-                        .text_color(colors.secondary)
-                        .child(action),
-                )
-                .on_click(cx.listener(move |this, _, _, cx: &mut Context<Self>| {
-                    cx.emit(SidebarEvent::Update(command.clone()));
-                    this.ui.popover = None;
-                    cx.notify();
-                }));
-        }
-        row.into_any_element()
-    }
-
-    fn account_popover(
-        &self,
-        colors: SemanticColors,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let mut usage = div()
-            .flex()
-            .flex_col()
-            .child(section_label("Usage", colors));
-        if self.preview {
-            usage = usage
-                .child(usage_row("Session", "resets in 2h 14m", "$2.31", colors))
-                .child(usage_row("Today", "1.8M tokens", "$4.82", colors))
-                .child(usage_row("This month", "", "$86.40", colors));
-        } else if let Some(snapshot) = self.usage {
-            usage = usage
-                .child(usage_row(
-                    "Session",
-                    snapshot
-                        .session_remaining_seconds
-                        .map(|seconds| format!("resets in {}", compact_duration(seconds)))
-                        .as_deref()
-                        .unwrap_or("idle"),
-                    &snapshot
-                        .session_cost
-                        .map(UsageFormat::money)
-                        .unwrap_or_else(|| "—".into()),
-                    colors,
-                ))
-                .child(usage_row(
-                    "Today",
-                    &format!(
-                        "{} tokens",
-                        UsageFormat::tokens(snapshot.today().total_tokens())
-                    ),
-                    &UsageFormat::money(snapshot.today().cost),
-                    colors,
-                ))
-                .child(usage_row(
-                    "This month",
-                    "",
-                    &UsageFormat::money(snapshot.month().cost),
-                    colors,
-                ));
-        } else {
-            usage = usage.child(
-                div()
-                    .px(px(14.0))
-                    .py(px(6.0))
-                    .text_size(px(Typo::ROW.size))
-                    .text_color(colors.tertiary)
-                    .child("Measuring…"),
-            );
-        }
-        let content = div()
-            .flex()
-            .flex_col()
-            .child(usage)
-            .child(div().mt(px(8.0)).h(px(1.0)).bg(colors.primary.alpha(0.06)))
-            .child(section_label("Version", colors))
-            .child(self.update_menu_row(colors, cx))
-            .child(div().mt(px(8.0)).h(px(1.0)).bg(colors.primary.alpha(0.06)))
-            .child(section_label("Remote", colors))
-            .child(
-                div()
-                    .id("quick-add-remote-host")
-                    .debug_selector(|| "quick-add-remote-host".into())
-                    .mx(px(6.0))
-                    .px(px(8.0))
-                    .h(px(30.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .rounded(px(Radius::ROW))
-                    .cursor_pointer()
-                    .hover(move |element| element.bg(colors.primary.alpha(0.06)))
-                    .text_size(px(Typo::ROW.size))
-                    .text_color(colors.primary)
-                    .child(sf_symbol("plus", 11.0, colors.secondary))
-                    .child(div().flex_1().child("Add remote host"))
-                    .child(
-                        div()
-                            .text_size(px(Typo::META.size))
-                            .text_color(colors.tertiary)
-                            .child("SSH"),
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.ui.popover = None;
-                        cx.emit(SidebarEvent::AddRemoteHost);
-                        cx.notify();
-                    })),
-            )
-            .child(div().mt(px(8.0)).h(px(1.0)).bg(colors.primary.alpha(0.06)))
-            .child(section_label("Account", colors))
-            .child(
-                div()
-                    .id("account-active")
-                    .mx(px(6.0))
-                    .px(px(8.0))
-                    .h(px(28.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .rounded(px(Radius::ROW))
-                    .text_size(px(Typo::ROW.size))
-                    .text_color(colors.primary)
-                    .child(sf_symbol_weighted(
-                        "checkmark",
-                        10.0,
-                        SymbolWeight::Semibold,
-                        colors.secondary,
-                    ))
-                    .child(if self.preview {
-                        "preview@zeus.local"
-                    } else {
-                        "Local agents"
-                    }),
-            )
-            .child(div().mt(px(8.0)).h(px(1.0)).bg(colors.primary.alpha(0.06)))
-            .child(section_label("Help", colors))
-            .child(
-                div()
-                    .id("open-documentation")
-                    .debug_selector(|| "open-documentation".into())
-                    .mx(px(6.0))
-                    .px(px(8.0))
-                    .h(px(30.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .rounded(px(Radius::ROW))
-                    .cursor_pointer()
-                    .hover(move |element| element.bg(colors.primary.alpha(0.06)))
-                    .text_size(px(Typo::ROW.size))
-                    .text_color(colors.primary)
-                    .child(sf_symbol("link", 11.0, colors.secondary))
-                    .child(div().flex_1().child("Documentation"))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.ui.popover = None;
-                        cx.open_url(crate::settings::DOCS_URL);
-                        cx.notify();
-                    })),
-            )
-            .child(
-                div()
-                    .id("dismiss-account")
-                    .mx(px(6.0))
-                    .my(px(6.0))
-                    .px(px(8.0))
-                    .h(px(28.0))
-                    .flex()
-                    .items_center()
-                    .rounded(px(Radius::ROW))
-                    .cursor_pointer()
-                    .hover(move |element| element.bg(colors.primary.alpha(0.06)))
-                    .text_size(px(Typo::ROW.size))
-                    .text_color(colors.secondary)
-                    .child("Done")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.ui.popover = None;
-                        cx.notify();
-                    })),
-            );
-        self.popover_shell_above_footer(content, colors, window, cx)
-    }
-
     fn project_actions_popover(
         &self,
         id: ProjectId,
@@ -3554,7 +3224,7 @@ impl Render for Sidebar {
             .overflow_y_scroll()
             .px(px(Space::INSET))
             .pt(px(2.0))
-            .pb(px(SIDEBAR_ROW_HEIGHT + 17.0))
+            .pb(px(10.0))
             .flex()
             .flex_col()
             .gap(px(3.0));
@@ -3590,7 +3260,7 @@ impl Render for Sidebar {
                     .children(self.scroll_fades(colors)),
             );
         }
-        root = root.child(self.account_footer(colors, cx));
+        root = root.children(self.update_footer(colors, cx));
         if let Some(popover) = self.popover(colors, window, cx) {
             root = root.child(popover);
         }
@@ -3835,47 +3505,6 @@ fn count_label(verb: &str, count: usize) -> String {
     }
 }
 
-fn section_label(label: &'static str, colors: SemanticColors) -> AnyElement {
-    div()
-        .px(px(14.0))
-        .pt(px(6.0))
-        .pb(px(2.0))
-        .text_size(px(Typo::SECTION_HEADER.size))
-        .font_weight(Typo::SECTION_HEADER.weight)
-        .text_color(colors.tertiary)
-        .child(label)
-        .into_any_element()
-}
-
-fn usage_row(label: &str, detail: &str, value: &str, colors: SemanticColors) -> AnyElement {
-    div()
-        .px(px(14.0))
-        .h(px(Metrics::MENU_ROW_HEIGHT))
-        .flex()
-        .items_center()
-        .gap(px(8.0))
-        .text_size(px(Typo::ROW.size))
-        .text_color(colors.text(zeus_ui::TextTone::Label))
-        .child(label.to_owned())
-        .child(div().flex_1())
-        .when(!detail.is_empty(), |row| {
-            row.child(
-                div()
-                    .text_size(px(Typo::META.size))
-                    .text_color(colors.tertiary)
-                    .child(detail.to_owned()),
-            )
-        })
-        .child(
-            div()
-                .font_family(crate::fonts::mono_family())
-                .text_size(px(Typo::META_MONO.size))
-                .text_color(colors.secondary)
-                .child(value.to_owned()),
-        )
-        .into_any_element()
-}
-
 fn hover_detail(icon: &str, text: &str, mono: bool, colors: SemanticColors) -> AnyElement {
     div()
         .flex()
@@ -4109,15 +3738,6 @@ fn session_title_available_width(
     available.max(36.0)
 }
 
-fn compact_duration(seconds: i64) -> String {
-    let minutes = (seconds / 60).max(0);
-    if minutes >= 60 {
-        format!("{}h {}m", minutes / 60, minutes % 60)
-    } else {
-        format!("{minutes}m")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use gpui::{Modifiers, TestAppContext};
@@ -4141,12 +3761,6 @@ mod tests {
         let result = clamp_path("/Users/preview/Projects/a/very/long/path/settings-kit");
         assert!(result.ends_with("/settings-kit"));
         assert!(result.contains('…'));
-    }
-
-    #[test]
-    fn compact_duration_matches_usage_copy() {
-        assert_eq!(compact_duration(8_040), "2h 14m");
-        assert_eq!(compact_duration(540), "9m");
     }
 
     #[test]
@@ -4360,20 +3974,6 @@ mod tests {
             sidebar.read_with(cx, |sidebar, _| sidebar.ui.popover.clone()),
             None
         );
-    }
-
-    #[gpui::test]
-    fn account_popover_exposes_the_remote_host_shortcut(cx: &mut TestAppContext) {
-        let (_view, cx) = cx.add_window_view(|_, cx| {
-            let sidebar = cx.new(|cx| {
-                let mut sidebar = Sidebar::new(None, true, PreviewScenario::Typical, cx);
-                sidebar.ui.popover = Some(Popover::Account);
-                sidebar
-            });
-            SidebarPopoverHarness { sidebar }
-        });
-
-        assert!(cx.debug_bounds("quick-add-remote-host").is_some());
     }
 
     #[gpui::test]

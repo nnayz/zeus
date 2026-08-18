@@ -11,11 +11,11 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gpui::{
-    Animation, AnimationExt, AnyElement, App, Context, DragMoveEvent, Entity, EventEmitter,
+    Anchor, Animation, AnimationExt, AnyElement, App, Context, DragMoveEvent, Entity, EventEmitter,
     FocusHandle, Focusable, FontWeight, KeyDownEvent, ListHorizontalSizingBehavior, MouseButton,
     Render, ScrollStrategy, SharedString, StatefulInteractiveElement, Task,
-    UniformListScrollHandle, Window, div, ease_out_quint, point, prelude::*, px, rgba,
-    uniform_list,
+    UniformListScrollHandle, Window, anchored, deferred, div, ease_out_quint, point, prelude::*,
+    px, rgba, uniform_list,
 };
 use zeus_proto::{
     AgentKind as ProtoAgentKind, ArtifactKind, PrCheck, PrDiscussionItem, PullRequestStatus,
@@ -38,6 +38,8 @@ use crate::markdown_view::render_markdown;
 use crate::query_editor::{self, ClipboardEdit, Edit, QueryEditor};
 use crate::review_prompt::{ReviewEvidence, ReviewLayer, ReviewPrompt};
 use crate::store::{InspectorTab, StoreRuntime};
+use crate::updates::{UpdateCommand, UpdatePhase, UpdateState};
+use crate::usage::{UsageFormat, UsageSnapshot};
 
 const DIFF_ROW_HEIGHT: f32 = 20.0;
 const GUTTER_WIDTH: f32 = 68.0;
@@ -49,8 +51,9 @@ const SCROLLBAR_MIN_THUMB: f32 = 34.0;
 const TRAFFIC_LIGHT_LANE: f32 =
     Metrics::TOOLBAR_TRAFFIC_LIGHT_SAFE_RIGHT - INSPECTOR_HEADER_LEADING_INSET;
 const INSPECTOR_HEADER_LEADING_INSET: f32 = 8.0;
+const ACCOUNT_MENU_WIDTH: f32 = 244.0;
 
-/// Narrowest width that still fits the whole tab strip and the close button.
+/// Narrowest width that still fits the tab strip, panel toggle, and account avatar.
 pub fn min_width(mirrored: bool) -> f32 {
     300.0 + if mirrored { TRAFFIC_LIGHT_LANE } else { 0.0 }
 }
@@ -78,9 +81,11 @@ struct ScrollbarMetrics {
     thumb_top: f32,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub enum InspectorEvent {
     Close,
+    AddRemoteHost,
+    Update(UpdateCommand),
 }
 
 impl InspectorTab {
@@ -193,6 +198,10 @@ pub struct WorkbenchInspector {
     scroll: UniformListScrollHandle,
     scrollbar_interaction: ScrollbarInteraction,
     scrollbar_layout_primed: bool,
+    account_open: bool,
+    preview_account: bool,
+    usage: Option<UsageSnapshot>,
+    update: UpdateState,
     refresh_task: Option<Task<()>>,
     poll_task: Option<Task<()>>,
     _store_changes: Task<()>,
@@ -274,6 +283,10 @@ impl WorkbenchInspector {
             scroll: UniformListScrollHandle::new(),
             scrollbar_interaction: ScrollbarInteraction::default(),
             scrollbar_layout_primed: false,
+            account_open: false,
+            preview_account: false,
+            usage: None,
+            update: UpdateState::default(),
             refresh_task: None,
             poll_task: None,
             _store_changes: store_changes,
@@ -292,6 +305,7 @@ impl WorkbenchInspector {
             // *periodic* poll below, not this edge-triggered refresh.
             self.refresh(true, cx);
         } else {
+            self.account_open = false;
             self.comparison_menu_open = false;
             self.files_open = false;
             self.ask_draft = None;
@@ -299,6 +313,20 @@ impl WorkbenchInspector {
             self.ask_query.clear();
         }
         self.reconcile_diff_polling(cx);
+        cx.notify();
+    }
+
+    pub fn set_preview_account(&mut self, preview: bool) {
+        self.preview_account = preview;
+    }
+
+    pub fn set_usage(&mut self, snapshot: UsageSnapshot, cx: &mut Context<Self>) {
+        self.usage = Some(snapshot);
+        cx.notify();
+    }
+
+    pub fn set_update(&mut self, state: UpdateState, cx: &mut Context<Self>) {
+        self.update = state;
         cx.notify();
     }
 
@@ -744,6 +772,361 @@ impl WorkbenchInspector {
         document
     }
 
+    fn account_avatar(&self, colors: SemanticColors, cx: &mut Context<Self>) -> AnyElement {
+        let open = self.account_open;
+        let noteworthy_update = self.update.is_noteworthy();
+        let initial = if self.preview_account { "P" } else { "Z" };
+        div()
+            .id("account-avatar")
+            .debug_selector(|| "INSPECTOR_ACCOUNT_AVATAR".to_owned())
+            .relative()
+            .size(px(Metrics::TOOLBAR_CONTROL_SIZE))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_full()
+            .cursor_pointer()
+            .bg(if open {
+                colors.primary.alpha(0.10)
+            } else {
+                colors.primary.alpha(0.0)
+            })
+            .hover(move |button| button.bg(colors.primary.alpha(if open { 0.13 } else { 0.06 })))
+            .child(
+                div()
+                    .size(px(21.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_full()
+                    .bg(colors.primary.alpha(if open { 0.16 } else { 0.10 }))
+                    .border_1()
+                    .border_color(colors.primary.alpha(if open { 0.20 } else { 0.12 }))
+                    .text_size(px(10.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(if open {
+                        colors.primary
+                    } else {
+                        colors.secondary
+                    })
+                    .child(initial),
+            )
+            .when(noteworthy_update, |avatar| {
+                avatar.child(
+                    div()
+                        .absolute()
+                        .top(px(2.0))
+                        .right(px(1.0))
+                        .size(px(6.0))
+                        .rounded_full()
+                        .bg(zeus_ui::Ink::FRESH),
+                )
+            })
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.account_open = !this.account_open;
+                cx.notify();
+                cx.stop_propagation();
+            }))
+            .into_any_element()
+    }
+
+    fn account_update_row(&self, colors: SemanticColors, cx: &mut Context<Self>) -> AnyElement {
+        let unsupported = matches!(self.update.phase, UpdatePhase::Unsupported(_));
+        let command = match &self.update.phase {
+            UpdatePhase::Available(_) => Some(UpdateCommand::Download),
+            UpdatePhase::Ready(_) => Some(UpdateCommand::Install),
+            UpdatePhase::Checking | UpdatePhase::Downloading { .. } | UpdatePhase::Installing => {
+                None
+            }
+            _ if unsupported => None,
+            _ => Some(UpdateCommand::Check {
+                user_initiated: true,
+            }),
+        };
+        let label = if self.preview_account {
+            format!("zeus {}", crate::updates::CURRENT_VERSION)
+        } else {
+            self.update.summary()
+        };
+        let mut row = div()
+            .id("inspector-account-version")
+            .mx(px(6.0))
+            .px(px(8.0))
+            .h(px(28.0))
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap(px(8.0))
+            .rounded(px(Radius::ROW))
+            .text_size(px(Typo::ROW.size))
+            .text_color(if unsupported {
+                colors.tertiary
+            } else {
+                colors.primary
+            })
+            .child(
+                div()
+                    .min_w(px(0.0))
+                    .flex_1()
+                    .whitespace_nowrap()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .child(label),
+            );
+        if let Some(command) = command {
+            let action = match command {
+                UpdateCommand::Download => "Download",
+                UpdateCommand::Install => "Restart",
+                _ => "Check",
+            };
+            row = row
+                .cursor_pointer()
+                .hover(move |element| element.bg(colors.primary.alpha(0.06)))
+                .child(
+                    div()
+                        .flex_none()
+                        .text_size(px(Typo::META.size))
+                        .text_color(colors.secondary)
+                        .child(action),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.account_open = false;
+                    cx.emit(InspectorEvent::Update(command.clone()));
+                    cx.notify();
+                }));
+        }
+        row.into_any_element()
+    }
+
+    fn account_popover(
+        &self,
+        colors: SemanticColors,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let mut usage = div()
+            .flex()
+            .flex_col()
+            .child(account_section_label("Usage", colors));
+        if self.preview_account {
+            usage = usage
+                .child(account_usage_row(
+                    "Session",
+                    "resets in 2h 14m",
+                    "$2.31",
+                    colors,
+                ))
+                .child(account_usage_row("Today", "1.8M tokens", "$4.82", colors))
+                .child(account_usage_row("This month", "", "$86.40", colors));
+        } else if let Some(snapshot) = self.usage {
+            usage = usage
+                .child(account_usage_row(
+                    "Session",
+                    snapshot
+                        .session_remaining_seconds
+                        .map(|seconds| format!("resets in {}", compact_duration(seconds)))
+                        .as_deref()
+                        .unwrap_or("idle"),
+                    &snapshot
+                        .session_cost
+                        .map(UsageFormat::money)
+                        .unwrap_or_else(|| "—".into()),
+                    colors,
+                ))
+                .child(account_usage_row(
+                    "Today",
+                    &format!(
+                        "{} tokens",
+                        UsageFormat::tokens(snapshot.today().total_tokens())
+                    ),
+                    &UsageFormat::money(snapshot.today().cost),
+                    colors,
+                ))
+                .child(account_usage_row(
+                    "This month",
+                    "",
+                    &UsageFormat::money(snapshot.month().cost),
+                    colors,
+                ));
+        } else {
+            usage = usage.child(
+                div()
+                    .px(px(14.0))
+                    .py(px(6.0))
+                    .text_size(px(Typo::ROW.size))
+                    .text_color(colors.tertiary)
+                    .child("Measuring…"),
+            );
+        }
+
+        let content = div()
+            .flex()
+            .flex_col()
+            .child(usage)
+            .child(div().mt(px(8.0)).h(px(1.0)).bg(colors.primary.alpha(0.06)))
+            .child(account_section_label("Version", colors))
+            .child(self.account_update_row(colors, cx))
+            .child(div().mt(px(8.0)).h(px(1.0)).bg(colors.primary.alpha(0.06)))
+            .child(account_section_label("Remote", colors))
+            .child(
+                div()
+                    .id("inspector-add-remote-host")
+                    .debug_selector(|| "INSPECTOR_ADD_REMOTE_HOST".to_owned())
+                    .mx(px(6.0))
+                    .px(px(8.0))
+                    .h(px(30.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .rounded(px(Radius::ROW))
+                    .cursor_pointer()
+                    .hover(move |element| element.bg(colors.primary.alpha(0.06)))
+                    .text_size(px(Typo::ROW.size))
+                    .text_color(colors.primary)
+                    .child(sf_symbol("plus", 11.0, colors.secondary))
+                    .child(div().flex_1().child("Add remote host"))
+                    .child(
+                        div()
+                            .text_size(px(Typo::META.size))
+                            .text_color(colors.tertiary)
+                            .child("SSH"),
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.account_open = false;
+                        cx.emit(InspectorEvent::AddRemoteHost);
+                        cx.notify();
+                    })),
+            )
+            .child(div().mt(px(8.0)).h(px(1.0)).bg(colors.primary.alpha(0.06)))
+            .child(account_section_label("Account", colors))
+            .child(
+                div()
+                    .id("inspector-account-active")
+                    .mx(px(6.0))
+                    .px(px(8.0))
+                    .h(px(28.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .rounded(px(Radius::ROW))
+                    .text_size(px(Typo::ROW.size))
+                    .text_color(colors.primary)
+                    .child(sf_symbol_weighted(
+                        "checkmark",
+                        10.0,
+                        SymbolWeight::Semibold,
+                        colors.secondary,
+                    ))
+                    .child(if self.preview_account {
+                        "preview@zeus.local"
+                    } else {
+                        "Local agents"
+                    }),
+            )
+            .child(div().mt(px(8.0)).h(px(1.0)).bg(colors.primary.alpha(0.06)))
+            .child(account_section_label("Help", colors))
+            .child(
+                div()
+                    .id("inspector-open-documentation")
+                    .mx(px(6.0))
+                    .px(px(8.0))
+                    .h(px(30.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .rounded(px(Radius::ROW))
+                    .cursor_pointer()
+                    .hover(move |element| element.bg(colors.primary.alpha(0.06)))
+                    .text_size(px(Typo::ROW.size))
+                    .text_color(colors.primary)
+                    .child(sf_symbol("link", 11.0, colors.secondary))
+                    .child(div().flex_1().child("Documentation"))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.account_open = false;
+                        cx.open_url(crate::settings::DOCS_URL);
+                        cx.notify();
+                    })),
+            )
+            .child(
+                div()
+                    .id("inspector-dismiss-account")
+                    .mx(px(6.0))
+                    .my(px(6.0))
+                    .px(px(8.0))
+                    .h(px(28.0))
+                    .flex()
+                    .items_center()
+                    .rounded(px(Radius::ROW))
+                    .cursor_pointer()
+                    .hover(move |element| element.bg(colors.primary.alpha(0.06)))
+                    .text_size(px(Typo::ROW.size))
+                    .text_color(colors.secondary)
+                    .child("Done")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.account_open = false;
+                        cx.notify();
+                    })),
+            );
+
+        let x = if self.mirrored() {
+            let width = self
+                .runtime
+                .store
+                .read()
+                .expect("session store lock poisoned")
+                .preferences()
+                .inspector_width
+                .max(min_width(true));
+            width - Metrics::TOOLBAR_EDGE_INSET
+        } else {
+            f32::from(window.viewport_size().width) - Metrics::TOOLBAR_EDGE_INSET
+        };
+        let position = point(px(x), px(Metrics::TITLE_BAR + 2.0));
+        div()
+            .absolute()
+            .inset_0()
+            .occlude()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.account_open = false;
+                    cx.notify();
+                }),
+            )
+            .child(
+                deferred(
+                    anchored()
+                        .position(position)
+                        .anchor(Anchor::TopRight)
+                        .snap_to_window_with_margin(px(8.0))
+                        .child(
+                            div()
+                                .w(px(ACCOUNT_MENU_WIDTH))
+                                .occlude()
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|_, _, _, cx| cx.stop_propagation()),
+                                )
+                                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                                    this.account_open = false;
+                                    cx.notify();
+                                }))
+                                .child(FloatingSurface::new(
+                                    colors,
+                                    div()
+                                        .rounded(px(Radius::PANEL))
+                                        .overflow_hidden()
+                                        .py(px(3.0))
+                                        .child(content),
+                                )),
+                        ),
+                )
+                .with_priority(2),
+            )
+            .into_any_element()
+    }
+
     fn render_header(
         &self,
         session: Option<&SessionRecord>,
@@ -858,7 +1241,6 @@ impl WorkbenchInspector {
                         .flex_none(),
                 )
             })
-            .child(tabs)
             .child(
                 div()
                     .id("toggle-inspector")
@@ -877,6 +1259,8 @@ impl WorkbenchInspector {
                         cx.stop_propagation();
                     })),
             )
+            .child(tabs)
+            .child(self.account_avatar(colors, cx))
     }
 
     fn render_info(
@@ -2176,6 +2560,12 @@ impl WorkbenchInspector {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.account_open && event.keystroke.key == "escape" {
+            self.account_open = false;
+            cx.notify();
+            cx.stop_propagation();
+            return;
+        }
         if self.ask_draft.is_some() {
             match event.keystroke.key.as_str() {
                 "escape" => {
@@ -2786,6 +3176,9 @@ impl Render for WorkbenchInspector {
         ));
         let direction = self.tab_direction;
         let ask_composer = self.render_ask_composer(colors, cx);
+        let account_popover = self
+            .account_open
+            .then(|| self.account_popover(colors, window, cx));
         div()
             .id("workbench-inspector")
             .size_full()
@@ -2808,6 +3201,7 @@ impl Render for WorkbenchInspector {
                 ),
             ))
             .when_some(ask_composer, |panel, composer| panel.child(composer))
+            .when_some(account_popover, |panel, popover| panel.child(popover))
     }
 }
 
@@ -2819,6 +3213,56 @@ fn section_label(label: &'static str, colors: SemanticColors) -> AnyElement {
         .text_color(colors.tertiary)
         .child(label)
         .into_any_element()
+}
+
+fn account_section_label(label: &'static str, colors: SemanticColors) -> AnyElement {
+    div()
+        .px(px(14.0))
+        .pt(px(6.0))
+        .pb(px(2.0))
+        .text_size(px(Typo::SECTION_HEADER.size))
+        .font_weight(Typo::SECTION_HEADER.weight)
+        .text_color(colors.tertiary)
+        .child(label)
+        .into_any_element()
+}
+
+fn account_usage_row(label: &str, detail: &str, value: &str, colors: SemanticColors) -> AnyElement {
+    div()
+        .px(px(14.0))
+        .h(px(Metrics::MENU_ROW_HEIGHT))
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .text_size(px(Typo::ROW.size))
+        .text_color(colors.text(zeus_ui::TextTone::Label))
+        .child(label.to_owned())
+        .child(div().flex_1())
+        .when(!detail.is_empty(), |row| {
+            row.child(
+                div()
+                    .text_size(px(Typo::META.size))
+                    .text_color(colors.tertiary)
+                    .child(detail.to_owned()),
+            )
+        })
+        .child(
+            div()
+                .font_family(crate::fonts::mono_family())
+                .text_size(px(Typo::META_MONO.size))
+                .text_color(colors.secondary)
+                .child(value.to_owned()),
+        )
+        .into_any_element()
+}
+
+fn compact_duration(seconds: i64) -> String {
+    let minutes = (seconds / 60).max(0);
+    if minutes >= 60 {
+        format!("{}h {}m", minutes / 60, minutes % 60)
+    } else {
+        format!("{minutes}m")
+    }
 }
 
 fn detail_row(
@@ -4364,6 +4808,41 @@ mod tests {
     }
 
     #[test]
+    fn compact_duration_matches_account_usage_copy() {
+        assert_eq!(compact_duration(8_040), "2h 14m");
+        assert_eq!(compact_duration(540), "9m");
+    }
+
+    #[gpui::test]
+    fn account_avatar_opens_the_account_menu(cx: &mut TestAppContext) {
+        let runtime = Arc::new(StoreRuntime::inert());
+        let tokio = Arc::new(
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime"),
+        );
+        let inspector_runtime = Arc::clone(&runtime);
+        let (harness, cx) = cx.add_window_view(move |_window, cx| {
+            let inspector = cx.new(|cx| {
+                let mut inspector = WorkbenchInspector::new(inspector_runtime, tokio, cx);
+                inspector.set_preview_account(true);
+                inspector
+            });
+            InspectorHarness { inspector }
+        });
+
+        let avatar = cx
+            .debug_bounds("INSPECTOR_ACCOUNT_AVATAR")
+            .expect("account avatar");
+        cx.simulate_click(avatar.center(), Modifiers::none());
+
+        let inspector = harness.read_with(cx, |harness, _| harness.inspector.clone());
+        assert!(inspector.read_with(cx, |inspector, _| inspector.account_open));
+        assert!(cx.debug_bounds("INSPECTOR_ADD_REMOTE_HOST").is_some());
+    }
+
+    #[test]
     fn background_git_refresh_keeps_the_last_settled_surface() {
         assert!(!should_show_blocking_git_loading(
             false,
@@ -4580,17 +5059,21 @@ mod tests {
         let toggle = cx
             .debug_bounds("INSPECTOR_TOGGLE")
             .expect("inspector toggle");
+        let avatar = cx
+            .debug_bounds("INSPECTOR_ACCOUNT_AVATAR")
+            .expect("account avatar");
 
+        assert!(toggle.right() <= info.left());
         assert!(info.right() <= changes.left());
         assert!(changes.right() <= code.left());
         assert!(code.right() <= artifacts.left());
-        assert!(artifacts.right() <= toggle.left());
+        assert!(artifacts.right() <= avatar.left());
         assert_eq!(
-            toggle.left() - artifacts.right(),
+            avatar.left() - artifacts.right(),
             px(Metrics::TOOLBAR_COMPACT_GAP),
-            "right-aligned tabs should sit directly beside the panel toggle"
+            "the account avatar should sit directly after the right-aligned tabs"
         );
-        assert!(toggle.right() <= px(min_width(false)));
+        assert!(avatar.right() <= px(min_width(false)));
 
         cx.simulate_click(changes.center(), Modifiers::none());
         let inspector = harness.read_with(cx, |harness, _| harness.inspector.clone());

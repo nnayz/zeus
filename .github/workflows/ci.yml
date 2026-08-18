@@ -32,9 +32,9 @@ jobs:
           grep -q 'app "zeus.app"' Casks/zeus.rb
 
   engine:
-    name: Swift engine (daemon + CLI)
+    name: Repo guards
     runs-on: macos-15
-    timeout-minutes: 30
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5.0.0
       - name: Validate shell scripts
@@ -50,33 +50,6 @@ jobs:
         run: |
           npm ci
           npm audit --omit=dev
-      # --no-parallel is load-bearing on CI. Run in parallel, every test starts
-      # at once, and the suite then stalls indefinitely on a 3-core runner: the
-      # PTY and holder tests block inside async contexts, and with that few
-      # cores the cooperative pool has no thread left to make progress on.
-      # A developer Mac has enough cores to hide it. Serial costs ~30s.
-      #
-      # SwiftPM also block-buffers when stdout is a pipe, so a test process that
-      # dies takes most of its console output with it — hence the xunit file.
-      # `script` gives the run a pty, which makes SwiftPM line-buffer. Piped, it
-      # block-buffers, and a test process that dies takes the tail of its output
-      # with it — so the log's last line is wherever the buffer happened to
-      # flush, not where the run actually stopped. That cost real debugging
-      # time. The xunit file is no help either: it is only written at the end.
-      - name: Test
-        env:
-          # Runner spawns and socket binds are far slower than on a dev Mac; the
-          # 5s liveness waits time out there. See waitUntil in the test helpers.
-          ZEUS_TEST_TIMEOUT_SCALE: "6"
-        run: |
-          set -o pipefail
-          script -q /dev/null swift test --no-parallel | tee "${RUNNER_TEMP}/test.log"
-          grep -q "Test run with .* passed" "${RUNNER_TEMP}/test.log"
-      - name: Where it stopped
-        if: failure()
-        run: tail -40 "${RUNNER_TEMP}/test.log" || true
-      - name: Release build
-        run: swift build -c release
 
   app:
     name: Rust app (zeus)
@@ -246,10 +219,14 @@ jobs:
           app="${RUNNER_TEMP}/zeus-dist/zeus.app"
           plutil -lint "${app}/Contents/Info.plist"
           test -x "${app}/Contents/Resources/bin/zeus"
+          test -x "${app}/Contents/Resources/bin/zeus-mcp"
           test -x "${app}/Contents/Resources/bin/zeusd-rs"
           test -x "${app}/Contents/Resources/bin/zeus-holder"
           test -x "${app}/Contents/Resources/bin/zeus-ssh-askpass"
+          test ! -d "${app}/Contents/Resources/bin/zeus_ZeusCore.bundle"
           test -f "${app}/Contents/Resources/bin/manifests/codex.json"
+          lipo "${app}/Contents/Resources/bin/zeus" -verify_arch arm64 x86_64
+          lipo "${app}/Contents/Resources/bin/zeus-mcp" -verify_arch arm64 x86_64
           lipo "${app}/Contents/Resources/bin/zeusd-rs" -verify_arch arm64 x86_64
           lipo "${app}/Contents/Resources/bin/zeus-holder" -verify_arch arm64 x86_64
           lipo "${app}/Contents/Resources/bin/zeus-ssh-askpass" -verify_arch arm64 x86_64
@@ -268,7 +245,6 @@ jobs:
         run: |
           npm ci
           npx playwright install chromium webkit firefox
-      - name: Run browser integration tests
-        env:
-          ZEUS_RUN_BROWSER_TESTS: "1"
-        run: swift test --filter BrowserPoolTests
+      - name: Run browser unit tests
+        working-directory: zeus
+        run: cargo test -p zeus-engine browser -- --nocapture

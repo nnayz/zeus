@@ -98,15 +98,16 @@ mkdir -p "${target_dir}"
 
 cd "${workspace_dir}"
 echo "==> Building ${display_name} (${profile})"
-# zeus-app does not pull zeusd-rs into target/<profile>/; build both so a
-# clean checkout launches against this tree's Engine instead of a missing or
-# stale binary (installed app / leftover debug build).
+# zeus-app does not pull the Engine or automation helpers into target/<profile>/.
+# Build all four so a clean checkout launches against this tree's binaries
+# instead of a missing or stale installed-app/debug helper.
 if (( ${#cargo_args[@]} > 0 )); then
     cargo build --package zeus-app --bin zeus --package zeus-engine --bin zeusd-rs \
-        --package zeus-cli --bin zeus-cli "${cargo_args[@]}"
+        --package zeus-cli --bin zeus-cli --package zeus-mcp --bin zeus-mcp \
+        "${cargo_args[@]}"
 else
     cargo build --package zeus-app --bin zeus --package zeus-engine --bin zeusd-rs \
-        --package zeus-cli --bin zeus-cli
+        --package zeus-cli --bin zeus-cli --package zeus-mcp --bin zeus-mcp
 fi
 
 binary="${target_dir}/${profile}/zeus"

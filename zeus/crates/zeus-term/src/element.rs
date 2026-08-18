@@ -340,7 +340,7 @@ impl TerminalElement {
             }),
             theme: TermTheme::default(),
             font: terminal_font,
-            font_size: px(13.0),
+            font_size: px(16.0),
             focus_handle: None,
             text_input: None,
             ime_state: Arc::new(Mutex::new(TerminalImeState::default())),

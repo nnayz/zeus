@@ -1576,6 +1576,24 @@ impl UtilitySurfaces {
                     colors,
                 ))
                 .child(setting_section(
+                    "Review and code",
+                    toggle_row(
+                        "Word wrap",
+                        "Wrap long lines in Review and Code instead of scrolling horizontally.",
+                        self.prefs.inspector_word_wrap,
+                        "toggle-inspector-word-wrap",
+                        colors,
+                        cx,
+                        |this, cx| {
+                            this.prefs.inspector_word_wrap = !this.prefs.inspector_word_wrap;
+                            this.persist_prefs();
+                            cx.refresh_windows();
+                            cx.notify();
+                        },
+                    ),
+                    colors,
+                ))
+                .child(setting_section(
                     "Behavior",
                     div()
                         .flex()
@@ -3184,6 +3202,7 @@ fn toggle_row(
 ) -> impl IntoElement {
     div()
         .id(id)
+        .debug_selector(move || id.to_owned())
         .min_h(px(SETTINGS_ROW_HEIGHT))
         .px(px(12.0))
         .flex()
@@ -4075,6 +4094,47 @@ mod tests {
         assert_eq!(dialog.center(), root.center());
         assert!(dialog.top() >= root.top());
         assert!(dialog.bottom() <= root.bottom());
+    }
+
+    #[gpui::test]
+    fn settings_word_wrap_toggle_persists_the_shared_inspector_preference(cx: &mut TestAppContext) {
+        let runtime = Arc::new(StoreRuntime::inert());
+        let runtime_for_view = Arc::clone(&runtime);
+        let tokio = Arc::new(
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime"),
+        );
+        let updates = crate::updates::inert();
+        let (view, cx) = cx.add_window_view(move |window, cx| {
+            let surfaces = cx.new(|cx| {
+                let mut surfaces =
+                    UtilitySurfaces::new(runtime_for_view, tokio, updates, window, cx);
+                surfaces.open_settings(cx);
+                surfaces
+            });
+            SettingsModalHarness {
+                surfaces,
+                background_events: Arc::new(AtomicUsize::new(0)),
+            }
+        });
+        let surfaces = view.read_with(cx, |harness, _| harness.surfaces.clone());
+        let toggle = cx
+            .debug_bounds("toggle-inspector-word-wrap")
+            .expect("word-wrap setting");
+
+        cx.simulate_click(toggle.center(), Modifiers::default());
+
+        assert!(surfaces.read_with(cx, |surfaces, _| surfaces.prefs.inspector_word_wrap));
+        assert!(
+            runtime
+                .store
+                .read()
+                .expect("session store lock poisoned")
+                .preferences()
+                .inspector_word_wrap
+        );
     }
 
     #[gpui::test]

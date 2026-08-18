@@ -1,5 +1,6 @@
 name: Docs
 
+# Hosts mdBook on Vercel (see docs/vercel.json).
 on:
   push:
     branches: [main]

@@ -73,7 +73,7 @@ jobs:
           node-version: "22"
 
       - name: Install Vercel CLI
-        run: npm install --global vercel@41.7.8
+        run: npm install --global vercel@47.2.2
 
       - name: Deploy preview
         if: github.event_name == 'pull_request'

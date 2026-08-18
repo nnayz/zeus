@@ -756,11 +756,17 @@ impl WorkbenchInspector {
         };
         let artifacts_count = session.map(artifact_count).filter(|count| *count > 0);
         let selected_tab = self.selected_tab;
+        let toggle_icon = if self.mirrored() {
+            "sidebar.left"
+        } else {
+            "sidebar.right"
+        };
         let mut tabs = div()
             .min_w(px(0.0))
             .flex_1()
             .flex()
             .items_center()
+            .justify_end()
             .gap(px(2.0));
 
         for tab in InspectorTab::ALL {
@@ -855,8 +861,8 @@ impl WorkbenchInspector {
             .child(tabs)
             .child(
                 div()
-                    .id("close-inspector")
-                    .debug_selector(|| "INSPECTOR_CLOSE".to_owned())
+                    .id("toggle-inspector")
+                    .debug_selector(|| "INSPECTOR_TOGGLE".to_owned())
                     .size(px(Metrics::TOOLBAR_CONTROL_SIZE))
                     .flex_none()
                     .flex()
@@ -865,12 +871,7 @@ impl WorkbenchInspector {
                     .rounded(px(Radius::BADGE))
                     .cursor_pointer()
                     .hover(move |button| button.bg(Fill::subtle(colors)))
-                    .child(sf_symbol_weighted(
-                        "xmark",
-                        13.5,
-                        SymbolWeight::Bold,
-                        colors.secondary,
-                    ))
+                    .child(sf_symbol(toggle_icon, 15.0, colors.secondary))
                     .on_click(cx.listener(|_, _, _, cx| {
                         cx.emit(InspectorEvent::Close);
                         cx.stop_propagation();
@@ -4348,7 +4349,7 @@ mod tests {
     impl Render for InspectorHarness {
         fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
             div()
-                .w(px(min_width(true)))
+                .w(px(min_width(false)))
                 .h_full()
                 .overflow_hidden()
                 .child(self.inspector.clone())
@@ -4564,9 +4565,10 @@ mod tests {
         });
         cx.run_until_parked();
 
-        let traffic_light_lane = cx
-            .debug_bounds("INSPECTOR_TRAFFIC_LIGHT_LANE")
-            .expect("traffic-light lane");
+        assert!(
+            cx.debug_bounds("INSPECTOR_TRAFFIC_LIGHT_LANE").is_none(),
+            "the trailing inspector must not reserve the leading window-button lane"
+        );
         let info = cx.debug_bounds("INSPECTOR_TAB_INFO").expect("Info tab");
         let changes = cx
             .debug_bounds("INSPECTOR_TAB_CHANGES")
@@ -4575,19 +4577,20 @@ mod tests {
         let artifacts = cx
             .debug_bounds("INSPECTOR_TAB_ARTIFACTS")
             .expect("Artifacts tab");
-        let close = cx.debug_bounds("INSPECTOR_CLOSE").expect("close button");
+        let toggle = cx
+            .debug_bounds("INSPECTOR_TOGGLE")
+            .expect("inspector toggle");
 
-        assert_eq!(
-            traffic_light_lane.right(),
-            px(Metrics::TOOLBAR_TRAFFIC_LIGHT_SAFE_RIGHT),
-            "the tab strip must begin after the complete macOS window-button cluster"
-        );
-        assert!(info.left() >= traffic_light_lane.right());
         assert!(info.right() <= changes.left());
         assert!(changes.right() <= code.left());
         assert!(code.right() <= artifacts.left());
-        assert!(artifacts.right() <= close.left());
-        assert!(close.right() <= px(min_width(true)));
+        assert!(artifacts.right() <= toggle.left());
+        assert_eq!(
+            toggle.left() - artifacts.right(),
+            px(Metrics::TOOLBAR_COMPACT_GAP),
+            "right-aligned tabs should sit directly beside the panel toggle"
+        );
+        assert!(toggle.right() <= px(min_width(false)));
 
         cx.simulate_click(changes.center(), Modifiers::none());
         let inspector = harness.read_with(cx, |harness, _| harness.inspector.clone());

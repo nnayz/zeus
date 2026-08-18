@@ -26,7 +26,7 @@ public typealias McpToolHandler = @Sendable (_ toolName: String, _ arguments: JS
 /// wires it to the process's stdin/stdout.
 public final class McpServer: @unchecked Sendable {
     public static let serverName = "zeus"
-    public static let serverVersion = "0.1.0"
+    public static let serverVersion = "0.0.1"
     public static let preferredProtocolVersion = "2025-06-18"
 
     private let tools: [McpToolDefinition]

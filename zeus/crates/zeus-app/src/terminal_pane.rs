@@ -2104,6 +2104,35 @@ impl TerminalPane {
             .into_any_element()
     }
 
+    fn render_inspector_reveal_control(
+        &self,
+        colors: SemanticColors,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let icon = if self.chrome.mirrored {
+            "sidebar.left"
+        } else {
+            "sidebar.right"
+        };
+        div()
+            .id("toggle-inspector")
+            .debug_selector(|| "TERMINAL_INSPECTOR_TOGGLE".into())
+            .size(px(Metrics::TOOLBAR_CONTROL_SIZE))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(Radius::BADGE))
+            .cursor_pointer()
+            .hover(move |button| button.bg(Fill::subtle(colors)))
+            .child(sf_symbol(icon, 15.0, colors.secondary))
+            .on_click(cx.listener(|_, _, _, cx| {
+                cx.emit(TerminalPaneEvent::ToggleInspector);
+                cx.stop_propagation();
+            }))
+            .into_any_element()
+    }
+
     fn render_header(
         &self,
         session: &SessionRecord,
@@ -2133,11 +2162,13 @@ impl TerminalPane {
         let traffic_light_lane = (shell_controls && self.chrome.traffic_light_lane)
             .then(|| self.render_traffic_light_lane());
         let inspector_open = self.chrome.inspector_open;
-        let inspector_icon = if mirrored {
-            "sidebar.left"
-        } else {
-            "sidebar.right"
-        };
+        // Keep the reveal control on the edge where the inspector returns:
+        // leading for the mirrored left panel, trailing for the right panel.
+        // While the inspector is open its own header owns this control.
+        let leading_inspector = (shell_controls && !inspector_open && mirrored)
+            .then(|| self.render_inspector_reveal_control(colors, cx));
+        let trailing_inspector = (shell_controls && !inspector_open && !mirrored)
+            .then(|| self.render_inspector_reveal_control(colors, cx));
         let visible_chip_count = visible_chip_count.min(chips.len());
         let overflow_count = chips.len().saturating_sub(visible_chip_count);
         let mut toolbar_links = div()
@@ -2191,6 +2222,7 @@ impl TerminalPane {
                     .gap(px(Metrics::TOOLBAR_ITEM_GAP))
                     .overflow_hidden()
                     .when_some(traffic_light_lane, |title, lane| title.child(lane))
+                    .when_some(leading_inspector, |title, control| title.child(control))
                     .when_some(leading_reveal, |title, control| title.child(control))
                     .child(sf_symbol("terminal", 15.0, colors.secondary))
                     .child(
@@ -2263,33 +2295,8 @@ impl TerminalPane {
                                     .child(kind.label()),
                             ),
                     )
-                    .when(shell_controls, |trailing| {
-                        trailing.child(
-                            div()
-                                .id("toggle-inspector")
-                                .size(px(Metrics::TOOLBAR_CONTROL_SIZE))
-                                .flex_none()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded(px(Radius::BADGE))
-                                .cursor_pointer()
-                                .when(inspector_open, |button| button.bg(Fill::subtle(colors)))
-                                .hover(move |button| button.bg(Fill::subtle(colors)))
-                                .child(sf_symbol(
-                                    inspector_icon,
-                                    15.0,
-                                    if inspector_open {
-                                        colors.primary
-                                    } else {
-                                        colors.secondary
-                                    },
-                                ))
-                                .on_click(cx.listener(|_, _, _, cx| {
-                                    cx.emit(TerminalPaneEvent::ToggleInspector);
-                                    cx.stop_propagation();
-                                })),
-                        )
+                    .when_some(trailing_inspector, |trailing, control| {
+                        trailing.child(control)
                     })
                     .when_some(trailing_reveal, |trailing, control| trailing.child(control)),
             )
@@ -4039,6 +4046,64 @@ mod tests {
         assert!(
             cx.debug_bounds("show-sidebar").is_some(),
             "collapsing the sidebar must leave a way to reveal it"
+        );
+    }
+
+    #[gpui::test]
+    fn mirrored_inspector_toggle_moves_between_the_middle_and_panel_headers(
+        cx: &mut TestAppContext,
+    ) {
+        let runtime = Arc::new(StoreRuntime::inert());
+        let session = fixture_session();
+        {
+            let mut store = runtime.store.write().expect("session store lock poisoned");
+            store.upsert_session(session.clone());
+            store.select(session.id);
+        }
+        let tokio = Arc::new(
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime"),
+        );
+
+        let (pane, cx) = cx.add_window_view(move |window, cx| {
+            let mut pane = TerminalPane::new(runtime, tokio, window, cx);
+            pane.set_shell_chrome(
+                ShellChrome {
+                    sidebar_visible: true,
+                    inspector_open: false,
+                    mirrored: true,
+                    ..ShellChrome::default()
+                },
+                cx,
+            );
+            pane
+        });
+
+        let toggle = cx
+            .debug_bounds("TERMINAL_INSPECTOR_TOGGLE")
+            .expect("closed left inspector should reveal from the middle toolbar");
+        assert!(
+            toggle.left() < px(100.0),
+            "the left inspector reveal belongs on the middle panel's leading edge"
+        );
+
+        pane.update(cx, |pane, cx| {
+            pane.set_shell_chrome(
+                ShellChrome {
+                    sidebar_visible: true,
+                    inspector_open: true,
+                    mirrored: true,
+                    ..ShellChrome::default()
+                },
+                cx,
+            );
+        });
+
+        assert!(
+            cx.debug_bounds("TERMINAL_INSPECTOR_TOGGLE").is_none(),
+            "the open inspector owns the toggle instead of duplicating it in the middle"
         );
     }
 

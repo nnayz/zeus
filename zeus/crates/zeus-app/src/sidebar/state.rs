@@ -3,7 +3,7 @@ use zeus_proto::{ProjectId, SessionId};
 
 use crate::query_editor::QueryEditor;
 
-pub const DEFAULT_SIDEBAR_WIDTH: f32 = 232.0;
+pub const DEFAULT_SIDEBAR_WIDTH: f32 = 220.0;
 pub const MIN_SIDEBAR_WIDTH: f32 = 184.0;
 pub const MAX_SIDEBAR_WIDTH: f32 = 360.0;
 

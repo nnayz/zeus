@@ -17,7 +17,7 @@ Direction only — not a release calendar.
 ## Distribution
 
 - Signed, notarized GitHub Releases
-- Homebrew cask: `brew install --cask nnayz/zeus/zeus`
+- Homebrew cask (monorepo tap): `brew tap nnayz/zeus https://github.com/nnayz/zeus.git && brew install --cask nnayz/zeus/zeus`
 
 ## Not planned
 

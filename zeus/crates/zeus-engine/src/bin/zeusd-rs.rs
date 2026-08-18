@@ -117,10 +117,10 @@ fn main() {
     );
     let registry = Arc::new(Mutex::new(registry));
 
-    // Stable CLI path under App Support (same contract as Swift zeusd):
-    // hooks, Codex notify, and zeus-mcp all reference this absolute path.
-    // A cargo-built zeusd-rs does not sit next to a `zeus` binary, so
-    // inventing `target/debug/zeus` makes every MCP tools/list fail.
+    // Stable CLI path under App Support: hooks, Codex notify, and zeus-mcp
+    // all reference this absolute path. A cargo-built zeusd-rs does not sit
+    // next to a `zeus` binary, so inventing `target/debug/zeus` makes every
+    // MCP tools/list fail.
     let cli_path = install_cli_helpers(&exe_dir, &app_support);
     let mut server = ControlServer::new(Arc::clone(&registry), app_support.join("daemon.sock"))
         .with_logs_dir(&logs_dir)
@@ -364,8 +364,8 @@ fn app_support_dir() -> PathBuf {
     Path::new(&home).join("Library/Application Support/Zeus")
 }
 
-/// Copy `zeus`, `zeus-mcp`, and the CLI's manifest resource bundle into
-/// App Support `bin/`, then return the stable `zeus` path used for injection.
+/// Copy `zeus`, `zeus-mcp`, and the Agent catalog into App Support `bin/`,
+/// then return the stable `zeus` path used for injection.
 #[cfg(unix)]
 fn install_cli_helpers(exe_dir: &Path, app_support: &Path) -> PathBuf {
     let bin_dir = app_support.join("bin");
@@ -393,7 +393,7 @@ fn install_cli_helpers(exe_dir: &Path, app_support: &Path) -> PathBuf {
             ),
         }
     }
-    install_cli_resource_bundle(exe_dir, &bin_dir);
+    install_cli_manifests(exe_dir, &bin_dir);
     let stable = bin_dir.join("zeus");
     if is_executable(&stable) {
         stable
@@ -426,9 +426,9 @@ fn install_cli_helper(source: &Path, dest: &Path) -> std::io::Result<()> {
 }
 
 #[cfg(unix)]
-fn install_cli_resource_bundle(exe_dir: &Path, bin_dir: &Path) {
-    const NAME: &str = "zeus_ZeusCore.bundle";
-    let Some(source) = cli_helper_sources(exe_dir, NAME)
+fn install_cli_manifests(exe_dir: &Path, bin_dir: &Path) {
+    const NAME: &str = "manifests";
+    let Some(source) = cli_manifest_sources(exe_dir)
         .into_iter()
         .find(|path| path.is_dir())
     else {
@@ -479,14 +479,8 @@ fn copy_dir(source: &Path, dest: &Path) -> std::io::Result<()> {
 #[cfg(unix)]
 fn cli_helper_sources(exe_dir: &Path, name: &str) -> Vec<PathBuf> {
     let mut sources = vec![exe_dir.join(name)];
-    // cargo: <repo>/zeus/target/{debug,release} → <repo>/.build/debug/<name>
-    if let Some(repo) = exe_dir
-        .parent()
-        .and_then(Path::parent)
-        .and_then(Path::parent)
-    {
-        sources.push(repo.join(".build/debug").join(name));
-        sources.push(repo.join(".build/arm64-apple-macosx/debug").join(name));
+    if name == "zeus" {
+        sources.push(exe_dir.join("zeus-cli"));
     }
     if let Ok(home) = std::env::var("HOME") {
         sources.push(
@@ -496,6 +490,22 @@ fn cli_helper_sources(exe_dir: &Path, name: &str) -> Vec<PathBuf> {
         );
     }
     sources.push(PathBuf::from("/Applications/zeus.app/Contents/Resources/bin").join(name));
+    sources
+}
+
+#[cfg(unix)]
+fn cli_manifest_sources(exe_dir: &Path) -> Vec<PathBuf> {
+    let mut sources = vec![exe_dir.join("manifests")];
+    if let Some(workspace) = exe_dir.parent().and_then(Path::parent) {
+        sources.push(workspace.join("crates/zeus-engine/manifests"));
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        sources
+            .push(Path::new(&home).join("Applications/zeus.app/Contents/Resources/bin/manifests"));
+    }
+    sources.push(PathBuf::from(
+        "/Applications/zeus.app/Contents/Resources/bin/manifests",
+    ));
     sources
 }
 
@@ -675,16 +685,16 @@ mod tests {
     }
 
     #[test]
-    fn cli_resource_bundle_is_installed_without_stale_files() {
+    fn cli_manifests_are_installed_without_stale_files() {
         let temporary = tempfile::tempdir().expect("temp");
         let source = temporary.path().join("source");
         let bin = temporary.path().join("bin");
-        let manifests = source.join("zeus_ZeusCore.bundle/manifests");
-        std::fs::create_dir_all(&manifests).expect("source bundle");
+        let manifests = source.join("manifests");
+        std::fs::create_dir_all(&manifests).expect("source catalog");
         std::fs::write(manifests.join("cursor.json"), b"cursor").expect("cursor manifest");
 
-        install_cli_resource_bundle(&source, &bin);
-        let installed = bin.join("zeus_ZeusCore.bundle/manifests");
+        install_cli_manifests(&source, &bin);
+        let installed = bin.join("manifests");
         assert_eq!(
             std::fs::read(installed.join("cursor.json")).expect("installed cursor manifest"),
             b"cursor"
@@ -692,7 +702,7 @@ mod tests {
 
         std::fs::remove_file(manifests.join("cursor.json")).expect("remove old manifest");
         std::fs::write(manifests.join("codex.json"), b"codex").expect("codex manifest");
-        install_cli_resource_bundle(&source, &bin);
+        install_cli_manifests(&source, &bin);
         assert!(!installed.join("cursor.json").exists());
         assert!(installed.join("codex.json").exists());
     }

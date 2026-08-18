@@ -29,7 +29,6 @@ pub enum Popover {
         /// Selected spawn target: `None` = Local, `Some(host id)` = remote.
         host: Option<String>,
     },
-    Account,
     ProjectActions {
         id: ProjectId,
         /// Window position of a right-click; `None` anchors below the header
@@ -61,7 +60,6 @@ pub struct SidebarUiState {
     /// write when the gesture ends.
     pub order_dirty: bool,
     pub resize_origin: Option<(f32, f32)>,
-    pub preview_account: bool,
 }
 
 impl SidebarUiState {
@@ -80,7 +78,6 @@ impl SidebarUiState {
             drag_target: None,
             order_dirty: false,
             resize_origin: None,
-            preview_account: false,
         }
     }
 

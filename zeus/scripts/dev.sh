@@ -102,9 +102,11 @@ echo "==> Building ${display_name} (${profile})"
 # clean checkout launches against this tree's Engine instead of a missing or
 # stale binary (installed app / leftover debug build).
 if (( ${#cargo_args[@]} > 0 )); then
-    cargo build --package zeus-app --bin zeus --package zeus-engine --bin zeusd-rs "${cargo_args[@]}"
+    cargo build --package zeus-app --bin zeus --package zeus-engine --bin zeusd-rs \
+        --package zeus-cli --bin zeus-cli "${cargo_args[@]}"
 else
-    cargo build --package zeus-app --bin zeus --package zeus-engine --bin zeusd-rs
+    cargo build --package zeus-app --bin zeus --package zeus-engine --bin zeusd-rs \
+        --package zeus-cli --bin zeus-cli
 fi
 
 binary="${target_dir}/${profile}/zeus"

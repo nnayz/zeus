@@ -229,7 +229,11 @@ impl RootView {
         let inspector = (!preview || preview_scenario == PreviewScenario::Artifacts).then(|| {
             let runtime = Arc::clone(&services.store);
             let tokio = Arc::clone(&services.tokio);
-            cx.new(|cx| WorkbenchInspector::new(runtime, tokio, cx))
+            cx.new(|cx| {
+                let mut inspector = WorkbenchInspector::new(runtime, tokio, cx);
+                inspector.set_preview_account(preview);
+                inspector
+            })
         });
         if let (Some(terminal), Some(navigation), Some(utility_surfaces)) =
             (&terminal, &navigation, &utility_surfaces)
@@ -340,11 +344,23 @@ impl RootView {
             .detach();
         }
         if let Some(inspector) = &inspector {
-            cx.subscribe(inspector, |this, _, event, cx| {
-                if matches!(event, InspectorEvent::Close) {
-                    this.set_inspector_open(false, cx);
-                }
-            })
+            cx.subscribe_in(
+                inspector,
+                window,
+                |this, _, event, window, cx| match event {
+                    InspectorEvent::Close => this.set_inspector_open(false, cx),
+                    InspectorEvent::AddRemoteHost => {
+                        if let Some(surfaces) = &this.utility_surfaces {
+                            surfaces.update(cx, |surfaces, cx| {
+                                surfaces.open_add_remote_host(window, cx);
+                            });
+                        }
+                    }
+                    InspectorEvent::Update(command) => {
+                        this.services.updates.send(command.clone());
+                    }
+                },
+            )
             .detach();
         }
 
@@ -352,11 +368,19 @@ impl RootView {
         let mut snapshots = services.store.snapshots();
         let mut usage = services.usage_tx.subscribe();
         let mut updates = services.updates.subscribe();
-        sidebar.update(cx, |sidebar, cx| sidebar.set_usage(*usage.borrow(), cx));
+        let initial_usage = *usage.borrow();
+        if let Some(inspector) = &inspector {
+            inspector.update(cx, |inspector, cx| inspector.set_usage(initial_usage, cx));
+        }
         // Seed the current state: `watch` only wakes on changes, and an
         // unsupported build settles before this view exists.
         let initial_update = services.updates.state();
-        sidebar.update(cx, |sidebar, cx| sidebar.set_update(initial_update, cx));
+        sidebar.update(cx, |sidebar, cx| {
+            sidebar.set_update(initial_update.clone(), cx)
+        });
+        if let Some(inspector) = &inspector {
+            inspector.update(cx, |inspector, cx| inspector.set_update(initial_update, cx));
+        }
 
         #[cfg(target_os = "macos")]
         let mut menu_bar = objc2_foundation::MainThreadMarker::new()
@@ -384,6 +408,7 @@ impl RootView {
         });
 
         let service_sidebar = sidebar.clone();
+        let service_inspector = inspector.clone();
         let service_events = cx.spawn(async move |this, cx| {
             loop {
                 tokio::select! {
@@ -448,17 +473,24 @@ impl RootView {
                     changed = usage.changed() => {
                         if changed.is_err() { break; }
                         let snapshot = *usage.borrow_and_update();
-                        service_sidebar.update(cx, |sidebar, cx| {
-                            sidebar.set_usage(snapshot, cx);
-                        });
+                        if let Some(inspector) = &service_inspector {
+                            inspector.update(cx, |inspector, cx| {
+                                inspector.set_usage(snapshot, cx);
+                            });
+                        }
                     }
                     changed = updates.changed() => {
                         if changed.is_err() { break; }
                         let state = updates.borrow_and_update().clone();
                         let installing = state.phase == UpdatePhase::Installing;
                         service_sidebar.update(cx, |sidebar, cx| {
-                            sidebar.set_update(state, cx);
+                            sidebar.set_update(state.clone(), cx);
                         });
+                        if let Some(inspector) = &service_inspector {
+                            inspector.update(cx, |inspector, cx| {
+                                inspector.set_update(state, cx);
+                            });
+                        }
                         // The swap helper is already polling for this process
                         // to exit; quitting is what lets the install proceed.
                         if installing {

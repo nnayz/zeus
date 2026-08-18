@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/zeus-app",
+    "crates/zeus-cli",
     "crates/zeus-client",
     "crates/zeus-engine",
     "crates/zeus-node",

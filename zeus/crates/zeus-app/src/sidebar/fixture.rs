@@ -53,7 +53,16 @@ impl SidebarPreviewFixture {
         // the exact relative intervals used by the Swift fixture.
         let now = 1_750_000_000_000.0;
         let zeus = project("preview-zeus", "/Users/preview/Projects/zeus", "Zeus");
-        let anara = project("preview-anara", "/Users/preview/Projects/anara", "Anara");
+        let mldrills = project(
+            "preview-mldrills",
+            "/Users/preview/Projects/mldrills",
+            "MLdrills",
+        );
+        let pharos_labs = project(
+            "preview-pharos-labs",
+            "/Users/preview/Projects/pharos-labs",
+            "PHAROSLabs",
+        );
         let settings = project(
             "preview-settings-kit",
             "/Users/preview/Projects/settings-kit",
@@ -251,7 +260,7 @@ tokio::spawn(async move { clone_repository(request).await });
         let gemini: SessionRecord = session(
             "preview-gemini",
             AgentKind::GEMINI,
-            &anara,
+            &mldrills,
             "Trace PDF selection coordinate drift",
             SessionStatus::Working,
             Some("pdf-selection"),
@@ -261,7 +270,7 @@ tokio::spawn(async move { clone_repository(request).await });
         let question: SessionRecord = session(
             "preview-question",
             AgentKind::CLAUDE_CODE,
-            &anara,
+            &mldrills,
             "Rework the document import flow",
             SessionStatus::NeedsInput(NeedsInputKind::Question),
             Some("import-flow"),
@@ -277,6 +286,16 @@ tokio::spawn(async move { clone_repository(request).await });
             risk_hint: RiskHint::Neutral,
             occurred_at: DateMillis(now - 120_000.0),
         })
+        .into();
+        let pharos: SessionRecord = session(
+            "preview-pharos",
+            AgentKind::CODEX,
+            &pharos_labs,
+            "Evaluate retrieval benchmark results",
+            SessionStatus::Working,
+            Some("benchmarks/retrieval"),
+            now - minutes(24.0),
+        )
         .into();
         let sleeping: SessionRecord = session(
             "preview-sleeping",
@@ -320,6 +339,7 @@ tokio::spawn(async move { clone_repository(request).await });
             shell,
             gemini,
             question,
+            pharos,
             sleeping,
             archived,
         ];
@@ -338,7 +358,7 @@ tokio::spawn(async move { clone_repository(request).await });
                 session(
                     "preview-ended",
                     AgentKind::CURSOR,
-                    &anara,
+                    &mldrills,
                     "Cursor accessibility pass",
                     SessionStatus::Exited(ExitInfo {
                         reason: ExitReason::Exited,
@@ -364,10 +384,15 @@ tokio::spawn(async move { clone_repository(request).await });
         }
 
         let mut prefs = Prefs {
-            sidebar_project_order: vec![zeus.id.clone(), anara.id.clone(), settings.id.clone()],
+            sidebar_project_order: vec![
+                zeus.id.clone(),
+                mldrills.id.clone(),
+                pharos_labs.id.clone(),
+                settings.id.clone(),
+            ],
             sidebar_session_order: sessions.iter().map(|session| session.id.clone()).collect(),
             sidebar_pinned_sessions: vec![claude.id.clone()],
-            sidebar_collapsed_projects: vec![anara.id.clone()],
+            sidebar_collapsed_projects: vec![mldrills.id.clone()],
             sidebar_expanded_archives: vec![settings.id.clone()],
             ..Prefs::default()
         };
@@ -380,7 +405,7 @@ tokio::spawn(async move { clone_repository(request).await });
         Self {
             list: SessionListResult {
                 sessions,
-                projects: vec![zeus, anara, settings],
+                projects: vec![zeus, mldrills, pharos_labs, settings],
             },
             selected_session_id: Some(codex.id),
             prefs,
@@ -522,8 +547,8 @@ mod tests {
     #[test]
     fn typical_fixture_matches_swift_counts_and_preferences() {
         let fixture = SidebarPreviewFixture::make(PreviewScenario::Typical);
-        assert_eq!(fixture.list.projects.len(), 3);
-        assert_eq!(fixture.list.sessions.len(), 10);
+        assert_eq!(fixture.list.projects.len(), 4);
+        assert_eq!(fixture.list.sessions.len(), 11);
         assert_eq!(fixture.prefs.sidebar_pinned_sessions.len(), 1);
         assert_eq!(fixture.prefs.sidebar_collapsed_projects.len(), 1);
         assert_eq!(fixture.prefs.sidebar_expanded_archives.len(), 1);
@@ -532,7 +557,7 @@ mod tests {
     #[test]
     fn stress_fixture_adds_three_edge_cases() {
         let fixture = SidebarPreviewFixture::make(PreviewScenario::Stress);
-        assert_eq!(fixture.list.sessions.len(), 13);
+        assert_eq!(fixture.list.sessions.len(), 14);
         assert!(
             fixture
                 .list
@@ -595,6 +620,6 @@ mod tests {
             store.selected_session_id(),
             Some(&SessionId::new("preview-codex"))
         );
-        assert_eq!(store.sessions().len(), 10);
+        assert_eq!(store.sessions().len(), 11);
     }
 }

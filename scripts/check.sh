@@ -19,28 +19,19 @@ case "${1:-}" in
         ;;
 esac
 
-for tool in bash cargo python3 swift; do
+for tool in bash cargo python3; do
     if ! command -v "${tool}" >/dev/null 2>&1; then
         echo "error: ${tool} is required; see README.md" >&2
         exit 1
     fi
 done
 
-# Keep compiler caches inside the checkout. This works in sandboxed development
-# environments and avoids depending on writable global Swift/Clang cache paths.
-export CLANG_MODULE_CACHE_PATH="${CLANG_MODULE_CACHE_PATH:-${root}/.build/clang-module-cache}"
-export SWIFTPM_MODULECACHE_OVERRIDE="${SWIFTPM_MODULECACHE_OVERRIDE:-${CLANG_MODULE_CACHE_PATH}}"
-mkdir -p "${CLANG_MODULE_CACHE_PATH}"
-
 echo "==> Shell and release publishing guards"
 bash -n "${root}"/scripts/*.sh "${root}"/zeus/scripts/*.sh
 bash "${root}/zeus/scripts/test-publish-github-release.sh"
 bash "${root}/zeus/scripts/test-publish-homebrew-cask.sh"
 
-echo "==> Swift engine"
-swift test --package-path "${root}" --no-parallel
-
-echo "==> Rust app"
+echo "==> Rust workspace"
 (
     cd "${root}/zeus"
     cargo fmt --all -- --check
@@ -60,7 +51,10 @@ if [[ "${run_browser}" == "1" ]]; then
         npm audit --omit=dev
         npx playwright install chromium webkit firefox
     )
-    ZEUS_RUN_BROWSER_TESTS=1 swift test --package-path "${root}" --filter BrowserPoolTests
+    (
+        cd "${root}/zeus"
+        cargo test -p zeus-engine browser
+    )
 fi
 
 echo "All checks passed."

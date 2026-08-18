@@ -36,6 +36,10 @@ use super::{
 };
 
 const PREVIEW_USAGE: f64 = 4.82;
+const SIDEBAR_TITLE_SIZE: f32 = 14.0;
+const SIDEBAR_SUBTITLE_SIZE: f32 = 12.0;
+const SIDEBAR_ROW_HEIGHT: f32 = 28.0;
+const SIDEBAR_NEW_AGENT_HEIGHT: f32 = 40.0;
 
 #[derive(Clone, Debug)]
 pub enum SidebarEvent {
@@ -551,14 +555,14 @@ impl Sidebar {
             .mx(px(Space::INSET))
             .mb(px(3.0))
             .px(px(Space::ROW_H))
-            .h(px(36.0))
+            .h(px(SIDEBAR_NEW_AGENT_HEIGHT))
             .flex()
             .items_center()
             .gap(px(6.0))
             .rounded(px(Radius::ROW))
             .bg(Fill::hover(colors, hovering))
             .cursor_pointer()
-            .text_size(px(Typo::ROW.size))
+            .text_size(px(SIDEBAR_TITLE_SIZE))
             .text_color(colors.text(zeus_ui::TextTone::Label))
             .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
                 this.ui.hovered_control = hovered.then_some("new-agent");
@@ -582,7 +586,7 @@ impl Sidebar {
                     .flex_1()
                     .flex()
                     .flex_col()
-                    .gap(px(1.0))
+                    .gap(px(2.0))
                     .child(
                         div()
                             .whitespace_nowrap()
@@ -595,7 +599,7 @@ impl Sidebar {
                             .whitespace_nowrap()
                             .overflow_hidden()
                             .text_ellipsis()
-                            .text_size(px(Typo::META.size))
+                            .text_size(px(SIDEBAR_SUBTITLE_SIZE))
                             .text_color(colors.tertiary)
                             .child(format!("{agent} · {location}")),
                     ),
@@ -676,14 +680,14 @@ impl Sidebar {
                     .gap(px(3.0))
                     .child(
                         div()
-                            .text_size(px(Typo::ROW_EMPHASIZED.size))
+                            .text_size(px(SIDEBAR_TITLE_SIZE))
                             .font_weight(Typo::ROW_EMPHASIZED.weight)
                             .text_color(colors.secondary)
                             .child("Bring up your first agent"),
                     )
                     .child(
                         div()
-                            .text_size(px(Typo::META.size))
+                            .text_size(px(SIDEBAR_SUBTITLE_SIZE))
                             .text_color(colors.tertiary)
                             .child("⌘T"),
                     ),
@@ -696,7 +700,7 @@ impl Sidebar {
                     .flex()
                     .items_center()
                     .rounded(px(Radius::ROW))
-                    .text_size(px(Typo::ROW.size))
+                    .text_size(px(SIDEBAR_TITLE_SIZE))
                     .text_color(colors.secondary)
                     .cursor_pointer()
                     .hover(move |element| element.bg(colors.primary.alpha(0.06)))
@@ -737,17 +741,17 @@ impl Sidebar {
         });
         let entity = cx.entity();
         let drag_label: SharedString = group.project.name.clone().into();
-        let mut section = div().flex().flex_col().gap(px(1.0)).child(
+        let mut section = div().flex().flex_col().gap(px(2.0)).child(
             div()
                 .id(format!("project:{}", id.0))
                 .debug_selector({
                     let id = id.clone();
                     move || format!("PROJECT_{}", id.0)
                 })
-                .mt(px(4.0))
+                .mt(px(5.0))
                 .px(px(Space::ROW_H))
                 .py(px(3.0))
-                .min_h(px(Metrics::ROW_HEIGHT))
+                .min_h(px(SIDEBAR_ROW_HEIGHT))
                 .flex()
                 .items_center()
                 .gap(px(6.0))
@@ -826,7 +830,7 @@ impl Sidebar {
                         .whitespace_nowrap()
                         .overflow_hidden()
                         .text_ellipsis()
-                        .text_size(px(Typo::ROW_EMPHASIZED.size))
+                        .text_size(px(SIDEBAR_TITLE_SIZE))
                         .font_weight(Typo::ROW_EMPHASIZED.weight)
                         .text_color(colors.primary.alpha(0.90))
                         .child(group.project.name.clone()),
@@ -843,7 +847,7 @@ impl Sidebar {
                             .whitespace_nowrap()
                             .overflow_hidden()
                             .text_ellipsis()
-                            .text_size(px(Typo::META.size - 1.0))
+                            .text_size(px(Typo::META.size))
                             .text_color(colors.tertiary)
                             .child(host),
                     )
@@ -1002,7 +1006,7 @@ impl Sidebar {
                 .id(format!("rename:{}", id.0))
                 .pl(px(Space::ROW_H))
                 .pr(px(Space::ROW_H))
-                .h(px(Metrics::ROW_HEIGHT))
+                .h(px(SIDEBAR_ROW_HEIGHT))
                 .flex()
                 .items_center()
                 .gap(px(6.0))
@@ -1027,7 +1031,7 @@ impl Sidebar {
                         .flex_1()
                         .whitespace_nowrap()
                         .overflow_hidden()
-                        .text_size(px(Typo::ROW.size))
+                        .text_size(px(SIDEBAR_TITLE_SIZE))
                         .text_color(colors.primary)
                         .child(query_label(&self.ui.rename_draft)),
                 )
@@ -1055,7 +1059,7 @@ impl Sidebar {
             .id(format!("session:{}", id.0))
             .pl(px(Space::ROW_H))
             .pr(px(Space::ROW_H))
-            .h(px(Metrics::ROW_HEIGHT))
+            .h(px(SIDEBAR_ROW_HEIGHT))
             .flex()
             .items_center()
             .gap(px(6.0))
@@ -1194,7 +1198,7 @@ impl Sidebar {
                     title,
                     hovered,
                     title_available_width,
-                    Typo::ROW.size,
+                    SIDEBAR_TITLE_SIZE,
                     colors.primary.alpha(if selected { 1.0 } else { 0.82 }),
                 )
                 .font_weight(Typo::ROW.weight),
@@ -1399,12 +1403,12 @@ impl Sidebar {
                     .id(format!("archive-header:{}", project_id.0))
                     .pl(px(Space::ROW_H + Space::INDENT))
                     .pr(px(Space::ROW_H))
-                    .h(px(22.0))
+                    .h(px(24.0))
                     .flex()
                     .items_center()
                     .gap(px(5.0))
                     .cursor_pointer()
-                    .text_size(px(Typo::SECTION_HEADER.size))
+                    .text_size(px(SIDEBAR_SUBTITLE_SIZE))
                     .font_weight(Typo::SECTION_HEADER.weight)
                     .text_color(colors.tertiary)
                     .on_click(cx.listener({
@@ -1467,7 +1471,7 @@ impl Sidebar {
             .id(format!("archived-session:{}", id.0))
             .pl(px(Space::ROW_H + Space::INDENT))
             .pr(px(Space::ROW_H))
-            .h(px(Metrics::ROW_HEIGHT))
+            .h(px(SIDEBAR_ROW_HEIGHT))
             .flex()
             .items_center()
             .gap(px(8.0))
@@ -1566,7 +1570,7 @@ impl Sidebar {
                     .whitespace_nowrap()
                     .overflow_hidden()
                     .text_ellipsis()
-                    .text_size(px(Typo::ROW.size))
+                    .text_size(px(SIDEBAR_TITLE_SIZE))
                     .text_color(colors.primary.alpha(if selected { 1.0 } else { 0.82 }))
                     .child(title),
             )
@@ -1617,7 +1621,7 @@ impl Sidebar {
             .id("update-pill")
             .mb(px(3.0))
             .px(px(Space::ROW_H))
-            .h(px(Metrics::ROW_HEIGHT))
+            .h(px(SIDEBAR_ROW_HEIGHT))
             .flex()
             .items_center()
             .gap(px(8.0))
@@ -1636,7 +1640,7 @@ impl Sidebar {
                     .whitespace_nowrap()
                     .overflow_hidden()
                     .text_ellipsis()
-                    .text_size(px(Typo::ROW.size))
+                    .text_size(px(SIDEBAR_TITLE_SIZE))
                     .text_color(if interactive { tint } else { colors.secondary })
                     .child(self.update.summary()),
             )
@@ -1675,7 +1679,7 @@ impl Sidebar {
                 div()
                     .id("account")
                     .px(px(Space::ROW_H))
-                    .h(px(Metrics::ROW_HEIGHT))
+                    .h(px(SIDEBAR_ROW_HEIGHT))
                     .flex()
                     .items_center()
                     .gap(px(6.0))
@@ -1705,7 +1709,7 @@ impl Sidebar {
                             .whitespace_nowrap()
                             .overflow_hidden()
                             .text_ellipsis()
-                            .text_size(px(Typo::ROW.size))
+                            .text_size(px(SIDEBAR_TITLE_SIZE))
                             .text_color(colors.text(zeus_ui::TextTone::Label))
                             .child(if self.preview {
                                 "preview@zeus.local"
@@ -1798,7 +1802,7 @@ impl Sidebar {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let footer_top = f32::from(window.viewport_size().height) - (Metrics::ROW_HEIGHT + 11.0);
+        let footer_top = f32::from(window.viewport_size().height) - (SIDEBAR_ROW_HEIGHT + 11.0);
         let (position, anchor) = self.popover_edge(footer_top, true, window);
         self.popover_shell_at(position, anchor, 244.0, child, colors, cx)
     }
@@ -3550,10 +3554,10 @@ impl Render for Sidebar {
             .overflow_y_scroll()
             .px(px(Space::INSET))
             .pt(px(2.0))
-            .pb(px(Metrics::ROW_HEIGHT + 17.0))
+            .pb(px(SIDEBAR_ROW_HEIGHT + 17.0))
             .flex()
             .flex_col()
-            .gap(px(2.0));
+            .gap(px(3.0));
         for group in &projection.projects {
             list = list.child(self.project_section(group, colors, window, cx));
         }
@@ -3636,7 +3640,7 @@ fn indent_rails(row: &crate::store::SidebarRow, colors: SemanticColors) -> Vec<A
             let last_column = column + 1 == row.depth;
             div()
                 .w(px(Space::INDENT))
-                .h(px(Metrics::ROW_HEIGHT))
+                .h(px(SIDEBAR_ROW_HEIGHT))
                 .flex_none()
                 .flex()
                 .justify_center()
@@ -3646,9 +3650,9 @@ fn indent_rails(row: &crate::store::SidebarRow, colors: SemanticColors) -> Vec<A
                         // A rail that neither continues nor elbows into this
                         // row has no business being drawn at all.
                         .h(px(if continues {
-                            Metrics::ROW_HEIGHT
+                            SIDEBAR_ROW_HEIGHT
                         } else if last_column {
-                            Metrics::ROW_HEIGHT / 2.0
+                            SIDEBAR_ROW_HEIGHT / 2.0
                         } else {
                             0.0
                         }))
@@ -4128,7 +4132,7 @@ mod tests {
         fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
             div()
                 .size_full()
-                .child(div().h_full().w(px(248.0)).child(self.sidebar.clone()))
+                .child(div().h_full().w(px(220.0)).child(self.sidebar.clone()))
         }
     }
 

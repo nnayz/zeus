@@ -17,7 +17,7 @@ use zeus_proto::paths::ZeusPaths;
 use crate::connection::ActiveConnection;
 use crate::state::{ConnectionState, EventEnvelope};
 
-pub const CLIENT_BUILD: &str = "zeus-0.1.0";
+pub const CLIENT_BUILD: &str = concat!("zeus-", env!("CARGO_PKG_VERSION"));
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(25);
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(10);

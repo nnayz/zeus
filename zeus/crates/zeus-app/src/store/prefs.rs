@@ -6,6 +6,11 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use zeus_proto::{AgentKind, ProjectId, SessionId};
 
 const DEFAULT_THEME: &str = "zeus-dark";
+const CURRENT_LAYOUT_VERSION: u8 = 1;
+
+fn legacy_layout_version() -> u8 {
+    0
+}
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -97,9 +102,13 @@ pub struct Prefs {
     /// Whether the leading sidebar was mounted when the app last ran.
     pub sidebar_visible: bool,
     pub sidebar_width: f32,
-    /// Mirrored workbench: projects sidebar on the trailing edge and the
-    /// inspector on the leading one. This is the default arrangement.
+    /// Places the projects sidebar on the trailing edge and the inspector on
+    /// the leading one when enabled.
     pub sidebar_on_right: bool,
+    /// One-time layout migrations applied to preferences saved by older Zeus
+    /// releases. Missing values deserialize as the legacy layout version.
+    #[serde(default = "legacy_layout_version")]
+    pub layout_version: u8,
     /// Whether the trailing workbench inspector is mounted.
     pub inspector_open: bool,
     /// Width of the trailing workbench inspector in points.
@@ -139,8 +148,9 @@ impl Default for Prefs {
             terminal_font_size: 13.0,
             window_placement: None,
             sidebar_visible: true,
-            sidebar_width: 232.0,
-            sidebar_on_right: true,
+            sidebar_width: 220.0,
+            sidebar_on_right: false,
+            layout_version: CURRENT_LAYOUT_VERSION,
             inspector_open: true,
             inspector_width: 400.0,
             inspector_tab: InspectorTab::Info,
@@ -230,16 +240,20 @@ impl Prefs {
                 self.window_placement = None;
             }
         }
-        // Carry installations that still have the former untouched defaults
-        // into the compact layout, while preserving any width the user
-        // actually resized to.
-        if self.sidebar_width == 248.0 {
-            self.sidebar_width = 232.0;
+        // Carry installations that still have one of the former untouched
+        // defaults into the compact layout, while preserving any width the
+        // user actually resized to.
+        if matches!(self.sidebar_width, 232.0 | 248.0 | 264.0) {
+            self.sidebar_width = 220.0;
         }
         if !self.sidebar_width.is_finite() {
-            self.sidebar_width = 232.0;
+            self.sidebar_width = 220.0;
         }
         self.sidebar_width = self.sidebar_width.clamp(184.0, 360.0);
+        if self.layout_version < CURRENT_LAYOUT_VERSION {
+            self.sidebar_on_right = false;
+            self.layout_version = CURRENT_LAYOUT_VERSION;
+        }
         if self.inspector_width == 440.0 {
             self.inspector_width = 400.0;
         }
@@ -259,30 +273,50 @@ impl Prefs {
 
 #[cfg(test)]
 mod tests {
-    use super::Prefs;
+    use super::{CURRENT_LAYOUT_VERSION, Prefs};
 
     #[test]
     fn former_panel_defaults_migrate_to_compact_widths() {
+        for sidebar_width in [232.0, 248.0, 264.0] {
+            let mut prefs = Prefs {
+                sidebar_width,
+                inspector_width: 440.0,
+                ..Prefs::default()
+            };
+
+            prefs.normalize();
+
+            assert_eq!(prefs.sidebar_width, 220.0);
+            assert_eq!(prefs.inspector_width, 400.0);
+        }
+    }
+
+    /// Preferences written before the left-projects layout migration should
+    /// adopt it even when they saved the previous right-side arrangement.
+    #[test]
+    fn legacy_preferences_adopt_the_left_projects_layout() {
+        let mut restored: Prefs =
+            serde_json::from_str(r#"{"sidebarWidth": 232.0, "sidebarOnRight": true}"#)
+                .expect("prefs");
+
+        restored.normalize();
+
+        assert!(!restored.sidebar_on_right);
+        assert_eq!(restored.layout_version, CURRENT_LAYOUT_VERSION);
+        assert!(!Prefs::default().sidebar_on_right);
+    }
+
+    #[test]
+    fn current_layout_choice_survives_normalization() {
         let mut prefs = Prefs {
-            sidebar_width: 248.0,
-            inspector_width: 440.0,
+            sidebar_on_right: true,
             ..Prefs::default()
         };
 
         prefs.normalize();
 
-        assert_eq!(prefs.sidebar_width, 232.0);
-        assert_eq!(prefs.inspector_width, 400.0);
-    }
-
-    /// Preferences written before the mirrored workbench existed have no
-    /// `sidebarOnRight` key, and must still land on the new default.
-    #[test]
-    fn saved_preferences_without_a_layout_choice_adopt_the_mirrored_default() {
-        let restored: Prefs = serde_json::from_str(r#"{"sidebarWidth": 232.0}"#).expect("prefs");
-
-        assert!(restored.sidebar_on_right);
-        assert!(Prefs::default().sidebar_on_right);
+        assert!(prefs.sidebar_on_right);
+        assert_eq!(prefs.layout_version, CURRENT_LAYOUT_VERSION);
     }
 
     #[test]

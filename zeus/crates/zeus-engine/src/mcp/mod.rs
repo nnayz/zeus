@@ -20,7 +20,7 @@ pub use tools::{ToolDefinition, tool_definitions, tool_definitions_for};
 use serde_json::{Value, json};
 
 pub const SERVER_NAME: &str = "zeus";
-pub const SERVER_VERSION: &str = "0.1.0";
+pub const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The revision we advertise when a client does not pin one.
 pub const PREFERRED_PROTOCOL_VERSION: &str = "2025-06-18";
 

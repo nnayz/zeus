@@ -208,7 +208,7 @@ pub fn write_cursor_plugin(
         &staging.join(".cursor-plugin/plugin.json"),
         &serde_json::to_vec_pretty(&json!({
             "name": "zeus",
-            "version": "0.1.0",
+            "version": env!("CARGO_PKG_VERSION"),
             "description": "Zeus agent orchestration for Cursor sessions",
         }))?,
     )?;

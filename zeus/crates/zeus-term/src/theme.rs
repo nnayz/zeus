@@ -70,33 +70,33 @@ impl TermTheme {
         id: "zeus-dark",
         name: "Zeus Dark",
         appearance: ThemeAppearance::Dark,
-        // Cursor's dark workbench is neutral rather than blue-black. Keep the
-        // editor and terminal on the same canvas so switching between them
-        // does not expose a tinted seam.
-        background: hex(0x1f1f1f),
-        foreground: hex(0xcccccc),
-        cursor: with_alpha(hex(0xaeafad), 0.90),
-        cursor_text: hex(0x1f1f1f),
-        selection: with_alpha(hex(0x264f78), 0.80),
-        find_match: with_alpha(hex(0x9e6a03), 0.55),
-        find_match_current: with_alpha(hex(0x9e6a03), 0.85),
+        // Ayu Dark's Zed palette: an ink-blue canvas, warm neutral text, and
+        // clear blue/cyan/green/orange accents. Keep the Zeus id stable so
+        // existing installations receive the updated default in place.
+        background: hex(0x0d1016),
+        foreground: hex(0xbfbdb6),
+        cursor: hex(0x5ac1fe),
+        cursor_text: hex(0x0d1016),
+        selection: with_alpha(hex(0x5ac1fe), 61.0 / 255.0),
+        find_match: with_alpha(hex(0x5ac2fe), 0.40),
+        find_match_current: with_alpha(hex(0xffaa33), 0.55),
         ansi: [
-            hex(0x000000),
-            hex(0xcd3131),
-            hex(0x0dbc79),
-            hex(0xe5e510),
-            hex(0x2472c8),
-            hex(0xbc3fbc),
-            hex(0x11a8cd),
-            hex(0xe5e5e5),
-            hex(0x666666),
-            hex(0xf14c4c),
-            hex(0x23d18b),
-            hex(0xf5f543),
-            hex(0x3b8eea),
-            hex(0xd670d6),
-            hex(0x29b8db),
-            hex(0xffffff),
+            hex(0x0d1016),
+            hex(0xef7177),
+            hex(0xaad84c),
+            hex(0xfeb454),
+            hex(0x5ac1fe),
+            hex(0x39bae5),
+            hex(0x95e5cb),
+            hex(0xbfbdb6),
+            hex(0x545557),
+            hex(0x83353b),
+            hex(0x567627),
+            hex(0x92582b),
+            hex(0x27618c),
+            hex(0x205a78),
+            hex(0x4c806f),
+            hex(0xbfbdb6),
         ],
     };
 
@@ -562,12 +562,16 @@ mod tests {
             .map(|theme| theme.id)
             .collect::<std::collections::HashSet<_>>();
         assert_eq!(unique_ids.len(), TermTheme::CATALOG.len());
-        assert_rgba(TermTheme::ZEUS_DARK.background, hex(0x1f1f1f));
-        assert_rgba(TermTheme::ZEUS_DARK.foreground, hex(0xcccccc));
+        assert_rgba(TermTheme::ZEUS_DARK.background, hex(0x0d1016));
+        assert_rgba(TermTheme::ZEUS_DARK.foreground, hex(0xbfbdb6));
         assert_rgba(
             TermTheme::ZEUS_DARK.selection,
-            with_alpha(hex(0x264f78), 0.80),
+            with_alpha(hex(0x5ac1fe), 61.0 / 255.0),
         );
+        assert_rgba(TermTheme::ZEUS_DARK.ansi[1], hex(0xef7177));
+        assert_rgba(TermTheme::ZEUS_DARK.ansi[2], hex(0xaad84c));
+        assert_rgba(TermTheme::ZEUS_DARK.ansi[4], hex(0x5ac1fe));
+        assert_rgba(TermTheme::ZEUS_DARK.ansi[6], hex(0x95e5cb));
         assert_eq!(TermTheme::VESPER.appearance, ThemeAppearance::Dark);
         assert_rgba(TermTheme::VESPER.background, hex(0x101010));
         assert_rgba(TermTheme::VESPER.cursor, hex(0xffc799));
@@ -580,7 +584,7 @@ mod tests {
         let theme = TermTheme::default();
         assert_rgba(
             theme.resolve_color(TermColor::Ansi(1), false),
-            hex(0xcd3131),
+            hex(0xef7177),
         );
         assert_rgba(
             theme.resolve_color(TermColor::Ansi(16), false),

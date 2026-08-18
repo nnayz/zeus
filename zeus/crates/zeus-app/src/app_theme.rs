@@ -19,19 +19,19 @@ pub(crate) fn sidebar_colors(id: &str) -> SemanticColors {
 }
 
 fn semantic_colors(theme: TermTheme, sidebar_tones: bool) -> SemanticColors {
-    // Zeus Dark follows an IDE-style three-surface hierarchy: subdued chrome,
-    // an editor canvas, then slightly lifted transient UI. Other catalog
-    // themes retain their derived surfaces so their individual tint carries
-    // through the application.
+    // Zeus Dark follows Ayu Dark's Zed hierarchy: the editor keeps the
+    // ink-blue canvas while persistent panels use Ayu's clearly lifted
+    // surface. Other catalog themes retain their derived surfaces so their
+    // individual tint carries through the application.
     let (sidebar_surface, floating_surface) = if theme.id == TermTheme::ZEUS_DARK.id {
-        (hex(0x181818), hex(0x222222))
+        (hex(0x1f2127), hex(0x0f131a))
     } else {
         (
             mix(theme.background, theme.foreground, 0.08, 0.92),
             mix(theme.background, theme.foreground, 0.13, 1.0),
         )
     };
-    SemanticColors::themed(
+    let mut colors = SemanticColors::themed(
         match theme.appearance {
             ThemeAppearance::Dark => Appearance::Dark,
             ThemeAppearance::Light => Appearance::Light,
@@ -41,7 +41,15 @@ fn semantic_colors(theme: TermTheme, sidebar_tones: bool) -> SemanticColors {
         sidebar_surface,
         floating_surface,
         sidebar_tones,
-    )
+    );
+    if theme.id == TermTheme::ZEUS_DARK.id {
+        // Zed's Ayu palette uses concrete warm neutrals rather than opacity-
+        // derived white labels. Keeping them opaque preserves their hue over
+        // both the base canvas and raised surfaces.
+        colors.secondary = hex(0x8a8986);
+        colors.tertiary = hex(0x696a6a);
+    }
+    colors
 }
 
 const fn hex(value: u32) -> Rgba {
@@ -95,13 +103,15 @@ mod tests {
     }
 
     #[test]
-    fn zeus_dark_uses_cursor_style_workbench_surfaces() {
+    fn zeus_dark_uses_ayu_dark_workbench_surfaces_and_text() {
         let app = colors(TermTheme::ZEUS_DARK.id);
 
-        assert_eq!(app.background, hex(0x1f1f1f));
-        assert_eq!(app.primary, hex(0xcccccc));
-        assert_eq!(app.sidebar_surface(), hex(0x181818));
-        assert_eq!(app.floating_surface(), hex(0x222222));
+        assert_eq!(app.background, hex(0x0d1016));
+        assert_eq!(app.primary, hex(0xbfbdb6));
+        assert_eq!(app.secondary, hex(0x8a8986));
+        assert_eq!(app.tertiary, hex(0x696a6a));
+        assert_eq!(app.sidebar_surface(), hex(0x1f2127));
+        assert_eq!(app.floating_surface(), hex(0x0f131a));
     }
 
     #[test]

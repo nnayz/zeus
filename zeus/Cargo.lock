@@ -7275,7 +7275,7 @@ dependencies = [
 
 [[package]]
 name = "zeus-app"
-version = "0.5.0"
+version = "0.0.1"
 dependencies = [
  "block2 0.6.2",
  "gpui",
@@ -7305,7 +7305,7 @@ dependencies = [
 
 [[package]]
 name = "zeus-client"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "futures-core",
  "getrandom 0.4.3",
@@ -7318,7 +7318,7 @@ dependencies = [
 
 [[package]]
 name = "zeus-engine"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "alacritty_terminal",
  "base64 0.23.1",
@@ -7340,14 +7340,14 @@ dependencies = [
 
 [[package]]
 name = "zeus-mcp"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "zeus-node"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "getrandom 0.4.3",
  "rusqlite",
@@ -7363,7 +7363,7 @@ dependencies = [
 
 [[package]]
 name = "zeus-proto"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -7373,14 +7373,14 @@ dependencies = [
 
 [[package]]
 name = "zeus-pty"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "zeus-remote"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "getrandom 0.4.3",
  "libc",
@@ -7396,7 +7396,7 @@ dependencies = [
 
 [[package]]
 name = "zeus-term"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "gpui",
  "gpui_platform",
@@ -7405,7 +7405,7 @@ dependencies = [
 
 [[package]]
 name = "zeus-terminal-state"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "alacritty_terminal",
  "zeus-proto",
@@ -7413,7 +7413,7 @@ dependencies = [
 
 [[package]]
 name = "zeus-ui"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "gpui",
  "gpui_platform",
@@ -7421,7 +7421,7 @@ dependencies = [
 
 [[package]]
 name = "zeus-updater"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -7430,7 +7430,7 @@ dependencies = [
 
 [[package]]
 name = "zeus-usage"
-version = "0.1.0"
+version = "0.0.1"
 
 [[package]]
 name = "zmij"

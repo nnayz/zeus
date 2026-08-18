@@ -5,6 +5,7 @@
 Zeus requires macOS 15 or newer. Install the signed, notarized universal build:
 
 ```sh
+brew tap nnayz/zeus https://github.com/nnayz/zeus.git
 brew install --cask nnayz/zeus/zeus
 ```
 

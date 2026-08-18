@@ -96,7 +96,7 @@ pub fn legacy_pane_name(session_id: &str) -> String {
 }
 
 /// Whether a name is one this program could have generated: the literal
-/// `zeus-` prefix plus one to eight lowercase hex digits and nothing else.
+/// `zeus-` prefix plus exactly eight lowercase hex digits and nothing else.
 ///
 /// Tighter than a prefix match on purpose. A user's own `zeus-notes` pane, or
 /// anything else that merely starts with `zeus-`, is not ours and is neither
@@ -105,8 +105,7 @@ fn is_zeus_generated_name(name: &str) -> bool {
     let Some(suffix) = name.strip_prefix("zeus-") else {
         return false;
     };
-    !suffix.is_empty()
-        && suffix.len() <= 8
+    suffix.len() == 8
         && suffix
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))

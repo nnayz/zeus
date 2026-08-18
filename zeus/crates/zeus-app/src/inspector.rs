@@ -26,7 +26,7 @@ use zeus_ui::{
     SemanticColors, Typo,
 };
 
-use crate::code_viewer::CodeViewer;
+use crate::code_viewer::{CodeViewer, word_wrap_ranges};
 use crate::diff::{
     DiffFile, DiffHunk, DiffLayer, DiffRow, DiffRowKind, DiffSnapshot, load_local_diff,
     snapshot_from_read_diff,
@@ -84,6 +84,7 @@ struct ScrollbarMetrics {
 #[derive(Clone, Debug)]
 pub enum InspectorEvent {
     Close,
+    OpenSettings,
     AddRemoteHost,
     Update(UpdateCommand),
 }
@@ -170,6 +171,8 @@ pub struct WorkbenchInspector {
     focus: FocusHandle,
     visible: bool,
     selected_tab: InspectorTab,
+    word_wrap: bool,
+    panel_width: f32,
     tab_direction: f32,
     tab_transition_generation: u64,
     context: Option<DiffContext>,
@@ -222,7 +225,16 @@ impl WorkbenchInspector {
         cx: &mut Context<Self>,
     ) -> Self {
         let tokio = tokio_owner.handle().clone();
-        let code_viewer = cx.new(|cx| CodeViewer::new(tokio.clone(), cx));
+        let (selected_tab, word_wrap, panel_width) = {
+            let store = runtime.store.read().expect("session store lock poisoned");
+            let preferences = store.preferences();
+            (
+                preferences.inspector_tab,
+                preferences.inspector_word_wrap,
+                preferences.inspector_width,
+            )
+        };
+        let code_viewer = cx.new(|cx| CodeViewer::new(tokio.clone(), word_wrap, panel_width, cx));
         let focus = cx.focus_handle();
         let mut changes = runtime.changes();
         let store_changes = cx.spawn(async move |this, cx| {
@@ -240,12 +252,6 @@ impl WorkbenchInspector {
                 }
             }
         });
-        let selected_tab = runtime
-            .store
-            .read()
-            .expect("session store lock poisoned")
-            .preferences()
-            .inspector_tab;
         Self {
             runtime,
             _tokio_owner: tokio_owner,
@@ -255,6 +261,8 @@ impl WorkbenchInspector {
             focus,
             visible: false,
             selected_tab,
+            word_wrap,
+            panel_width,
             tab_direction: 1.0,
             tab_transition_generation: 0,
             context: None,
@@ -318,6 +326,17 @@ impl WorkbenchInspector {
 
     pub fn set_preview_account(&mut self, preview: bool) {
         self.preview_account = preview;
+    }
+
+    pub fn set_panel_width(&mut self, width: f32, cx: &mut Context<Self>) {
+        if (self.panel_width - width).abs() < 0.5 {
+            return;
+        }
+        self.panel_width = width;
+        self.reset_diff_scroll();
+        self.code_viewer
+            .update(cx, |viewer, cx| viewer.set_viewport_width(width, cx));
+        cx.notify();
     }
 
     pub fn set_usage(&mut self, snapshot: UsageSnapshot, cx: &mut Context<Self>) {
@@ -432,6 +451,27 @@ impl WorkbenchInspector {
         }
         self.reconcile_diff_polling(cx);
         cx.notify();
+    }
+
+    pub(crate) fn set_word_wrap(&mut self, word_wrap: bool, cx: &mut Context<Self>) {
+        if self.word_wrap == word_wrap {
+            return;
+        }
+        self.word_wrap = word_wrap;
+        self.reset_diff_scroll();
+        self.code_viewer
+            .update(cx, |viewer, cx| viewer.set_word_wrap(self.word_wrap, cx));
+        cx.notify();
+    }
+
+    pub(crate) fn word_wrap_enabled(&self) -> bool {
+        self.word_wrap
+    }
+
+    fn reset_diff_scroll(&mut self) {
+        self.scroll = UniformListScrollHandle::new();
+        self.scrollbar_interaction = ScrollbarInteraction::default();
+        self.scrollbar_layout_primed = false;
     }
 
     fn select_comparison(&mut self, comparison: SessionDiffBase, cx: &mut Context<Self>) {
@@ -1000,6 +1040,35 @@ impl WorkbenchInspector {
             )
             .child(div().mt(px(8.0)).h(px(1.0)).bg(colors.primary.alpha(0.06)))
             .child(account_section_label("Account", colors))
+            .child(
+                div()
+                    .id("inspector-open-settings")
+                    .debug_selector(|| "INSPECTOR_OPEN_SETTINGS".to_owned())
+                    .mx(px(6.0))
+                    .px(px(8.0))
+                    .h(px(30.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .rounded(px(Radius::ROW))
+                    .cursor_pointer()
+                    .hover(move |element| element.bg(colors.primary.alpha(0.06)))
+                    .text_size(px(Typo::ROW.size))
+                    .text_color(colors.primary)
+                    .child(sf_symbol("gearshape", 11.0, colors.secondary))
+                    .child(div().flex_1().child("Settings"))
+                    .child(
+                        div()
+                            .text_size(px(Typo::META.size))
+                            .text_color(colors.tertiary)
+                            .child("⌘,"),
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.account_open = false;
+                        cx.emit(InspectorEvent::OpenSettings);
+                        cx.notify();
+                    })),
+            )
             .child(
                 div()
                     .id("inspector-account-active")
@@ -1885,26 +1954,49 @@ impl WorkbenchInspector {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let row_count = snapshot.rows.len();
         let content_width =
             (GUTTER_WIDTH + 28.0 + snapshot.max_text_columns as f32 * 7.1).clamp(320.0, 3700.0);
         let inspector = cx.entity();
         let repo_root = snapshot.repo_root.clone();
         let armed_hunk = self.armed_hunk;
-        let list = uniform_list("inspector-diff", row_count, move |range, _, _| {
-            render_rows(
-                &snapshot,
-                range,
-                content_width,
-                colors,
-                inspector.clone(),
-                &repo_root,
-                armed_hunk,
-            )
-        })
-        .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained)
-        .track_scroll(&self.scroll)
-        .size_full();
+        let list = if self.word_wrap {
+            let columns = ((self.panel_width - GUTTER_WIDTH - 28.0) / 7.1)
+                .floor()
+                .max(8.0) as usize;
+            let visual_rows = Arc::new(diff_visual_rows(&snapshot, columns));
+            let row_count = visual_rows.len();
+            uniform_list("inspector-diff-wrapped", row_count, move |range, _, _| {
+                render_wrapped_rows(
+                    &snapshot,
+                    &visual_rows,
+                    range,
+                    colors,
+                    inspector.clone(),
+                    &repo_root,
+                    armed_hunk,
+                )
+            })
+            .track_scroll(&self.scroll)
+            .size_full()
+            .into_any_element()
+        } else {
+            let row_count = snapshot.rows.len();
+            uniform_list("inspector-diff", row_count, move |range, _, _| {
+                render_rows(
+                    &snapshot,
+                    range,
+                    content_width,
+                    colors,
+                    inspector.clone(),
+                    &repo_root,
+                    armed_hunk,
+                )
+            })
+            .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained)
+            .track_scroll(&self.scroll)
+            .size_full()
+            .into_any_element()
+        };
         let scrollbar = self.render_scrollbar(colors, cx);
 
         // The list's scroll bounds are available after its first layout pass.
@@ -4361,11 +4453,53 @@ fn relative_time(milliseconds: f64) -> String {
 #[derive(Clone)]
 struct DiffRowRenderContext {
     content_width: f32,
+    word_wrap: bool,
     colors: SemanticColors,
     inspector: Entity<WorkbenchInspector>,
     repo_root: PathBuf,
     layer: DiffLayer,
     armed_hunk: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DiffVisualRow {
+    source_index: usize,
+    range: Range<usize>,
+    first: bool,
+}
+
+fn diff_visual_rows(snapshot: &DiffSnapshot, columns: usize) -> Vec<DiffVisualRow> {
+    let mut visual_rows = Vec::new();
+    for (source_index, row) in snapshot.rows.iter().enumerate() {
+        let prefix_columns = match row.kind {
+            DiffRowKind::File => 4,
+            DiffRowKind::Addition | DiffRowKind::Deletion => 1,
+            _ => 0,
+        };
+        let first_columns = columns.saturating_sub(prefix_columns).max(1);
+        let first = word_wrap_ranges(&row.text, first_columns)
+            .into_iter()
+            .next()
+            .unwrap_or(0..0);
+        let first_end = first.end;
+        visual_rows.push(DiffVisualRow {
+            source_index,
+            range: first,
+            first: true,
+        });
+        if first_end < row.text.len() {
+            visual_rows.extend(
+                word_wrap_ranges(&row.text[first_end..], columns)
+                    .into_iter()
+                    .map(|range| DiffVisualRow {
+                        source_index,
+                        range: first_end + range.start..first_end + range.end,
+                        first: false,
+                    }),
+            );
+        }
+    }
+    visual_rows
 }
 
 fn render_rows(
@@ -4379,6 +4513,7 @@ fn render_rows(
 ) -> Vec<AnyElement> {
     let context = DiffRowRenderContext {
         content_width,
+        word_wrap: false,
         colors,
         inspector,
         repo_root: repo_root.to_path_buf(),
@@ -4405,7 +4540,70 @@ fn render_rows(
                     })
                 })
                 .flatten();
-            render_row(index, &snapshot.rows[index], &context, file, hunk)
+            render_row(
+                index,
+                &DiffVisualRow {
+                    source_index: index,
+                    range: 0..snapshot.rows[index].text.len(),
+                    first: true,
+                },
+                &snapshot.rows[index],
+                &context,
+                file,
+                hunk,
+            )
+        })
+        .collect()
+}
+
+fn render_wrapped_rows(
+    snapshot: &DiffSnapshot,
+    visual_rows: &[DiffVisualRow],
+    range: Range<usize>,
+    colors: SemanticColors,
+    inspector: Entity<WorkbenchInspector>,
+    repo_root: &Path,
+    armed_hunk: Option<u64>,
+) -> Vec<AnyElement> {
+    let context = DiffRowRenderContext {
+        content_width: 0.0,
+        word_wrap: true,
+        colors,
+        inspector,
+        repo_root: repo_root.to_path_buf(),
+        layer: snapshot.layer,
+        armed_hunk,
+    };
+    range
+        .map(|display_index| {
+            let visual = &visual_rows[display_index];
+            let source_index = visual.source_index;
+            let owning_file = snapshot
+                .file_diffs
+                .iter()
+                .find(|file| file.row_range.contains(&source_index));
+            let file = (visual.first && snapshot.rows[source_index].kind == DiffRowKind::File)
+                .then(|| owning_file.cloned())
+                .flatten();
+            let hunk = (visual.first && snapshot.rows[source_index].kind == DiffRowKind::Hunk)
+                .then(|| {
+                    owning_file.and_then(|file| {
+                        file.hunks
+                            .iter()
+                            .find(|hunk| hunk.row_range.start == source_index)
+                            .cloned()
+                            .map(|hunk| (file.path.clone(), hunk))
+                    })
+                })
+                .flatten();
+            render_row(
+                display_index,
+                visual,
+                &snapshot.rows[source_index],
+                &context,
+                file,
+                hunk,
+            )
         })
         .collect()
 }
@@ -4425,12 +4623,16 @@ fn patch_creates_file(patch: &[u8]) -> bool {
 }
 
 fn render_row(
-    index: usize,
+    display_index: usize,
+    visual: &DiffVisualRow,
     row: &DiffRow,
     context: &DiffRowRenderContext,
     file: Option<DiffFile>,
     hunk: Option<(PathBuf, DiffHunk)>,
 ) -> AnyElement {
+    let source_index = visual.source_index;
+    let text_range = visual.range.clone();
+    let first = visual.first;
     let content_width = context.content_width;
     let colors = context.colors;
     let inspector = context.inspector.clone();
@@ -4446,10 +4648,11 @@ fn render_row(
         DiffRowKind::Meta => (rgba(0x00000000), rgba(0xffffff66), ""),
     };
     let line_number = |line: Option<u32>| line.map_or_else(String::new, |line| line.to_string());
+    let marker = if first { marker } else { "" };
     let text = if row.kind == DiffRowKind::File {
-        SharedString::from(row.text.clone())
+        SharedString::from(row.text[text_range.clone()].to_owned())
     } else {
-        SharedString::from(format!("{marker}{}", row.text))
+        SharedString::from(format!("{marker}{}", &row.text[text_range]))
     };
 
     let reference = row.text.clone();
@@ -4482,7 +4685,7 @@ fn render_row(
         };
         actions = actions.child(
             div()
-                .id(("ask-diff-file", index))
+                .id(("ask-diff-file", source_index))
                 .h_full()
                 .px(px(5.0))
                 .flex()
@@ -4509,7 +4712,7 @@ fn render_row(
                 let path = file.path.clone();
                 actions = actions.child(
                     div()
-                        .id(("stage-diff-file", index))
+                        .id(("stage-diff-file", source_index))
                         .h_full()
                         .px(px(5.0))
                         .flex()
@@ -4535,7 +4738,7 @@ fn render_row(
                 let path = file.path.clone();
                 actions = actions.child(
                     div()
-                        .id(("unstage-diff-file", index))
+                        .id(("unstage-diff-file", source_index))
                         .h_full()
                         .px(px(5.0))
                         .flex()
@@ -4572,7 +4775,7 @@ fn render_row(
         };
         actions = actions.child(
             div()
-                .id(("ask-diff-hunk", index))
+                .id(("ask-diff-hunk", source_index))
                 .h_full()
                 .px(px(5.0))
                 .flex()
@@ -4600,7 +4803,7 @@ fn render_row(
                 let stage_patch = patch.clone();
                 actions = actions.child(
                     div()
-                        .id(("stage-diff-hunk", index))
+                        .id(("stage-diff-hunk", source_index))
                         .h_full()
                         .px(px(5.0))
                         .flex()
@@ -4632,7 +4835,7 @@ fn render_row(
                     let armed = armed_hunk == Some(fingerprint);
                     actions = actions.child(
                         div()
-                            .id(("discard-diff-hunk", index))
+                            .id(("discard-diff-hunk", source_index))
                             .h_full()
                             .px(px(5.0))
                             .flex()
@@ -4677,7 +4880,7 @@ fn render_row(
                 let unstage_inspector = inspector.clone();
                 actions = actions.child(
                     div()
-                        .id(("unstage-diff-hunk", index))
+                        .id(("unstage-diff-hunk", source_index))
                         .h_full()
                         .px(px(5.0))
                         .flex()
@@ -4709,25 +4912,30 @@ fn render_row(
 
     let has_actions = file.is_some() || hunk.is_some();
     div()
-        .id(index)
+        .id(display_index)
         .relative()
         .h(px(DIFF_ROW_HEIGHT))
-        .min_w(px(content_width))
+        .min_w(px(if context.word_wrap {
+            0.0
+        } else {
+            content_width
+        }))
         .w_full()
         .flex()
         .items_center()
         .bg(background)
         .when(row.kind == DiffRowKind::File, |line| {
-            line.border_t_1()
-                .border_color(colors.primary.alpha(0.08))
-                .cursor_pointer()
-                .hover(move |line| line.bg(colors.primary.alpha(0.07)))
-                .on_click(move |_, _, cx| {
-                    open_inspector.update(cx, |inspector, cx| {
-                        inspector.open_file_reference(cwd.clone(), reference.clone(), cx);
-                    });
-                    cx.stop_propagation();
-                })
+            line.when(first, |line| {
+                line.border_t_1().border_color(colors.primary.alpha(0.08))
+            })
+            .cursor_pointer()
+            .hover(move |line| line.bg(colors.primary.alpha(0.07)))
+            .on_click(move |_, _, cx| {
+                open_inspector.update(cx, |inspector, cx| {
+                    inspector.open_file_reference(cwd.clone(), reference.clone(), cx);
+                });
+                cx.stop_propagation();
+            })
         })
         .child(
             div()
@@ -4744,14 +4952,25 @@ fn render_row(
                 .font_family(crate::fonts::mono_family())
                 .text_size(px(10.5))
                 .text_color(colors.primary.alpha(0.25))
-                .child(line_number(row.old_line))
-                .child(line_number(row.new_line)),
+                .child(if first {
+                    line_number(row.old_line)
+                } else {
+                    String::new()
+                })
+                .child(if first {
+                    line_number(row.new_line)
+                } else {
+                    String::new()
+                }),
         )
         .child(
             div()
                 .h_full()
+                .min_w(px(0.0))
+                .flex_1()
                 .flex()
                 .items_center()
+                .whitespace_nowrap()
                 .pl(px(if row.kind == DiffRowKind::File {
                     10.0
                 } else {
@@ -4766,7 +4985,7 @@ fn render_row(
                     FontWeight::NORMAL
                 })
                 .text_color(foreground)
-                .when(row.kind == DiffRowKind::File, |content| {
+                .when(first && row.kind == DiffRowKind::File, |content| {
                     content.child(sf_symbol(
                         "chevron.left.forwardslash.chevron.right",
                         13.0,
@@ -4813,6 +5032,43 @@ mod tests {
         assert_eq!(compact_duration(540), "9m");
     }
 
+    #[test]
+    fn wrapped_diff_rows_preserve_logical_rows_and_text() {
+        let snapshot = DiffSnapshot {
+            rows: vec![
+                DiffRow {
+                    kind: DiffRowKind::File,
+                    old_line: None,
+                    new_line: None,
+                    text: "src/a_very_long_filename.rs".to_owned(),
+                },
+                DiffRow {
+                    kind: DiffRowKind::Addition,
+                    old_line: None,
+                    new_line: Some(1),
+                    text: "let value = alpha_beta_gamma;".to_owned(),
+                },
+            ],
+            ..DiffSnapshot::default()
+        };
+        let rows = diff_visual_rows(&snapshot, 10);
+
+        for source_index in 0..snapshot.rows.len() {
+            let rebuilt = rows
+                .iter()
+                .filter(|row| row.source_index == source_index)
+                .map(|row| &snapshot.rows[source_index].text[row.range.clone()])
+                .collect::<String>();
+            assert_eq!(rebuilt, snapshot.rows[source_index].text);
+            assert_eq!(
+                rows.iter()
+                    .filter(|row| row.source_index == source_index && row.first)
+                    .count(),
+                1
+            );
+        }
+    }
+
     #[gpui::test]
     fn account_avatar_opens_the_account_menu(cx: &mut TestAppContext) {
         let runtime = Arc::new(StoreRuntime::inert());
@@ -4840,6 +5096,7 @@ mod tests {
         let inspector = harness.read_with(cx, |harness, _| harness.inspector.clone());
         assert!(inspector.read_with(cx, |inspector, _| inspector.account_open));
         assert!(cx.debug_bounds("INSPECTOR_ADD_REMOTE_HOST").is_some());
+        assert!(cx.debug_bounds("INSPECTOR_OPEN_SETTINGS").is_some());
     }
 
     #[test]

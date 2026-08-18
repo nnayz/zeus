@@ -37,15 +37,12 @@ use super::{
 const SIDEBAR_TITLE_SIZE: f32 = 14.0;
 const SIDEBAR_SUBTITLE_SIZE: f32 = 12.0;
 const SIDEBAR_ROW_HEIGHT: f32 = 28.0;
-const SIDEBAR_NEW_AGENT_HEIGHT: f32 = 40.0;
+const SIDEBAR_NEW_AGENT_HEIGHT: f32 = 48.0;
 
 #[derive(Clone, Debug)]
 pub enum SidebarEvent {
     VisibilityChanged,
     WidthChanged,
-    /// The title-bar gear is a settings affordance. RootView owns the settings
-    /// surface, so the sidebar requests it instead of opening its account menu.
-    OpenSettings,
     /// One-click path from the footer menu into the Remote host editor.
     AddRemoteHost,
     /// A plain click (or shortcut) selected a session: hand keyboard focus
@@ -542,13 +539,14 @@ impl Sidebar {
         };
         div()
             .id("new-agent")
+            .debug_selector(|| "SIDEBAR_NEW_AGENT".to_owned())
             .mx(px(Space::INSET))
             .mb(px(3.0))
             .px(px(Space::ROW_H))
             .h(px(SIDEBAR_NEW_AGENT_HEIGHT))
             .flex()
             .items_center()
-            .gap(px(6.0))
+            .gap(px(9.0))
             .rounded(px(Radius::ROW))
             .bg(Fill::hover(colors, hovering))
             .cursor_pointer()
@@ -564,24 +562,18 @@ impl Sidebar {
             }))
             .child(
                 div()
-                    .w(px(16.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(sf_symbol("square.and.pencil", 13.0, colors.secondary)),
-            )
-            .child(
-                div()
+                    .debug_selector(|| "SIDEBAR_NEW_AGENT_COPY".to_owned())
                     .min_w(px(0.0))
                     .flex_1()
                     .flex()
                     .flex_col()
-                    .gap(px(2.0))
+                    .gap(px(1.0))
                     .child(
                         div()
                             .whitespace_nowrap()
                             .overflow_hidden()
                             .text_ellipsis()
+                            .line_height(px(18.0))
                             .child("New Agent"),
                     )
                     .child(
@@ -590,6 +582,7 @@ impl Sidebar {
                             .overflow_hidden()
                             .text_ellipsis()
                             .text_size(px(SIDEBAR_SUBTITLE_SIZE))
+                            .line_height(px(16.0))
                             .text_color(colors.tertiary)
                             .child(format!("{agent} · {location}")),
                     ),
@@ -604,7 +597,6 @@ impl Sidebar {
     }
 
     fn top_bar(&self, colors: SemanticColors, cx: &mut Context<Self>) -> AnyElement {
-        let settings_hover = self.ui.hovered_control == Some("settings");
         let toggle_hover = self.ui.hovered_control == Some("sidebar-toggle");
         let toggle_icon = if self
             .store
@@ -625,20 +617,6 @@ impl Sidebar {
             .justify_end()
             .pr(px(Metrics::TOOLBAR_EDGE_INSET))
             .gap(px(Metrics::TOOLBAR_COMPACT_GAP))
-            .child(icon_button(
-                "settings",
-                "gearshape",
-                settings_hover,
-                colors,
-                cx.listener(|this, _, _, cx| {
-                    this.ui.popover = None;
-                    cx.emit(SidebarEvent::OpenSettings);
-                }),
-                cx.listener(|this, hovered: &bool, _, cx| {
-                    this.ui.hovered_control = hovered.then_some("settings");
-                    cx.notify();
-                }),
-            ))
             .child(icon_button(
                 "sidebar-toggle",
                 toggle_icon,

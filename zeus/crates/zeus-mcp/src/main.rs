@@ -245,15 +245,39 @@ mod tests {
     #[test]
     fn serves_mcp_without_a_resident_tool_runtime() {
         let mut backend = Fake;
+        let initialized = handle_message(
+            json!({
+                "jsonrpc":"2.0",
+                "id":1,
+                "method":"initialize",
+                "params":{
+                    "protocolVersion":"2025-06-18",
+                    "capabilities":{},
+                    "clientInfo":{"name":"codex","version":"test"}
+                }
+            }),
+            &mut backend,
+        )
+        .unwrap();
+        assert_eq!(initialized["result"]["protocolVersion"], "2025-06-18");
+        assert_eq!(initialized["result"]["capabilities"], json!({"tools":{}}));
+        assert!(
+            handle_message(
+                json!({"jsonrpc":"2.0","method":"notifications/initialized","params":{}}),
+                &mut backend,
+            )
+            .is_none()
+        );
+
         let listed = handle_message(
-            json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}),
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}),
             &mut backend,
         )
         .unwrap();
         assert_eq!(listed["result"]["tools"][0]["name"], "list_agents");
 
         let called = handle_message(
-            json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_agents","arguments":{}}}),
+            json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"list_agents","arguments":{}}}),
             &mut backend,
         )
         .unwrap();

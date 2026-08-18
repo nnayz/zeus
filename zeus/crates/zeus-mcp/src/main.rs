@@ -132,7 +132,7 @@ fn initialize(params: &Value) -> Value {
     json!({
         "protocolVersion": version,
         "capabilities": {"tools":{}},
-        "serverInfo": {"name":"zeus","version":"0.1.0"},
+        "serverInfo": {"name":"zeus","version":env!("CARGO_PKG_VERSION")},
         "instructions": format!(
             "This session is running INSIDE Zeus, a macOS orchestrator for coding agents. \
              These tools control it. Use them proactively whenever the user asks to \

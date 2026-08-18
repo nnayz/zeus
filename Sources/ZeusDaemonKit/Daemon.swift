@@ -15,7 +15,7 @@ public final class Daemon: Sendable {
     public let browserPool: BrowserPool
     let titleWatcher: TitleWatcher
     let shutdownRequest = ShutdownRequestBox()
-    public static let build = "0.1.0"
+    public static let build = "0.0.1"
 
     public init(config: DaemonConfig) {
         let events = EventBus()

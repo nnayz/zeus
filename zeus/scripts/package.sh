@@ -9,7 +9,7 @@ app_path="${dist_dir}/zeus.app"
 # The updater compares against CARGO_PKG_VERSION, so artifact names have to come
 # from the same place rather than a hand-passed number that can drift from it.
 cargo_version="$(sed -n 's/^version = "\(.*\)"/\1/p' "${workspace_dir}/crates/zeus-app/Cargo.toml" | head -1)"
-version="${ZEUS_VERSION:-${cargo_version:-0.1.0}}"
+version="${ZEUS_VERSION:-${cargo_version:-0.0.1}}"
 dmg_path="${dist_dir}/zeus-${version}-universal.dmg"
 # Update artifact: a zip of the stapled bundle, which is what zeus's updater
 # downloads. See crates/zeus-updater/src/install.rs.

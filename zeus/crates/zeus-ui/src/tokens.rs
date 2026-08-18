@@ -57,13 +57,13 @@ pub struct TypeStyle {
 pub struct Typo;
 
 impl Typo {
-    pub const META: TypeStyle = TypeStyle::new(10.5, FontWeight::MEDIUM, false);
-    pub const SECTION_HEADER: TypeStyle = TypeStyle::new(10.5, FontWeight::SEMIBOLD, false);
-    pub const ROW: TypeStyle = TypeStyle::new(12.5, FontWeight::NORMAL, false);
-    pub const ROW_EMPHASIZED: TypeStyle = TypeStyle::new(12.5, FontWeight::MEDIUM, false);
-    pub const TITLE: TypeStyle = TypeStyle::new(12.5, FontWeight::SEMIBOLD, false);
-    pub const DISPLAY_TITLE: TypeStyle = TypeStyle::new(14.0, FontWeight::SEMIBOLD, false);
-    pub const META_MONO: TypeStyle = TypeStyle::new(10.5, FontWeight::MEDIUM, true);
+    pub const META: TypeStyle = TypeStyle::new(11.0, FontWeight::MEDIUM, false);
+    pub const SECTION_HEADER: TypeStyle = TypeStyle::new(11.0, FontWeight::SEMIBOLD, false);
+    pub const ROW: TypeStyle = TypeStyle::new(13.0, FontWeight::NORMAL, false);
+    pub const ROW_EMPHASIZED: TypeStyle = TypeStyle::new(13.0, FontWeight::MEDIUM, false);
+    pub const TITLE: TypeStyle = TypeStyle::new(13.0, FontWeight::SEMIBOLD, false);
+    pub const DISPLAY_TITLE: TypeStyle = TypeStyle::new(15.0, FontWeight::SEMIBOLD, false);
+    pub const META_MONO: TypeStyle = TypeStyle::new(11.0, FontWeight::MEDIUM, true);
 
     pub const ALL: [(TextRole, TypeStyle); 7] = [
         (TextRole::Meta, Self::META),

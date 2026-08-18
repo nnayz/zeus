@@ -441,7 +441,7 @@ public enum InjectionBuilder {
         try fm.createDirectory(at: manifestDir, withIntermediateDirectories: true)
         let manifest: [String: Any] = [
             "name": "zeus",
-            "version": "0.1.0",
+            "version": "0.0.1",
             "description": "Zeus agent orchestration for Cursor sessions",
         ]
         try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])

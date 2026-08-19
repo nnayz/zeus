@@ -11,7 +11,7 @@ zeus doctor
 
 Include with your email:
 
-- Zeus version (`zeus --version` or the account popover)
+- Zeus version (the account popover, or Settings → General → Updates)
 - macOS version and chip
 - agent involved (if any)
 - steps to reproduce

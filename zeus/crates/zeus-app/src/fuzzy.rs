@@ -190,8 +190,8 @@ mod tests {
     #[test]
     fn prefixes_and_boundaries_outrank_buried_matches() {
         assert_eq!(
-            ranked("zeus", &["anara-zeus-calm-marten", "zeus"]),
-            ["zeus", "anara-zeus-calm-marten"]
+            ranked("zeus", &["mldrills-zeus-calm-marten", "zeus"]),
+            ["zeus", "mldrills-zeus-calm-marten"]
         );
         assert_eq!(
             ranked("term", &["New Terminal", "Determinate"]),

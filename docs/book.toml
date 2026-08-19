@@ -10,8 +10,8 @@ build-dir = "book"
 create-missing = false
 
 [output.html]
-default-theme = "light"
-preferred-dark-theme = "navy"
+default-theme = "ayu"
+preferred-dark-theme = "ayu"
 git-repository-url = "https://github.com/nnayz/zeus"
 site-url = "/"
 no-section-label = true

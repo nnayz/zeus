@@ -1980,7 +1980,7 @@ impl Sidebar {
             });
         if let Some(subtitle) = subtitle {
             // Repo-resolution state: "locating repo…" or the visible fallback
-            // ("anara not on Forge — opens in code").
+            // ("mldrills not on Forge — opens in code").
             header = header.child(
                 div()
                     .text_size(px(Typo::META.size))

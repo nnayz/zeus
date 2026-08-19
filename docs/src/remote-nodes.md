@@ -1,13 +1,20 @@
 # Remote nodes
 
 `zeus-node` makes a VPS (or another workstation) a first-party Zeus execution
-host. It is a per-user service: provider credentials remain on the machine where
-Claude Code or Codex runs, while Zeus gets one versioned management interface
-for accounts, usage, provider sessions, and handoff.
+host. Use it when SSH is not enough: you want per-machine Claude/Codex
+logins, merged usage in the inspector, and a move/fork of a live thread
+between laptop and VPS.
 
-SSH is still configured. It is the install/recovery path and the compatibility
-terminal path; it is no longer the source of truth for identity, usage, or
-movement.
+Provider credentials stay on the machine where the CLI runs. Zeus gets a
+versioned management interface for accounts, usage, provider sessions, and
+handoff.
+
+SSH is still configured. It is the install/recovery path and the
+compatibility terminal path. It is no longer the source of truth for
+identity, usage, or movement.
+
+Most people should start with [Remote hosts](remote-hosts.md). Come here
+when you are ready to treat a VPS as a first-class Zeus machine.
 
 ## Install on the VPS
 
@@ -85,9 +92,9 @@ zeus-node account default --provider codex --id work
 zeus-node account list
 ```
 
-You can run those commands directly from the local Mac against the VPS — no SSH
-shell is required. Add the enrolled connection flags to any `status` or
-`account` command:
+You can run those commands directly from the local Mac against the VPS. No
+interactive SSH shell is required. Add the enrolled connection flags to any
+`status` or `account` command:
 
 ```sh
 zeus-node account login --id personal \
@@ -106,8 +113,8 @@ subscription identities on one Mac are intentionally not claimed as isolated.
 
 Codex installations use a separate `CODEX_HOME`. Sessions bind to an explicit
 profile; changing a node default affects new sessions, not a running session.
-This is identity selection for legitimate personal/work contexts — not automatic
-rate-limit failover.
+This is identity selection for legitimate personal/work contexts, not
+automatic rate-limit failover.
 
 ## Instant move and fork
 

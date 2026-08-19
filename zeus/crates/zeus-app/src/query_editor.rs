@@ -473,7 +473,7 @@ mod tests {
 
     #[test]
     fn select_all_then_backspace_clears() {
-        let mut editor = seeded("anara");
+        let mut editor = seeded("mldrills");
         editor.select_all();
         editor.delete_backward(Motion::Character);
         assert_eq!(editor.text(), "");

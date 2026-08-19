@@ -5,6 +5,8 @@ updates:
     schedule:
       interval: weekly
       day: monday
+      time: "00:00"
+      timezone: Etc/UTC
     groups:
       rust-dependencies:
         patterns: ["*"]
@@ -15,6 +17,8 @@ updates:
     schedule:
       interval: weekly
       day: monday
+      time: "00:00"
+      timezone: Etc/UTC
     groups:
       sidecar-dependencies:
         patterns: ["*"]
@@ -25,6 +29,8 @@ updates:
     schedule:
       interval: weekly
       day: monday
+      time: "00:00"
+      timezone: Etc/UTC
     groups:
       actions:
         patterns: ["*"]
@@ -35,4 +41,6 @@ updates:
     schedule:
       interval: weekly
       day: monday
+      time: "00:00"
+      timezone: Etc/UTC
     open-pull-requests-limit: 2

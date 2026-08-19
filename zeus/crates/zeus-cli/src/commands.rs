@@ -304,6 +304,7 @@ fn session_spawn(command: Command) -> Result<i32, CliError> {
         initial_rows: None,
         host,
         same_repo_as: None,
+        workbench: session_id().map(|_| false),
     };
     let record: SessionRecord = conn::with_conn(Duration::from_secs(60), |conn| {
         conn.request(Method::SESSION_SPAWN, &params, Duration::from_secs(60))

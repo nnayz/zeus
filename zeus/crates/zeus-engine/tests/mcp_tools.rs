@@ -63,6 +63,7 @@ fn record(id: &str, parent: Option<&str>) -> SessionRecord {
         pull_requests: None,
         listening_ports: None,
         foreground_agent: None,
+        workbench: None,
     }
 }
 
@@ -475,6 +476,14 @@ fn a_spawned_session_records_its_parent_and_appears_as_a_child() {
         spawned["pendingPrompt"], "do the thing",
         "the prompt is returned rather than typed into a terminal that is still starting"
     );
+
+    let record = registry
+        .lock()
+        .expect("registry")
+        .record(&id)
+        .expect("spawned record");
+    assert_eq!(record.workbench, Some(false));
+    assert!(!record.is_workbench_terminal());
 
     let children = call(&server, "list_children", json!({})).expect("children");
     let children = children["children"].as_array().expect("array");

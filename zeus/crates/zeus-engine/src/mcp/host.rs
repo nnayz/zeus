@@ -356,6 +356,8 @@ impl RegistryHost {
         if let Some(title) = title {
             record.title = title;
         }
+        // MCP children are session tabs, never the parent's ⌘J split.
+        record.workbench = Some(false);
 
         let spec = crate::session::SessionSpec {
             id: id.clone(),

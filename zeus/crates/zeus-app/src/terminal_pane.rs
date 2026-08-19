@@ -10,8 +10,9 @@ use std::time::{Duration, Instant};
 use gpui::{
     AnyElement, App, ClickEvent, ClipboardEntry, ClipboardItem, Context, Entity, EventEmitter,
     FocusHandle, KeyBinding, KeyDownEvent, KeyUpEvent, ModifiersChangedEvent, MouseButton,
-    PathPromptOptions, Render, ScrollDelta, ScrollWheelEvent, SharedString,
-    StatefulInteractiveElement, Task, Window, actions, div, font, prelude::*, px, rgba,
+    PathBuilder, PathPromptOptions, Render, Rgba, ScrollDelta, ScrollHandle, ScrollWheelEvent,
+    SharedString, StatefulInteractiveElement, Task, Window, actions, canvas, div, font, point,
+    prelude::*, px, rgba,
 };
 use tokio::runtime::Handle;
 use tokio::sync::mpsc;
@@ -19,7 +20,7 @@ use zeus_client::attachment::{SessionAttachment, TerminalChunk};
 use zeus_proto::grid::GridUpdate;
 use zeus_proto::{
     AgentKind as ProtoAgentKind, ArtifactKind, ExitReason, PrCheck, Project, PullRequestStatus,
-    Resumability, RiskHint, SessionArtifact, SessionId, SessionRecord, SessionStatus,
+    Resumability, RiskHint, SessionArtifact, SessionId, SessionRecord, SessionStatus, TitleSource,
 };
 use zeus_term::buffer::GridBuffer;
 use zeus_term::element::{SharedGridBuffer, TerminalElement, TerminalReference};
@@ -33,17 +34,19 @@ use zeus_term::repaint::{RepaintAction, RepaintPacer};
 use zeus_term::scrollback::{WheelDelta, WheelEvent, WheelRoute};
 use zeus_term::theme::TermTheme;
 use zeus_ui::{
-    AgentKind as UiAgentKind, Fill, FloatingSurface, Ink, Metrics, Radius, SemanticColors,
-    StatusGlyph, StatusState, Typo,
+    AgentKind as UiAgentKind, AgentLogo, Fill, FloatingSurface, Ink, Metrics, Radius,
+    SemanticColors, StatusGlyph, StatusState, Typo, WorkingOrbit,
 };
 
 use crate::clipboard_transfer::StagedClipboardImage;
 use crate::macos::sf_symbols::{SymbolWeight, sf_symbol, sf_symbol_weighted};
 use crate::navigation::{NavigationOverlay, ToggleCommandPalette, ToggleQuickOpen, query_label};
+use crate::preview_terminal::preview_session_grid;
 use crate::query_editor::{self, ClipboardEdit, Edit, QueryEditor};
 use crate::session_surfaces::switcher_key;
-use crate::store::StoreRuntime;
+use crate::store::{LineageNode, LineageStrip, LineageView, StoreRuntime};
 use crate::surface_shell::UtilitySurfaces;
+use crate::switcher::display_title;
 
 const GRID_HORIZONTAL_PADDING: f32 = 24.0;
 const GRID_VERTICAL_PADDING: f32 = 12.0;
@@ -93,6 +96,18 @@ const ANCHOR_SLACK: f32 = 1.0;
 /// residency one.
 const PARKED_GRID_CAP: usize = 12;
 const WELCOME_RECENT_LIMIT: usize = 6;
+const LINEAGE_TAB_HEIGHT: f32 = 26.0;
+const LINEAGE_TREE_NODE_WIDTH: f32 = 124.0;
+const LINEAGE_TREE_MARK: f32 = 40.0;
+const LINEAGE_TREE_ICON: f32 = 26.0;
+const LINEAGE_TREE_CAPTION_GAP: f32 = 6.0;
+const LINEAGE_TREE_CAPTION_HEIGHT: f32 = 40.0;
+const LINEAGE_TREE_NODE_HEIGHT: f32 =
+    LINEAGE_TREE_MARK + LINEAGE_TREE_CAPTION_GAP + LINEAGE_TREE_CAPTION_HEIGHT;
+const LINEAGE_TREE_H_GAP: f32 = 28.0;
+const LINEAGE_TREE_V_GAP: f32 = 36.0;
+const LINEAGE_TREE_PAD: f32 = 28.0;
+const LINEAGE_TREE_ELBOW: f32 = 10.0;
 actions!(
     zeus_terminal,
     [
@@ -402,6 +417,12 @@ struct AttachmentControl {
 }
 
 impl AttachmentControl {
+    fn inert() -> Self {
+        let (tx, _) = mpsc::unbounded_channel();
+        let (pane_tx, _) = mpsc::unbounded_channel();
+        Self { tx, pane_tx }
+    }
+
     fn input(&self, bytes: Vec<u8>) {
         if bytes.is_empty() {
             return;
@@ -557,6 +578,8 @@ pub struct TerminalPane {
     /// absence of a session. RootView enables it for the primary pane so a
     /// restored selection cannot skip the workspace choice on launch.
     startup_welcome: bool,
+    preview: bool,
+    lineage_tree_scroll: ScrollHandle,
     viewport: Option<TerminalViewport>,
     chrome: ShellChrome,
     navigation: Option<Entity<NavigationOverlay>>,
@@ -579,6 +602,23 @@ impl TerminalPane {
             runtime,
             tokio_owner,
             SessionSource::FollowSelection,
+            false,
+            window,
+            cx,
+        )
+    }
+
+    pub fn new_preview(
+        runtime: Arc<StoreRuntime>,
+        tokio_owner: Arc<tokio::runtime::Runtime>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::new_with_source(
+            runtime,
+            tokio_owner,
+            SessionSource::FollowSelection,
+            true,
             window,
             cx,
         )
@@ -595,6 +635,7 @@ impl TerminalPane {
             runtime,
             tokio_owner,
             SessionSource::Fixed(session_id),
+            false,
             window,
             cx,
         )
@@ -604,6 +645,7 @@ impl TerminalPane {
         runtime: Arc<StoreRuntime>,
         tokio_owner: Arc<tokio::runtime::Runtime>,
         session_source: SessionSource,
+        preview: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -687,6 +729,8 @@ impl TerminalPane {
             session_source,
             observed_selected_id,
             startup_welcome: false,
+            preview,
+            lineage_tree_scroll: ScrollHandle::new(),
             viewport: None,
             chrome: ShellChrome {
                 sidebar_visible: true,
@@ -723,6 +767,16 @@ impl TerminalPane {
         // below by promotion.
         self.parked_grids
             .retain(|(id, _)| store.sessions().contains_key(id));
+        let preview_grids: HashMap<SessionId, GridBuffer> = if self.preview {
+            store
+                .sessions()
+                .iter()
+                .filter(|(id, _)| resident_ids.contains(*id) && !self.residents.contains_key(*id))
+                .map(|(id, session)| (id.clone(), preview_session_grid(session)))
+                .collect()
+        } else {
+            HashMap::new()
+        };
         drop(store);
         // Park the last-known grid of every session about to be evicted, so
         // re-selecting it paints instantly instead of flashing blank while
@@ -764,18 +818,31 @@ impl TerminalPane {
                 .iter()
                 .position(|(parked, _)| parked == &id)
                 .map(|index| self.parked_grids.remove(index).1);
-            let attachment = spawn_attachment(
-                &self.tokio,
-                socket.clone(),
-                id.clone(),
-                self.pane_tx.clone(),
-            );
+            let (attachment, attachment_state) = if self.preview {
+                (AttachmentControl::inert(), AttachmentState::Live)
+            } else {
+                (
+                    spawn_attachment(
+                        &self.tokio,
+                        socket.clone(),
+                        id.clone(),
+                        self.pane_tx.clone(),
+                    ),
+                    AttachmentState::Attaching,
+                )
+            };
             let ime_attachment = attachment.clone();
             let element = match parked {
                 // The parked cells paint on the first frame; the attach's
                 // full snapshot overwrites the same shared buffer moments
                 // later, so stale content lives for one round-trip at most.
                 Some(buffer) => TerminalElement::new(buffer),
+                None if self.preview => TerminalElement::with_buffer(
+                    preview_grids
+                        .get(&id)
+                        .cloned()
+                        .unwrap_or_else(GridBuffer::default),
+                ),
                 None => TerminalElement::with_buffer(GridBuffer::default()),
             }
             .font(mono)
@@ -786,7 +853,7 @@ impl TerminalPane {
                 ResidentTerminal {
                     element,
                     attachment,
-                    attachment_state: AttachmentState::Attaching,
+                    attachment_state,
                     find: None,
                     find_query: QueryEditor::default(),
                     last_size: (0, 0),
@@ -1555,7 +1622,7 @@ impl TerminalPane {
         let anchor = self
             .grid_row_overflow(grid_rows, font_size, window)
             .map_or(0.0, |grid_height| self.grid_inner_height() - grid_height);
-        let grid_y = viewport.y + Metrics::TITLE_BAR + 2.0 + anchor;
+        let grid_y = viewport.y + Metrics::TITLE_BAR + self.lineage_chrome_height() + 2.0 + anchor;
         let col = ((f32::from(position.x) - grid_x) / f32::from(metrics.cell_width))
             .floor()
             .max(0.0) as usize;
@@ -1594,7 +1661,52 @@ impl TerminalPane {
     /// same figure [`estimated_grid_size`] turns into a row count.
     fn grid_inner_height(&self) -> f32 {
         let height = self.viewport.map_or(0.0, |viewport| viewport.height);
-        (height - Metrics::TITLE_BAR - GRID_VERTICAL_PADDING - GRID_LAYOUT_VERTICAL_CHROME).max(1.0)
+        (height
+            - Metrics::TITLE_BAR
+            - self.lineage_chrome_height()
+            - GRID_VERTICAL_PADDING
+            - GRID_LAYOUT_VERTICAL_CHROME)
+            .max(1.0)
+    }
+
+    fn lineage_strip(&self) -> Option<LineageStrip> {
+        if !matches!(self.session_source, SessionSource::FollowSelection) {
+            return None;
+        }
+        let id = self.selected_id()?;
+        self.runtime
+            .store
+            .read()
+            .expect("session store lock poisoned")
+            .lineage_strip_for(&id)
+    }
+
+    fn lineage_view(&self) -> LineageView {
+        self.runtime
+            .store
+            .read()
+            .expect("session store lock poisoned")
+            .lineage_view()
+    }
+
+    fn lineage_tree_open(&self) -> bool {
+        self.lineage_view() == LineageView::Tree && self.lineage_strip().is_some()
+    }
+
+    fn set_lineage_view(&mut self, view: LineageView) {
+        self.runtime
+            .store
+            .write()
+            .expect("session store lock poisoned")
+            .set_lineage_view(view);
+    }
+
+    fn lineage_chrome_height(&self) -> f32 {
+        if self.lineage_strip().is_some() {
+            Metrics::LINEAGE_STRIP
+        } else {
+            0.0
+        }
     }
 
     fn copy_selection(&mut self, _: &CopySelection, _window: &mut Window, cx: &mut Context<Self>) {
@@ -1784,6 +1896,12 @@ impl TerminalPane {
             return;
         }
 
+        if self.lineage_tree_open() {
+            self.handle_lineage_tree_key(event, window, cx);
+            cx.stop_propagation();
+            return;
+        }
+
         let Some(id) = self.selected_id() else {
             return;
         };
@@ -1946,7 +2064,7 @@ impl TerminalPane {
         let metrics = CellMetrics::measure(window.text_system(), &font, px(font_size));
         let viewport = self.viewport.unwrap_or_default();
         let grid_x = viewport.x + GRID_HORIZONTAL_PADDING / 2.0;
-        let grid_y = viewport.y + Metrics::TITLE_BAR + 2.0;
+        let grid_y = viewport.y + Metrics::TITLE_BAR + self.lineage_chrome_height() + 2.0;
         let col = ((f32::from(event.position.x) - grid_x) / f32::from(metrics.cell_width))
             .floor()
             .max(0.0) as u16;
@@ -1985,6 +2103,9 @@ impl TerminalPane {
     }
 
     fn update_selected_geometry(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.preview || self.lineage_tree_open() {
+            return;
+        }
         let Some(session) = self.selected_session() else {
             return;
         };
@@ -2009,7 +2130,13 @@ impl TerminalPane {
             &font(crate::fonts::mono_family()),
             px(font_size),
         );
-        let size = estimated_grid_size(viewport.width, viewport.height, 0.0, metrics);
+        let size = estimated_grid_size(
+            viewport.width,
+            viewport.height,
+            0.0,
+            self.lineage_chrome_height(),
+            metrics,
+        );
         if let Some(resident) = self.residents.get_mut(&session.id)
             && resident.last_size != size
         {
@@ -2299,6 +2426,511 @@ impl TerminalPane {
                         trailing.child(control)
                     })
                     .when_some(trailing_reveal, |trailing, control| trailing.child(control)),
+            )
+            .into_any_element()
+    }
+
+    fn handle_lineage_tree_key(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event.keystroke.key.as_str() {
+            "escape" | "enter" => {
+                self.set_lineage_view(LineageView::Tabs);
+                self.focus(window, cx);
+                cx.notify();
+            }
+            "up" | "down" => {
+                let Some(strip) = self.lineage_strip() else {
+                    return;
+                };
+                let Some(selected) = self.selected_id() else {
+                    return;
+                };
+                let Some(index) = strip
+                    .nodes
+                    .iter()
+                    .position(|node| node.session.id == selected)
+                else {
+                    return;
+                };
+                let next = if event.keystroke.key == "up" {
+                    index.saturating_sub(1)
+                } else {
+                    (index + 1).min(strip.nodes.len().saturating_sub(1))
+                };
+                if let Some(node) = strip.nodes.get(next) {
+                    self.runtime
+                        .store
+                        .write()
+                        .expect("session store lock poisoned")
+                        .select(node.session.id.clone());
+                    cx.notify();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn render_lineage_chrome(
+        &self,
+        selected: &SessionRecord,
+        strip: &LineageStrip,
+        view: LineageView,
+        colors: SemanticColors,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let mut bar = div()
+            .id("lineage-strip")
+            .debug_selector(|| {
+                if view == LineageView::Tree {
+                    "AGENT_FAMILY_CHROME".into()
+                } else {
+                    "AGENT_TABS".into()
+                }
+            })
+            .h(px(Metrics::LINEAGE_STRIP))
+            .flex_none()
+            .px(px(Metrics::TOOLBAR_EDGE_INSET))
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .overflow_x_scroll()
+            .bg(colors.sidebar_surface())
+            .border_b_1()
+            .border_color(colors.primary.alpha(0.06))
+            .child(self.render_lineage_mode_switch(view, colors, cx));
+        if view == LineageView::Tabs {
+            for node in &strip.nodes {
+                bar = bar.child(self.render_lineage_tab(
+                    &node.session,
+                    selected.id == node.session.id,
+                    node.depth == 0,
+                    colors,
+                    cx,
+                ));
+            }
+        } else {
+            bar = bar.child(lineage_family_summary(strip, colors));
+        }
+        bar.into_any_element()
+    }
+
+    fn render_lineage_mode_switch(
+        &self,
+        current: LineageView,
+        colors: SemanticColors,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        div()
+            .flex_none()
+            .h(px(LINEAGE_TAB_HEIGHT))
+            .px(px(2.0))
+            .flex()
+            .items_center()
+            .gap(px(1.0))
+            .rounded(px(Radius::BADGE))
+            .bg(colors.primary.alpha(0.05))
+            .border_1()
+            .border_color(colors.primary.alpha(0.08))
+            .child(self.lineage_mode_button(
+                LineageView::Tabs,
+                current,
+                "list.bullet",
+                "Tabs",
+                colors,
+                cx,
+            ))
+            .child(self.lineage_mode_button(
+                LineageView::Tree,
+                current,
+                "arrow.triangle.branch",
+                "Tree",
+                colors,
+                cx,
+            ))
+            .into_any_element()
+    }
+
+    fn lineage_mode_button(
+        &self,
+        mode: LineageView,
+        current: LineageView,
+        icon: &'static str,
+        label: &'static str,
+        colors: SemanticColors,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let active = mode == current;
+        let selector = format!("LINEAGE_MODE_{}", label.to_ascii_uppercase());
+        div()
+            .id(SharedString::from(format!("lineage-mode-{label}")))
+            .debug_selector({
+                let selector = selector.clone();
+                move || selector.clone()
+            })
+            .h(px(22.0))
+            .px(px(7.0))
+            .flex()
+            .items_center()
+            .gap(px(4.0))
+            .rounded(px(Radius::CHIP))
+            .bg(colors.primary.alpha(if active { 0.12 } else { 0.0 }))
+            .cursor_pointer()
+            .hover(move |button| button.bg(colors.primary.alpha(if active { 0.16 } else { 0.06 })))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.set_lineage_view(mode);
+                if mode == LineageView::Tabs {
+                    this.focus(window, cx);
+                }
+                cx.notify();
+                cx.stop_propagation();
+            }))
+            .child(sf_symbol(
+                icon,
+                10.0,
+                if active {
+                    colors.primary
+                } else {
+                    colors.secondary
+                },
+            ))
+            .child(
+                div()
+                    .text_size(px(10.5))
+                    .font_weight(if active {
+                        Typo::SECTION_HEADER.weight
+                    } else {
+                        Typo::META.weight
+                    })
+                    .text_color(if active {
+                        colors.primary
+                    } else {
+                        colors.secondary
+                    })
+                    .child(label),
+            )
+            .into_any_element()
+    }
+
+    fn render_lineage_tab(
+        &self,
+        session: &SessionRecord,
+        selected: bool,
+        is_root: bool,
+        colors: SemanticColors,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let id = session.id.clone();
+        let glyph = self.glyphs.get(&session.id).cloned();
+        let label = lineage_tab_label(session);
+        let tint = Ink::working(ui_agent_kind(session.effective_kind()), colors);
+        let background = if selected {
+            tint.alpha(0.13)
+        } else {
+            colors.primary.alpha(0.03)
+        };
+        let border = if selected {
+            tint.alpha(0.42)
+        } else {
+            colors.primary.alpha(0.08)
+        };
+        let hover = tint.alpha(0.09);
+        div()
+            .id(SharedString::from(format!("lineage-tab:{}", id.0)))
+            .debug_selector({
+                let key = id.0.clone();
+                move || format!("LINEAGE_TAB_{key}")
+            })
+            .relative()
+            .h(px(LINEAGE_TAB_HEIGHT))
+            .max_w(px(200.0))
+            .flex_none()
+            .px(px(8.0))
+            .flex()
+            .items_center()
+            .gap(px(5.0))
+            .rounded(px(Radius::BADGE))
+            .bg(background)
+            .border_1()
+            .border_color(border)
+            .hover(move |tab| tab.bg(hover))
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.runtime
+                    .store
+                    .write()
+                    .expect("session store lock poisoned")
+                    .select(id.clone());
+                this.focus(window, cx);
+                cx.notify();
+                cx.stop_propagation();
+            }))
+            .when_some(glyph, |tab, glyph| {
+                tab.child(div().size(px(15.0)).flex_none().child(glyph))
+            })
+            .child(
+                div()
+                    .min_w(px(0.0))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_size(px(Typo::META.size))
+                    .font_weight(if selected {
+                        Typo::ROW_EMPHASIZED.weight
+                    } else {
+                        Typo::META.weight
+                    })
+                    .text_color(if selected {
+                        colors.primary
+                    } else {
+                        colors.secondary
+                    })
+                    .child(label),
+            )
+            .when(is_root, |tab| {
+                tab.child(
+                    div()
+                        .flex_none()
+                        .px(px(4.0))
+                        .py(px(1.0))
+                        .rounded(px(Radius::CHIP))
+                        .bg(tint.alpha(0.10))
+                        .text_size(px(8.5))
+                        .font_weight(Typo::SECTION_HEADER.weight)
+                        .text_color(tint)
+                        .child("Lead"),
+                )
+            })
+            .when(selected, |tab| {
+                tab.child(
+                    div()
+                        .absolute()
+                        .left(px(8.0))
+                        .right(px(8.0))
+                        .bottom(px(1.0))
+                        .h(px(1.5))
+                        .rounded_full()
+                        .bg(tint),
+                )
+            })
+            .into_any_element()
+    }
+
+    fn render_lineage_tree(
+        &self,
+        selected: &SessionRecord,
+        strip: LineageStrip,
+        colors: SemanticColors,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let path = lineage_selected_path(&strip, &selected.id);
+        let layout = layout_lineage_tree(&strip);
+        let pane_width = self
+            .viewport
+            .map_or(layout.width, |viewport| viewport.width);
+        let content_width = layout.width.max(pane_width);
+        let origin_x = ((content_width - layout.width) / 2.0).max(0.0);
+        let path_tint = Ink::working(ui_agent_kind(selected.effective_kind()), colors);
+        let mut board = div()
+            .id("lineage-tree-board")
+            .relative()
+            .w(px(content_width))
+            .h(px(layout.height))
+            .child(lineage_tree_edges(
+                &layout, origin_x, &path, path_tint, colors,
+            ));
+        for (index, placed) in layout.nodes.iter().enumerate() {
+            let Some(node) = strip.nodes.get(index) else {
+                continue;
+            };
+            let mut placed = placed.clone();
+            placed.x += origin_x;
+            placed.cx += origin_x;
+            board = board.child(self.render_lineage_tree_node(
+                node,
+                &placed,
+                selected.id == node.session.id,
+                path.contains(&node.session.id),
+                colors,
+                cx,
+            ));
+        }
+        div()
+            .id("lineage-tree")
+            .debug_selector(|| "AGENT_TREE".into())
+            .relative()
+            .min_h(px(0.0))
+            .flex_1()
+            .flex()
+            .flex_col()
+            .rounded_tl(px(Radius::CARD))
+            .rounded_tr(px(Radius::CARD))
+            .overflow_hidden()
+            .bg(colors.background)
+            .child(
+                div()
+                    .id("lineage-tree-scroll")
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .track_scroll(&self.lineage_tree_scroll)
+                    .overflow_scroll()
+                    .child(board),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .px(px(14.0))
+                    .py(px(8.0))
+                    .border_t_1()
+                    .border_color(colors.primary.alpha(0.06))
+                    .text_size(px(Typo::META.size))
+                    .text_color(colors.tertiary)
+                    .child(
+                        "↑↓ to move · Enter or double-click to open the terminal · Esc for tabs",
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn render_lineage_tree_node(
+        &self,
+        node: &LineageNode,
+        placed: &LineageTreePlacement,
+        selected: bool,
+        on_path: bool,
+        colors: SemanticColors,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let session = node.session.as_ref();
+        let id = session.id.clone();
+        let kind = ui_agent_kind(session.effective_kind());
+        let tint = Ink::working(kind, colors);
+        let state = status_state(session);
+        let working = matches!(state, StatusState::Working);
+        let dimmed = matches!(state, StatusState::None | StatusState::Hibernated);
+        let status = lineage_status_label(session);
+        let status_color = lineage_status_color(session, colors);
+        let label_color = if selected {
+            colors.primary
+        } else if on_path {
+            colors.primary.alpha(0.82)
+        } else {
+            colors.secondary
+        };
+        let ring = if selected {
+            tint.alpha(0.55)
+        } else {
+            colors.primary.alpha(0.0)
+        };
+        let hover_ring = tint.alpha(0.28);
+        let spin_id = SharedString::from(format!("lineage-spin:{}", id.0));
+        div()
+            .id(SharedString::from(format!("lineage-node:{}", id.0)))
+            .debug_selector({
+                let key = id.0.clone();
+                move || format!("LINEAGE_NODE_{key}")
+            })
+            .absolute()
+            .left(px(placed.x))
+            .top(px(placed.y))
+            .w(px(LINEAGE_TREE_NODE_WIDTH))
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap(px(LINEAGE_TREE_CAPTION_GAP))
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                this.runtime
+                    .store
+                    .write()
+                    .expect("session store lock poisoned")
+                    .select(id.clone());
+                if event.click_count() >= 2 {
+                    this.set_lineage_view(LineageView::Tabs);
+                    this.focus(window, cx);
+                }
+                cx.notify();
+                cx.stop_propagation();
+            }))
+            .child(
+                div()
+                    .relative()
+                    .size(px(LINEAGE_TREE_MARK))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .opacity(if dimmed { 0.42 } else { 1.0 })
+                    .child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .rounded_full()
+                            .border_1()
+                            .border_color(ring)
+                            .hover(move |orbit| orbit.border_color(hover_ring)),
+                    )
+                    .when(working, |mark| {
+                        mark.child(div().absolute().inset_0().child(WorkingOrbit::new(
+                            spin_id,
+                            LINEAGE_TREE_MARK,
+                            tint,
+                        )))
+                    })
+                    .child(AgentLogo::new(kind, LINEAGE_TREE_ICON, colors).badged(false)),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .h(px(LINEAGE_TREE_CAPTION_HEIGHT))
+                    .flex_none()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(1.0))
+                    .px(px(8.0))
+                    .rounded(px(Radius::BADGE))
+                    .bg(colors.floating_surface())
+                    .border_1()
+                    .border_color(if selected {
+                        tint.alpha(0.48)
+                    } else if on_path {
+                        tint.alpha(0.22)
+                    } else {
+                        colors.primary.alpha(0.10)
+                    })
+                    .child(
+                        div()
+                            .w_full()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .text_center()
+                            .text_size(px(Typo::META.size))
+                            .font_weight(Typo::TITLE.weight)
+                            .text_color(label_color)
+                            .child(lineage_tab_label(session)),
+                    )
+                    .child(
+                        div()
+                            .w_full()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .text_center()
+                            .text_size(px(10.0))
+                            .font_weight(Typo::SECTION_HEADER.weight)
+                            .text_color(status_color)
+                            .child(if node.depth == 0 {
+                                format!("Lead · {status}")
+                            } else {
+                                status.to_owned()
+                            }),
+                    ),
             )
             .into_any_element()
     }
@@ -2645,7 +3277,7 @@ impl TerminalPane {
             div()
                 .id("find-bar")
                 .absolute()
-                .top(px(Metrics::TITLE_BAR + 6.0))
+                .top(px(Metrics::TITLE_BAR + self.lineage_chrome_height() + 6.0))
                 .right(px(16.0))
                 .w(px(360.0))
                 .child(FloatingSurface::new(
@@ -2907,7 +3539,7 @@ impl TerminalPane {
                     div()
                         .id("checks-popover")
                         .absolute()
-                        .top(px(Metrics::TITLE_BAR + 4.0))
+                        .top(px(Metrics::TITLE_BAR + self.lineage_chrome_height() + 4.0))
                         .right(px(112.0))
                         .w(px(300.0))
                         .occlude()
@@ -3009,7 +3641,7 @@ impl TerminalPane {
                 .child(
                     div()
                         .absolute()
-                        .top(px(Metrics::TITLE_BAR + 4.0))
+                        .top(px(Metrics::TITLE_BAR + self.lineage_chrome_height() + 4.0))
                         .right(px(112.0))
                         .w(px(280.0))
                         .occlude()
@@ -3102,20 +3734,37 @@ impl Render for TerminalPane {
                     sidebar_colors,
                     cx,
                 ));
-            let terminal_surface = div()
-                .relative()
-                .min_h(px(0.0))
-                .flex_1()
-                .flex()
-                .flex_col()
-                .rounded_tl(px(Radius::CARD))
-                .rounded_tr(px(Radius::CARD))
-                .overflow_hidden()
-                .bg(theme.background)
-                .child(self.render_grid_and_overlays(&session, theme, font_size, window, cx));
-            pane = pane.child(terminal_surface);
-            if let Some(find) = self.render_find_bar(&session, colors, cx) {
-                pane = pane.child(find);
+            let strip = self.lineage_strip();
+            let lineage_view = self.lineage_view();
+            if let Some(strip) = strip.as_ref() {
+                pane = pane.child(self.render_lineage_chrome(
+                    &session,
+                    strip,
+                    lineage_view,
+                    sidebar_colors,
+                    cx,
+                ));
+            }
+            if lineage_view == LineageView::Tree
+                && let Some(strip) = strip
+            {
+                pane = pane.child(self.render_lineage_tree(&session, strip, sidebar_colors, cx));
+            } else {
+                let terminal_surface = div()
+                    .relative()
+                    .min_h(px(0.0))
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .rounded_tl(px(Radius::CARD))
+                    .rounded_tr(px(Radius::CARD))
+                    .overflow_hidden()
+                    .bg(theme.background)
+                    .child(self.render_grid_and_overlays(&session, theme, font_size, window, cx));
+                pane = pane.child(terminal_surface);
+                if let Some(find) = self.render_find_bar(&session, colors, cx) {
+                    pane = pane.child(find);
+                }
             }
             if let Some(popover) = self.render_checks_popover(&session, colors, cx) {
                 pane = pane.child(popover);
@@ -3461,17 +4110,306 @@ async fn wait_for_retry(
     }
 }
 
-fn ui_agent_kind(kind: &ProtoAgentKind) -> UiAgentKind {
-    // Brand vocabulary, not a protocol type: a manifest agent the client has
-    // no hand-drawn mark for falls back to the generic terminal treatment.
-    match kind.id() {
-        ProtoAgentKind::CLAUDE_CODE_ID => UiAgentKind::ClaudeCode,
-        ProtoAgentKind::CODEX_ID => UiAgentKind::Codex,
-        ProtoAgentKind::CURSOR_ID => UiAgentKind::Cursor,
-        ProtoAgentKind::GEMINI_ID => UiAgentKind::Gemini,
-        ProtoAgentKind::SHELL_ID => UiAgentKind::Shell,
-        _ => UiAgentKind::Generic,
+fn lineage_tab_label(session: &SessionRecord) -> String {
+    if session.title_source == TitleSource::Placeholder {
+        ui_agent_kind(session.effective_kind()).label().to_owned()
+    } else {
+        display_title(session)
     }
+}
+
+fn lineage_status_label(session: &SessionRecord) -> &'static str {
+    if session.hibernation.is_some() {
+        return "Hibernated";
+    }
+    match session.status {
+        SessionStatus::Starting => "Starting",
+        SessionStatus::Working => "Working",
+        SessionStatus::NeedsInput(_) => "Needs input",
+        SessionStatus::Idle => match session.attention() {
+            zeus_proto::AttentionLevel::DoneUnseen => "Done",
+            _ => "Idle",
+        },
+        SessionStatus::Exited(_) => "Ended",
+        SessionStatus::Unknown => "Unknown",
+    }
+}
+
+fn lineage_status_color(session: &SessionRecord, colors: SemanticColors) -> Rgba {
+    if session.hibernation.is_some() {
+        return colors.tertiary;
+    }
+    match session.status {
+        SessionStatus::Working | SessionStatus::Starting => Ink::FRESH,
+        SessionStatus::NeedsInput(_) => Ink::ATTENTION,
+        SessionStatus::Exited(_) => colors.tertiary,
+        SessionStatus::Idle | SessionStatus::Unknown => colors.secondary,
+    }
+}
+
+fn lineage_family_summary(strip: &LineageStrip, colors: SemanticColors) -> AnyElement {
+    let total = strip.nodes.len();
+    let working = strip
+        .nodes
+        .iter()
+        .filter(|node| {
+            matches!(
+                node.session.status,
+                SessionStatus::Working | SessionStatus::Starting
+            ) && node.session.hibernation.is_none()
+        })
+        .count();
+    let waiting = strip
+        .nodes
+        .iter()
+        .filter(|node| matches!(node.session.status, SessionStatus::NeedsInput(_)))
+        .count();
+    let mut parts = vec![format!(
+        "{total} agent{}",
+        if total == 1 { "" } else { "s" }
+    )];
+    if working > 0 {
+        parts.push(format!("{working} working"));
+    }
+    if waiting > 0 {
+        parts.push(format!("{waiting} waiting"));
+    }
+    div()
+        .min_w(px(0.0))
+        .flex_1()
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .text_ellipsis()
+        .text_size(px(Typo::META.size))
+        .text_color(colors.secondary)
+        .child(parts.join(" · "))
+        .into_any_element()
+}
+
+fn lineage_selected_path(strip: &LineageStrip, selected: &SessionId) -> HashSet<SessionId> {
+    let mut by_id = HashMap::new();
+    for node in &strip.nodes {
+        by_id.insert(node.session.id.clone(), Arc::clone(&node.session));
+    }
+    let mut path = HashSet::new();
+    let mut current = Some(selected.clone());
+    while let Some(id) = current {
+        if !path.insert(id.clone()) {
+            break;
+        }
+        current = by_id.get(&id).and_then(|session| session.parent.clone());
+    }
+    path
+}
+
+#[derive(Clone, Debug)]
+struct LineageTreePlacement {
+    id: SessionId,
+    parent: Option<SessionId>,
+    x: f32,
+    y: f32,
+    cx: f32,
+}
+
+#[derive(Clone, Debug)]
+struct LineageTreeLayout {
+    nodes: Vec<LineageTreePlacement>,
+    width: f32,
+    height: f32,
+}
+
+/// Top-down genealogy: each leaf occupies one slot, a parent is centered over
+/// its children, and levels share a y. That is the spatial tree, not a list.
+fn layout_lineage_tree(strip: &LineageStrip) -> LineageTreeLayout {
+    let count = strip.nodes.len();
+    let mut index_of = HashMap::with_capacity(count);
+    for (index, node) in strip.nodes.iter().enumerate() {
+        index_of.insert(node.session.id.clone(), index);
+    }
+    let mut children = vec![Vec::new(); count];
+    let mut root = 0usize;
+    for (index, node) in strip.nodes.iter().enumerate() {
+        if node.depth == 0 {
+            root = index;
+        }
+        if let Some(parent) = &node.session.parent
+            && let Some(&parent_index) = index_of.get(parent)
+        {
+            children[parent_index].push(index);
+        }
+    }
+    let mut units = vec![1.0f32; count];
+    for index in (0..count).rev() {
+        if !children[index].is_empty() {
+            units[index] = children[index].iter().map(|&child| units[child]).sum();
+        }
+    }
+    let mut starts = vec![0.0f32; count];
+    let mut order = vec![root];
+    let mut cursor = 0usize;
+    while cursor < order.len() {
+        let index = order[cursor];
+        let mut child_start = starts[index];
+        for &child in &children[index] {
+            starts[child] = child_start;
+            child_start += units[child];
+            order.push(child);
+        }
+        cursor += 1;
+    }
+
+    let slot = LINEAGE_TREE_NODE_WIDTH + LINEAGE_TREE_H_GAP;
+    let mut nodes = Vec::with_capacity(count);
+    for (index, node) in strip.nodes.iter().enumerate() {
+        let center = (starts[index] + units[index] / 2.0) * slot;
+        let x = center - LINEAGE_TREE_NODE_WIDTH / 2.0;
+        let y = f32::from(node.depth) * (LINEAGE_TREE_NODE_HEIGHT + LINEAGE_TREE_V_GAP)
+            + LINEAGE_TREE_PAD;
+        nodes.push(LineageTreePlacement {
+            id: node.session.id.clone(),
+            parent: node.session.parent.clone(),
+            x,
+            y,
+            cx: x + LINEAGE_TREE_NODE_WIDTH / 2.0,
+        });
+    }
+    let min_x = nodes
+        .iter()
+        .map(|node| node.x)
+        .fold(f32::INFINITY, f32::min);
+    let shift = LINEAGE_TREE_PAD - min_x;
+    for node in &mut nodes {
+        node.x += shift;
+        node.cx += shift;
+    }
+    let width = nodes
+        .iter()
+        .map(|node| node.x + LINEAGE_TREE_NODE_WIDTH)
+        .fold(0.0f32, f32::max)
+        + LINEAGE_TREE_PAD;
+    let height = nodes
+        .iter()
+        .map(|node| node.y + LINEAGE_TREE_NODE_HEIGHT)
+        .fold(0.0f32, f32::max)
+        + LINEAGE_TREE_PAD;
+    LineageTreeLayout {
+        nodes,
+        width,
+        height,
+    }
+}
+
+fn lineage_tree_edges(
+    layout: &LineageTreeLayout,
+    origin_x: f32,
+    path: &HashSet<SessionId>,
+    path_tint: Rgba,
+    colors: SemanticColors,
+) -> AnyElement {
+    let layout = layout.clone();
+    let path = path.clone();
+    let muted = colors.primary.alpha(0.16);
+    canvas(
+        move |bounds, _, _| {
+            let mut quiet = PathBuilder::stroke(px(1.25));
+            let mut active = PathBuilder::stroke(px(1.75));
+            let mut has_quiet = false;
+            let mut has_active = false;
+            let by_id: HashMap<_, _> = layout
+                .nodes
+                .iter()
+                .map(|node| (node.id.clone(), node))
+                .collect();
+            for child in &layout.nodes {
+                let Some(parent_id) = &child.parent else {
+                    continue;
+                };
+                let Some(parent) = by_id.get(parent_id) else {
+                    continue;
+                };
+                let from = point(
+                    bounds.origin.x + px(origin_x + parent.cx),
+                    bounds.origin.y + px(parent.y + LINEAGE_TREE_NODE_HEIGHT),
+                );
+                let to = point(
+                    bounds.origin.x + px(origin_x + child.cx),
+                    bounds.origin.y + px(child.y),
+                );
+                if path.contains(&parent.id) && path.contains(&child.id) {
+                    lineage_tree_elbow(&mut active, from, to);
+                    has_active = true;
+                } else {
+                    lineage_tree_elbow(&mut quiet, from, to);
+                    has_quiet = true;
+                }
+            }
+            (
+                has_quiet.then(|| quiet.build().ok()).flatten(),
+                has_active.then(|| active.build().ok()).flatten(),
+            )
+        },
+        move |_, mut paths, window, _| {
+            if let Some(path) = paths.0.take() {
+                window.paint_path(path, muted);
+            }
+            if let Some(path) = paths.1.take() {
+                window.paint_path(path, path_tint.alpha(0.62));
+            }
+        },
+    )
+    .absolute()
+    .inset_0()
+    .into_any_element()
+}
+
+/// Down from the parent's caption, across in the row gutter, then down to the
+/// child's mark. A straight drop when parent and child share a column.
+fn lineage_tree_elbow(
+    builder: &mut PathBuilder,
+    from: gpui::Point<gpui::Pixels>,
+    to: gpui::Point<gpui::Pixels>,
+) {
+    let fx = f32::from(from.x);
+    let fy = f32::from(from.y);
+    let tx = f32::from(to.x);
+    let ty = f32::from(to.y);
+    let dx = tx - fx;
+    let dy = ty - fy;
+    builder.move_to(from);
+    if dx.abs() < 0.5 {
+        builder.line_to(to);
+        return;
+    }
+    let mid_y = fy + dy / 2.0;
+    let radius = LINEAGE_TREE_ELBOW
+        .min(dx.abs() / 2.0)
+        .min(dy.abs() / 2.0)
+        .max(0.0);
+    if radius < 0.5 {
+        builder.line_to(point(px(fx), px(mid_y)));
+        builder.line_to(point(px(tx), px(mid_y)));
+        builder.line_to(to);
+        return;
+    }
+    let sign = if dx > 0.0 { 1.0 } else { -1.0 };
+    let kappa = radius * 0.5523;
+    builder.line_to(point(px(fx), px(mid_y - radius)));
+    builder.cubic_bezier_to(
+        point(px(fx + sign * radius), px(mid_y)),
+        point(px(fx), px(mid_y - radius + kappa)),
+        point(px(fx + sign * (radius - kappa)), px(mid_y)),
+    );
+    builder.line_to(point(px(tx - sign * radius), px(mid_y)));
+    builder.cubic_bezier_to(
+        point(px(tx), px(mid_y + radius)),
+        point(px(tx - sign * (radius - kappa)), px(mid_y)),
+        point(px(tx), px(mid_y + radius - kappa)),
+    );
+    builder.line_to(to);
+}
+
+fn ui_agent_kind(kind: &ProtoAgentKind) -> UiAgentKind {
+    UiAgentKind::from_id(kind.id())
 }
 
 fn status_state(session: &SessionRecord) -> StatusState {
@@ -3669,6 +4607,7 @@ fn estimated_grid_size(
     window_width: f32,
     window_height: f32,
     chrome_inset: f32,
+    extra_header: f32,
     metrics: CellMetrics,
 ) -> (u16, u16) {
     let width = px((window_width
@@ -3678,6 +4617,7 @@ fn estimated_grid_size(
         .max(1.0));
     let height = px((window_height
         - Metrics::TITLE_BAR
+        - extra_header
         - GRID_VERTICAL_PADDING
         - GRID_LAYOUT_VERTICAL_CHROME)
         .max(1.0));
@@ -4049,6 +4989,183 @@ mod tests {
         );
     }
 
+    #[test]
+    fn lineage_tree_layout_centers_parents_over_their_children() {
+        let store =
+            crate::sidebar::SidebarPreviewFixture::make(crate::sidebar::PreviewScenario::Typical)
+                .into_store();
+        let strip = store
+            .lineage_strip_for(&SessionId::new("preview-codex"))
+            .expect("spawn family");
+        let layout = layout_lineage_tree(&strip);
+        let by_id: HashMap<_, _> = layout
+            .nodes
+            .iter()
+            .map(|node| (node.id.clone(), node))
+            .collect();
+        let root = by_id.get(&SessionId::new("preview-codex")).expect("root");
+        let child = by_id.get(&SessionId::new("preview-cursor")).expect("child");
+        let sibling = by_id
+            .get(&SessionId::new("preview-spawned-review"))
+            .expect("sibling");
+        let grandchild = by_id
+            .get(&SessionId::new("preview-spawned-deep"))
+            .expect("grandchild");
+        assert!(root.y < child.y);
+        assert_eq!(child.y, sibling.y);
+        assert!(child.y < grandchild.y);
+        assert!((child.cx - grandchild.cx).abs() < f32::EPSILON);
+        assert!(root.cx > child.cx && root.cx < sibling.cx);
+        assert!((root.cx - (child.cx + sibling.cx) / 2.0).abs() < 1.0);
+        assert!(
+            grandchild.y - child.y >= LINEAGE_TREE_NODE_HEIGHT,
+            "vertical gap must leave room for elbow rails"
+        );
+        let parent_edge = root.y + LINEAGE_TREE_NODE_HEIGHT;
+        let child_edge = child.y;
+        assert!(
+            parent_edge <= child_edge,
+            "rails must leave the caption before entering the next mark"
+        );
+        let gutter = child_edge - parent_edge;
+        assert!(
+            gutter + f32::EPSILON >= LINEAGE_TREE_V_GAP,
+            "elbow bus must sit in the gutter under the caption, not through it"
+        );
+    }
+
+    #[gpui::test]
+    fn agent_tabs_render_the_complete_family_and_navigate_between_nodes(cx: &mut TestAppContext) {
+        let fixture =
+            crate::sidebar::SidebarPreviewFixture::make(crate::sidebar::PreviewScenario::Typical);
+        let runtime = Arc::new(StoreRuntime::preview_from(fixture.into_store()));
+        let runtime_for_view = Arc::clone(&runtime);
+        let tokio = Arc::new(
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime"),
+        );
+
+        let (_pane, cx) = cx.add_window_view(move |window, cx| {
+            TerminalPane::new_preview(runtime_for_view, tokio, window, cx)
+        });
+
+        let tabs = cx.debug_bounds("AGENT_TABS").expect("agent tab bar");
+        assert_eq!(f32::from(tabs.size.height), Metrics::LINEAGE_STRIP);
+        assert!(
+            cx.debug_bounds("AGENT_TREE").is_none(),
+            "tabs mode must not paint the workflow tree"
+        );
+        for selector in [
+            "LINEAGE_TAB_preview-codex",
+            "LINEAGE_TAB_preview-cursor",
+            "LINEAGE_TAB_preview-spawned-deep",
+            "LINEAGE_TAB_preview-spawned-review",
+        ] {
+            let node = cx
+                .debug_bounds(selector)
+                .unwrap_or_else(|| panic!("missing tab {selector}"));
+            assert_eq!(f32::from(node.size.height), LINEAGE_TAB_HEIGHT);
+            assert!(node.top() >= tabs.top() && node.bottom() <= tabs.bottom());
+        }
+
+        let child = cx
+            .debug_bounds("LINEAGE_TAB_preview-cursor")
+            .expect("direct child tab");
+        cx.simulate_click(child.center(), Modifiers::default());
+        assert_eq!(
+            runtime
+                .store
+                .read()
+                .expect("session store lock poisoned")
+                .selected_session_id(),
+            Some(&SessionId::new("preview-cursor"))
+        );
+        assert!(
+            cx.debug_bounds("LINEAGE_TAB_preview-spawned-deep")
+                .is_some(),
+            "selecting a child keeps the complete family available"
+        );
+    }
+
+    #[gpui::test]
+    fn agent_tree_is_a_separate_workflow_view(cx: &mut TestAppContext) {
+        let fixture =
+            crate::sidebar::SidebarPreviewFixture::make(crate::sidebar::PreviewScenario::Typical);
+        let runtime = Arc::new(StoreRuntime::preview_from(fixture.into_store()));
+        let runtime_for_view = Arc::clone(&runtime);
+        let tokio = Arc::new(
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime"),
+        );
+
+        let (_pane, cx) = cx.add_window_view(move |window, cx| {
+            TerminalPane::new_preview(runtime_for_view, tokio, window, cx)
+        });
+
+        let tree_mode = cx
+            .debug_bounds("LINEAGE_MODE_TREE")
+            .expect("tree mode switch");
+        cx.simulate_click(tree_mode.center(), Modifiers::default());
+
+        let tree = cx.debug_bounds("AGENT_TREE").expect("workflow tree");
+        assert!(
+            f32::from(tree.size.height) > Metrics::LINEAGE_STRIP,
+            "tree view owns the pane, not the tab strip"
+        );
+        assert!(
+            cx.debug_bounds("AGENT_TABS").is_none(),
+            "tree mode replaces the tab strip with the genealogy"
+        );
+        let root = cx
+            .debug_bounds("LINEAGE_NODE_preview-codex")
+            .expect("root node");
+        let child = cx
+            .debug_bounds("LINEAGE_NODE_preview-cursor")
+            .expect("child node");
+        let sibling = cx
+            .debug_bounds("LINEAGE_NODE_preview-spawned-review")
+            .expect("sibling node");
+        let grandchild = cx
+            .debug_bounds("LINEAGE_NODE_preview-spawned-deep")
+            .expect("grandchild node");
+        assert!(root.bottom() <= child.top());
+        assert_eq!(f32::from(child.origin.y), f32::from(sibling.origin.y));
+        assert!(child.bottom() <= grandchild.top());
+        assert!(root.left() < sibling.left());
+        assert!((f32::from(child.origin.x) - f32::from(grandchild.origin.x)).abs() < 2.0);
+        assert!(root.center().x > child.center().x && root.center().x < sibling.center().x);
+
+        cx.simulate_click(grandchild.center(), Modifiers::default());
+        assert_eq!(
+            runtime
+                .store
+                .read()
+                .expect("session store lock poisoned")
+                .selected_session_id(),
+            Some(&SessionId::new("preview-spawned-deep"))
+        );
+        assert!(
+            cx.debug_bounds("AGENT_TREE").is_some(),
+            "selecting a node stays in the tree view"
+        );
+
+        let tabs_mode = cx
+            .debug_bounds("LINEAGE_MODE_TABS")
+            .expect("tabs mode switch");
+        cx.simulate_click(tabs_mode.center(), Modifiers::default());
+        assert!(cx.debug_bounds("AGENT_TABS").is_some());
+        assert!(cx.debug_bounds("AGENT_TREE").is_none());
+        assert!(
+            cx.debug_bounds("LINEAGE_TAB_preview-spawned-deep")
+                .is_some(),
+            "the tab bar keeps the session selected in the tree"
+        );
+    }
+
     #[gpui::test]
     fn mirrored_inspector_toggle_moves_between_the_middle_and_panel_headers(
         cx: &mut TestAppContext,
@@ -4379,7 +5496,7 @@ mod tests {
         // A fractional-width boundary where the window estimate reports ten
         // columns, but the actual grid content box is three border pixels
         // narrower and can paint only nine.
-        let reported = estimated_grid_size(101.5, 100.0, 0.0, metrics);
+        let reported = estimated_grid_size(101.5, 100.0, 0.0, 0.0, metrics);
         let painted = metrics.cols_for_width(px(101.5
             - GRID_HORIZONTAL_PADDING
             - GRID_LAYOUT_HORIZONTAL_CHROME));

@@ -1386,16 +1386,7 @@ pub(crate) fn switcher_key(event: &KeyDownEvent) -> SwitcherKey {
 }
 
 fn ui_agent_kind(kind: &ProtoAgentKind) -> AgentKind {
-    // Brand vocabulary, not a protocol type: a manifest agent the client has
-    // no hand-drawn mark for falls back to the generic terminal treatment.
-    match kind.id() {
-        ProtoAgentKind::CLAUDE_CODE_ID => AgentKind::ClaudeCode,
-        ProtoAgentKind::CODEX_ID => AgentKind::Codex,
-        ProtoAgentKind::CURSOR_ID => AgentKind::Cursor,
-        ProtoAgentKind::GEMINI_ID => AgentKind::Gemini,
-        ProtoAgentKind::SHELL_ID => AgentKind::Shell,
-        _ => AgentKind::Generic,
-    }
+    AgentKind::from_id(kind.id())
 }
 
 fn ui_status_state(session: &SessionRecord) -> StatusState {
@@ -1537,6 +1528,7 @@ mod tests {
             pull_requests: None,
             listening_ports: None,
             foreground_agent: None,
+            workbench: None,
         }
     }
 

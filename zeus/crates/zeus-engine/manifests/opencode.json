@@ -35,6 +35,9 @@
       "ZEUS_",
       "ZEUS_"
     ],
+    "injection": {
+      "opencodeMCP": true
+    },
     "approve": {
       "text": "",
       "submit": true

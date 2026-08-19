@@ -1054,14 +1054,7 @@ fn initial_target(services: &AppServices) -> (AgentKind, String) {
 }
 
 fn ui_agent_kind(kind: &AgentKind) -> UiAgentKind {
-    match kind.id() {
-        AgentKind::CLAUDE_CODE_ID => UiAgentKind::ClaudeCode,
-        AgentKind::CODEX_ID => UiAgentKind::Codex,
-        AgentKind::CURSOR_ID => UiAgentKind::Cursor,
-        AgentKind::GEMINI_ID => UiAgentKind::Gemini,
-        AgentKind::SHELL_ID => UiAgentKind::Shell,
-        _ => UiAgentKind::Generic,
-    }
+    UiAgentKind::from_id(kind.id())
 }
 
 fn project_commit(project_count: usize, highlight: usize) -> ProjectCommit {

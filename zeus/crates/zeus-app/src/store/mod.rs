@@ -30,18 +30,41 @@ use crate::switcher::{
     SessionSwitcherState, SwitcherKey, SwitcherOutcome,
 };
 
-pub use prefs::{InspectorTab, Prefs, WindowMode, WindowPlacement};
+pub use prefs::{InspectorTab, LineageView, Prefs, WindowMode, WindowPlacement};
 pub use projection::{SidebarProject, SidebarProjection, SidebarRow};
 pub use residency::{ResidencyUpdate, TerminalResidency};
 
 pub const AUXILIARY_TERMINAL_TITLE: &str = "Terminal";
 
+/// One node in the recursive spawn family shown below the terminal toolbar.
+/// `depth` is relative to the oldest live ancestor. `is_last` and `rails`
+/// describe the node's place in its sibling run so the tree view can draw
+/// continuation rails without rebuilding lineage itself.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LineageNode {
+    pub session: Arc<SessionRecord>,
+    pub depth: u16,
+    pub is_last: bool,
+    pub has_children: bool,
+    /// Every agent below this one, not just its immediate children.
+    pub descendant_count: usize,
+    /// One bit per indent column: set when that column's rail continues past
+    /// this row. The column parenting this node is bit `depth - 1`.
+    pub rails: u32,
+}
+
+/// A complete live spawn tree, rooted at the oldest available ancestor.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LineageStrip {
+    pub root: Arc<SessionRecord>,
+    pub nodes: Vec<LineageNode>,
+}
+
 pub(crate) fn is_auxiliary_terminal(session: &SessionRecord) -> bool {
-    // `parent` was previously written to the wire but had no UI semantics.
-    // Shell children now belong to their parent's workbench. Do not key this
-    // off the title: shells can update their title through terminal escape
-    // sequences while they are running.
-    session.kind == AgentKind::SHELL && session.parent.is_some()
+    // Do not key this off the title: shells can update their title through
+    // terminal escape sequences while they are running. MCP-spawned shells
+    // set `workbench: false` so they stay nested session tabs.
+    session.is_workbench_terminal()
 }
 
 // Session titles, badges, and sidebar metadata change at human speed. Publishing
@@ -264,6 +287,9 @@ pub struct SessionStore {
     revision: u64,
     cached_projection: Option<(u64, Arc<SidebarProjection>)>,
     prefs_path: Option<PathBuf>,
+    /// Optional UI invalidation fan-out for headless preview runtimes that
+    /// have no daemon adapter to publish `changes()`.
+    ui_notify: Option<broadcast::Sender<()>>,
     /// Remote host catalog from hosts.json. Empty when the file is absent or
     /// invalid (pickers show Local only). Reloaded on picker open.
     hosts: Vec<HostEntry>,
@@ -324,6 +350,7 @@ impl SessionStore {
                 revision: 0,
                 cached_projection: None,
                 prefs_path,
+                ui_notify: None,
                 hosts: Vec::new(),
                 agents: AgentReadinessResult::default(),
                 effects,
@@ -461,6 +488,125 @@ impl SessionStore {
                     .unwrap_or(std::cmp::Ordering::Equal)
             })
             .cloned()
+    }
+
+    /// The complete MCP spawn tree containing `id`, rooted at the oldest live
+    /// ancestor. Workbench (⌘J) shells are excluded — they have their own split
+    /// pane. The walk is iterative because session lineage has no depth cap.
+    pub fn lineage_strip_for(&self, id: &SessionId) -> Option<LineageStrip> {
+        let session = self.sessions.get(id)?;
+        if session.is_workbench_terminal()
+            || session.is_archived()
+            || self.closing.contains(&session.id)
+        {
+            return None;
+        }
+
+        let is_visible = |candidate: &SessionRecord| {
+            !candidate.is_workbench_terminal()
+                && !candidate.is_archived()
+                && !self.closing.contains(&candidate.id)
+        };
+
+        let mut root_id = id.clone();
+        let mut seen = HashSet::from([root_id.clone()]);
+        while let Some(parent_id) = self
+            .sessions
+            .get(&root_id)
+            .and_then(|record| record.parent.as_ref())
+        {
+            let Some(parent) = self.sessions.get(parent_id).filter(|item| is_visible(item)) else {
+                break;
+            };
+            if !seen.insert(parent.id.clone()) {
+                break;
+            }
+            root_id = parent.id.clone();
+        }
+
+        let root = Arc::clone(self.sessions.get(&root_id)?);
+        let mut children: HashMap<SessionId, Vec<Arc<SessionRecord>>> = HashMap::new();
+        for candidate in self.sessions.values().filter(|item| is_visible(item)) {
+            let Some(parent) = &candidate.parent else {
+                continue;
+            };
+            if self
+                .sessions
+                .get(parent)
+                .is_some_and(|item| is_visible(item))
+            {
+                children
+                    .entry(parent.clone())
+                    .or_default()
+                    .push(Arc::clone(candidate));
+            }
+        }
+        for siblings in children.values_mut() {
+            siblings.sort_by(|left, right| {
+                left.created_at
+                    .0
+                    .total_cmp(&right.created_at.0)
+                    .then_with(|| left.id.0.cmp(&right.id.0))
+            });
+        }
+        if !children.contains_key(&root_id) {
+            return None;
+        }
+
+        let mut order = Vec::new();
+        let mut walk = vec![root_id.clone()];
+        let mut visited = HashSet::new();
+        while let Some(id) = walk.pop() {
+            if !visited.insert(id.clone()) {
+                continue;
+            }
+            order.push(id.clone());
+            if let Some(descendants) = children.get(&id) {
+                walk.extend(descendants.iter().rev().map(|item| item.id.clone()));
+            }
+        }
+        let mut descendant_counts: HashMap<SessionId, usize> = HashMap::new();
+        for id in order.iter().rev() {
+            let count = children.get(id).map_or(0, |descendants| {
+                descendants
+                    .iter()
+                    .map(|child| descendant_counts.get(&child.id).copied().unwrap_or(0) + 1)
+                    .sum()
+            });
+            descendant_counts.insert(id.clone(), count);
+        }
+
+        let mut nodes = Vec::new();
+        let mut stack = vec![(Arc::clone(&root), 0u16, true, 0u32)];
+        let mut emitted = HashSet::new();
+        while let Some((record, depth, is_last, rails)) = stack.pop() {
+            if !emitted.insert(record.id.clone()) {
+                continue;
+            }
+            let descendants = children.get(&record.id);
+            nodes.push(LineageNode {
+                session: Arc::clone(&record),
+                depth,
+                is_last,
+                has_children: descendants.is_some_and(|items| !items.is_empty()),
+                descendant_count: descendant_counts.get(&record.id).copied().unwrap_or(0),
+                rails,
+            });
+            if let Some(descendants) = descendants {
+                let count = descendants.len();
+                let inherited = rails | (1u32 << depth.min(31));
+                for (position, child) in descendants.iter().enumerate().rev() {
+                    let last = position + 1 == count;
+                    stack.push((
+                        Arc::clone(child),
+                        depth.saturating_add(1),
+                        last,
+                        if last { rails } else { inherited },
+                    ));
+                }
+            }
+        }
+        Some(LineageStrip { root, nodes })
     }
 
     pub fn projects(&self) -> &HashMap<ProjectId, Project> {
@@ -667,6 +813,20 @@ impl SessionStore {
             self.emit(StoreEffect::ConfigureGovernor(self.governor_settings()));
         }
         Ok(())
+    }
+
+    pub fn lineage_view(&self) -> LineageView {
+        self.prefs.lineage_view
+    }
+
+    pub fn set_lineage_view(&mut self, view: LineageView) {
+        if self.prefs.lineage_view == view {
+            return;
+        }
+        if let Err(error) = self.update_preferences(|prefs| prefs.lineage_view = view) {
+            eprintln!("zeus: could not persist lineage view: {error}");
+        }
+        self.emit(StoreEffect::UiChanged);
     }
 
     pub fn zoom_terminal(&mut self, delta: f32) -> io::Result<()> {
@@ -1701,6 +1861,7 @@ impl SessionStore {
             initial_rows: None,
             host: session.host.clone(),
             same_repo_as: None,
+            workbench: Some(true),
         }));
         true
     }
@@ -1739,6 +1900,7 @@ impl SessionStore {
             initial_rows: options.initial_rows,
             host,
             same_repo_as: options.same_repo_as,
+            workbench: None,
         }));
     }
 
@@ -1982,8 +2144,15 @@ impl SessionStore {
         self.cached_projection = None;
     }
 
+    pub fn set_ui_notify(&mut self, tx: broadcast::Sender<()>) {
+        self.ui_notify = Some(tx);
+    }
+
     fn emit(&self, effect: StoreEffect) {
         let _ = self.effects.send(effect);
+        if let Some(tx) = &self.ui_notify {
+            let _ = tx.send(());
+        }
     }
 }
 
@@ -2075,15 +2244,25 @@ impl StoreRuntime {
         Self::start(client, Prefs::path())
     }
 
-    /// A task-free runtime for deterministic previews. The preview sidebar
-    /// owns its fixture store; this bridge exists only to satisfy the shared
-    /// application-service interface without connecting to the real daemon.
+    /// A task-free runtime for tests. No daemon connection and no UI notify.
     pub fn inert() -> Self {
-        let (store, _effects) = SessionStore::headless(Prefs::default());
-        let store = Arc::new(RwLock::new(store));
+        Self::disconnected(SessionStore::headless(Prefs::default()).0, false)
+    }
+
+    /// Headless runtime hydrated from a fixture store. Store mutations publish
+    /// on `changes()` so the workbench stays in lockstep without a daemon.
+    pub fn preview_from(store: SessionStore) -> Self {
+        Self::disconnected(store, true)
+    }
+
+    fn disconnected(mut store: SessionStore, notify_ui: bool) -> Self {
         let (detach_tx, _) = broadcast::channel(1);
-        let (change_tx, _) = broadcast::channel(1);
+        let (change_tx, _) = broadcast::channel(16);
         let (status_tx, _) = broadcast::channel(1);
+        if notify_ui {
+            store.set_ui_notify(change_tx.clone());
+        }
+        let store = Arc::new(RwLock::new(store));
         let snapshot = store
             .read()
             .expect("session store lock poisoned")

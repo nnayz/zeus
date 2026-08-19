@@ -537,6 +537,18 @@ impl WorkbenchInspector {
                 .update(cx, |viewer, cx| viewer.set_workspace(workspace, cx));
         }
         self.context = Some(context.clone());
+        if self.preview_account {
+            self.loading = false;
+            self.state = LoadState::Ready(Arc::new(DiffSnapshot {
+                repo_root: context.cwd,
+                base_ref: Some("main".into()),
+                ..DiffSnapshot::default()
+            }));
+            self.review_state = ReviewLoadState::NoSession;
+            self.refresh_task = None;
+            cx.notify();
+            return;
+        }
         self.refresh_review(&context, force, cx);
         if !force && !context_changed && matches!(self.state, LoadState::NoSession) {
             return;
@@ -4269,14 +4281,7 @@ fn artifact_count(session: &SessionRecord) -> usize {
 }
 
 fn ui_agent_kind(kind: &ProtoAgentKind) -> AgentKind {
-    match kind.id() {
-        ProtoAgentKind::CLAUDE_CODE_ID => AgentKind::ClaudeCode,
-        ProtoAgentKind::CODEX_ID => AgentKind::Codex,
-        ProtoAgentKind::CURSOR_ID => AgentKind::Cursor,
-        ProtoAgentKind::GEMINI_ID => AgentKind::Gemini,
-        ProtoAgentKind::SHELL_ID => AgentKind::Shell,
-        _ => AgentKind::Generic,
-    }
+    AgentKind::from_id(kind.id())
 }
 
 fn session_status(session: &SessionRecord, colors: SemanticColors) -> (&'static str, gpui::Rgba) {

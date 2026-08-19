@@ -108,7 +108,22 @@ fn mcp_launch(cli_path: &Path) -> (String, Vec<String>) {
     }
 }
 
+/// `/usr/bin/env ZEUS_*=… zeus-mcp` so identity survives agents that scrub
+/// `ZEUS_*` from their own process environment.
+fn mcp_launch_for_session(cli_path: &Path, identity: &CursorInject<'_>) -> (String, Vec<String>) {
+    let (command, args) = mcp_launch(cli_path);
+    let mut wrapped = vec![
+        format!("ZEUS_SESSION_ID={}", identity.session_id),
+        format!("ZEUS_SOCKET={}", identity.socket_path.display()),
+        format!("ZEUS_CLI={}", cli_path.display()),
+        command,
+    ];
+    wrapped.extend(args);
+    ("/usr/bin/env".to_owned(), wrapped)
+}
+
 /// Session identity needed to bake Cursor's per-launch plugin (MCP env + hooks).
+#[derive(Clone, Copy)]
 pub struct CursorInject<'a> {
     pub session_id: &'a str,
     pub socket_path: &'a Path,
@@ -140,7 +155,11 @@ pub fn injection_args_with_cursor(
         }
     }
     if injection.claude_mcp {
-        let mcp = inject_dir.join("claude-mcp.json");
+        let mcp = match &cursor {
+            Some(identity) => write_session_claude_mcp(inject_dir, cli_path, identity)
+                .unwrap_or_else(|_| inject_dir.join("claude-mcp.json")),
+            None => inject_dir.join("claude-mcp.json"),
+        };
         if mcp.exists() {
             argv.push("--mcp-config".into());
             argv.push(mcp.to_string_lossy().into_owned());
@@ -154,7 +173,10 @@ pub fn injection_args_with_cursor(
         ));
     }
     if injection.codex_mcp {
-        let (command, args) = mcp_launch(cli_path);
+        let (command, args) = match &cursor {
+            Some(identity) => mcp_launch_for_session(cli_path, identity),
+            None => mcp_launch(cli_path),
+        };
         let encoded_args = args
             .iter()
             .map(|arg| toml_string(arg))
@@ -167,6 +189,12 @@ pub fn injection_args_with_cursor(
         ));
         argv.push("-c".into());
         argv.push(format!("mcp_servers.zeus.args=[{encoded_args}]"));
+        // Codex's built-in collaboration `spawn_agent` creates `/root/…`
+        // workers inside this PTY. Those never become Zeus sessions, so the
+        // sidebar stays empty. Disable it and leave MCP `spawn_agent` as the
+        // only spawn path while hosted by Zeus.
+        argv.push("-c".into());
+        argv.push("features.multi_agent=false".into());
     }
     if (injection.cursor_mcp || injection.cursor_hooks)
         && let Some(cursor) = cursor
@@ -181,8 +209,162 @@ pub fn injection_args_with_cursor(
     {
         argv.push("--plugin-dir".into());
         argv.push(plugin_dir.to_string_lossy().into_owned());
+        if injection.cursor_mcp {
+            argv.push("--approve-mcps".into());
+        }
     }
     argv
+}
+
+/// Extra process environment the agent needs so it *loads* the Zeus MCP
+/// server. These are applied after `spawn_spec` so scrub prefixes cannot
+/// drop them. Files are written here too — the env just points at them.
+pub fn injection_env(
+    injection: &InjectionSpec,
+    inject_dir: &Path,
+    cli_path: &Path,
+    identity: Option<CursorInject<'_>>,
+) -> Vec<(String, String)> {
+    let Some(identity) = identity else {
+        return Vec::new();
+    };
+    let mut env = Vec::new();
+    if injection.grok_mcp
+        && let Ok(path) = write_grok_mcp_overlay(inject_dir, cli_path, &identity)
+    {
+        env.push((
+            "GROK_CONFIG_PATH".into(),
+            path.to_string_lossy().into_owned(),
+        ));
+    }
+    if injection.opencode_mcp
+        && let Ok(path) = write_opencode_mcp_overlay(inject_dir, cli_path, &identity)
+    {
+        env.push((
+            "OPENCODE_CONFIG".into(),
+            path.to_string_lossy().into_owned(),
+        ));
+    }
+    if injection.gemini_mcp
+        && let Ok(path) = write_gemini_home(inject_dir, cli_path, &identity)
+    {
+        env.push((
+            "GEMINI_CLI_HOME".into(),
+            path.to_string_lossy().into_owned(),
+        ));
+    }
+    env
+}
+
+fn session_inject_dir(inject_dir: &Path, session_id: &str) -> PathBuf {
+    inject_dir.join("sessions").join(session_id)
+}
+
+fn write_session_claude_mcp(
+    inject_dir: &Path,
+    cli_path: &Path,
+    identity: &CursorInject<'_>,
+) -> io::Result<PathBuf> {
+    let (command, args) = mcp_launch_for_session(cli_path, identity);
+    let path = session_inject_dir(inject_dir, identity.session_id).join("claude-mcp.json");
+    write_atomic(
+        &path,
+        &serde_json::to_vec_pretty(&json!({
+            "mcpServers": {
+                "zeus": {
+                    "type": "stdio",
+                    "command": command,
+                    "args": args,
+                }
+            }
+        }))?,
+    )?;
+    Ok(path)
+}
+
+fn write_grok_mcp_overlay(
+    inject_dir: &Path,
+    cli_path: &Path,
+    identity: &CursorInject<'_>,
+) -> io::Result<PathBuf> {
+    let (command, args) = mcp_launch_for_session(cli_path, identity);
+    let path = session_inject_dir(inject_dir, identity.session_id).join("grok-mcp.json");
+    write_atomic(
+        &path,
+        &serde_json::to_vec_pretty(&json!({
+            "mcp_servers": {
+                "zeus": {
+                    "command": command,
+                    "args": args,
+                }
+            }
+        }))?,
+    )?;
+    Ok(path)
+}
+
+fn write_opencode_mcp_overlay(
+    inject_dir: &Path,
+    cli_path: &Path,
+    identity: &CursorInject<'_>,
+) -> io::Result<PathBuf> {
+    let (command, args) = mcp_launch_for_session(cli_path, identity);
+    let mut argv = vec![command];
+    argv.extend(args);
+    let path = session_inject_dir(inject_dir, identity.session_id).join("opencode.json");
+    write_atomic(
+        &path,
+        &serde_json::to_vec_pretty(&json!({
+            "mcp": {
+                "zeus": {
+                    "type": "local",
+                    "command": argv,
+                    "enabled": true
+                }
+            }
+        }))?,
+    )?;
+    Ok(path)
+}
+
+fn write_gemini_home(
+    inject_dir: &Path,
+    cli_path: &Path,
+    identity: &CursorInject<'_>,
+) -> io::Result<PathBuf> {
+    let dest = inject_dir.join("gemini").join(identity.session_id);
+    let _ = std::fs::remove_dir_all(&dest);
+    std::fs::create_dir_all(&dest)?;
+    let user = std::env::var("HOME")
+        .ok()
+        .map(|home| PathBuf::from(home).join(".gemini"));
+    if let Some(user) = user.as_ref().filter(|path| path.is_dir()) {
+        for entry in std::fs::read_dir(user)? {
+            let entry = entry?;
+            if entry.file_name() == "settings.json" {
+                continue;
+            }
+            let _ = std::os::unix::fs::symlink(entry.path(), dest.join(entry.file_name()));
+        }
+    }
+    let mut settings = user
+        .as_ref()
+        .map(|dir| dir.join("settings.json"))
+        .filter(|path| path.is_file())
+        .and_then(|path| std::fs::read(path).ok())
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .filter(|value| value.is_object())
+        .unwrap_or_else(|| json!({}));
+    let (command, args) = mcp_launch_for_session(cli_path, identity);
+    settings["mcpServers"]["zeus"] = json!({
+        "command": command,
+        "args": args,
+    });
+    write_atomic(
+        &dest.join("settings.json"),
+        &serde_json::to_vec_pretty(&settings)?,
+    )?;
+    Ok(dest)
 }
 
 /// Writes `<inject>/cursor-plugin/<session>/` with plugin manifest, optional
@@ -214,19 +396,20 @@ pub fn write_cursor_plugin(
     )?;
 
     if mcp {
-        let (target, target_args) = mcp_launch(cli_path);
+        let identity = CursorInject {
+            session_id,
+            socket_path,
+        };
+        let (command, args) = mcp_launch_for_session(cli_path, &identity);
         // Cursor splits `command` on spaces before spawning it. Keep the
         // App Support path in argv, where JSON preserves it as one argument.
-        let args = std::iter::once(target)
-            .chain(target_args)
-            .collect::<Vec<_>>();
         write_atomic(
             &staging.join("mcp.json"),
             &serde_json::to_vec_pretty(&json!({
                 "mcpServers": {
                     "zeus": {
                         "type": "stdio",
-                        "command": "/usr/bin/env",
+                        "command": command,
                         "args": args,
                         "env": {
                             "ZEUS_SESSION_ID": session_id,
@@ -427,6 +610,134 @@ mod tests {
                 .any(|arg| arg.starts_with("mcp_servers.zeus.command=")),
             "{args:?}"
         );
+        assert!(
+            args.iter().any(|arg| arg == "features.multi_agent=false"),
+            "{args:?}"
+        );
+    }
+
+    #[test]
+    fn codex_mcp_bakes_session_env_so_spawn_agent_nests_in_zeus() {
+        let temp = tempfile::tempdir().expect("temp");
+        let cli = temp.path().join("zeus");
+        std::fs::write(&cli, b"#!/bin/sh\n").expect("cli");
+        let socket = temp.path().join("d.sock");
+        let spec = InjectionSpec {
+            codex_mcp: true,
+            ..Default::default()
+        };
+        let args = injection_args_with_cursor(
+            &spec,
+            temp.path(),
+            &cli,
+            Some(CursorInject {
+                session_id: "s_parent",
+                socket_path: &socket,
+            }),
+        );
+        assert!(
+            args.iter().any(|arg| arg == "features.multi_agent=false"),
+            "{args:?}"
+        );
+        assert!(
+            args.iter()
+                .any(|arg| arg == "mcp_servers.zeus.command=\"/usr/bin/env\""),
+            "{args:?}"
+        );
+        let encoded = args
+            .iter()
+            .find(|arg| arg.starts_with("mcp_servers.zeus.args="))
+            .cloned()
+            .unwrap_or_default();
+        assert!(encoded.contains("ZEUS_SESSION_ID=s_parent"), "{encoded}");
+        assert!(
+            encoded.contains(&format!("ZEUS_SOCKET={}", socket.display())),
+            "{encoded}"
+        );
+    }
+
+    #[test]
+    fn grok_opencode_and_gemini_get_session_local_zeus_mcp() {
+        let temp = tempfile::tempdir().expect("temp");
+        let home = temp.path().join("home");
+        std::fs::create_dir_all(home.join(".gemini")).expect("gemini home");
+        std::fs::write(home.join(".gemini/settings.json"), br#"{"theme":"dark"}"#)
+            .expect("settings");
+        std::fs::write(home.join(".gemini/oauth.json"), b"{}").expect("oauth");
+        let cli = temp.path().join("zeus");
+        std::fs::write(&cli, b"#!/bin/sh\n").expect("cli");
+        let socket = temp.path().join("d.sock");
+        let identity = CursorInject {
+            session_id: "s_host",
+            socket_path: &socket,
+        };
+        let spec = InjectionSpec {
+            grok_mcp: true,
+            gemini_mcp: true,
+            opencode_mcp: true,
+            claude_mcp: true,
+            ..Default::default()
+        };
+        write_claude_mcp_file(temp.path(), &cli).expect("static mcp");
+        let previous_home = std::env::var("HOME").ok();
+        unsafe { std::env::set_var("HOME", &home) };
+        let env = injection_env(&spec, temp.path(), &cli, Some(identity));
+        match previous_home {
+            Some(value) => unsafe { std::env::set_var("HOME", value) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        let grok = env
+            .iter()
+            .find(|(key, _)| key == "GROK_CONFIG_PATH")
+            .map(|(_, value)| value.clone())
+            .expect("GROK_CONFIG_PATH");
+        let grok_json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&grok).expect("read grok")).expect("json");
+        assert_eq!(grok_json["mcp_servers"]["zeus"]["command"], "/usr/bin/env");
+        assert_eq!(
+            grok_json["mcp_servers"]["zeus"]["args"][0],
+            "ZEUS_SESSION_ID=s_host"
+        );
+
+        let opencode = env
+            .iter()
+            .find(|(key, _)| key == "OPENCODE_CONFIG")
+            .map(|(_, value)| value.clone())
+            .expect("OPENCODE_CONFIG");
+        let opencode_json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&opencode).expect("read opencode"))
+                .expect("json");
+        assert_eq!(opencode_json["mcp"]["zeus"]["enabled"], true);
+        assert_eq!(opencode_json["mcp"]["zeus"]["command"][0], "/usr/bin/env");
+
+        let gemini = env
+            .iter()
+            .find(|(key, _)| key == "GEMINI_CLI_HOME")
+            .map(|(_, value)| value.clone())
+            .expect("GEMINI_CLI_HOME");
+        let settings: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(Path::new(&gemini).join("settings.json")).expect("settings"),
+        )
+        .expect("json");
+        assert_eq!(settings["theme"], "dark");
+        assert_eq!(settings["mcpServers"]["zeus"]["command"], "/usr/bin/env");
+        assert!(
+            Path::new(&gemini).join("oauth.json").exists(),
+            "user auth files are linked into the session home"
+        );
+
+        let claude = injection_args_with_cursor(&spec, temp.path(), &cli, Some(identity));
+        let config = claude
+            .iter()
+            .position(|arg| arg == "--mcp-config")
+            .map(|index| claude[index + 1].clone())
+            .expect("claude --mcp-config");
+        let claude_json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&config).expect("read claude")).expect("json");
+        assert_eq!(
+            claude_json["mcpServers"]["zeus"]["args"][0],
+            "ZEUS_SESSION_ID=s_host"
+        );
     }
 
     #[test]
@@ -462,15 +773,20 @@ mod tests {
         );
         assert_eq!(args[0], "--plugin-dir");
         assert!(args[1].ends_with("cursor-plugin/s_test"), "{args:?}");
+        assert!(args.iter().any(|arg| arg == "--approve-mcps"), "{args:?}");
 
         let plugin = Path::new(&args[1]);
         let mcp: serde_json::Value =
             serde_json::from_slice(&std::fs::read(plugin.join("mcp.json")).expect("mcp.json"))
                 .expect("json");
         assert_eq!(mcp["mcpServers"]["zeus"]["command"], "/usr/bin/env");
-        assert_eq!(
-            mcp["mcpServers"]["zeus"]["args"][0],
-            proxy.to_string_lossy().as_ref()
+        let mcp_args = mcp["mcpServers"]["zeus"]["args"].as_array().expect("args");
+        assert_eq!(mcp_args[0], "ZEUS_SESSION_ID=s_test");
+        assert!(
+            mcp_args
+                .iter()
+                .any(|arg| arg == proxy.to_string_lossy().as_ref()),
+            "{mcp_args:?}"
         );
         assert_eq!(
             mcp["mcpServers"]["zeus"]["env"]["ZEUS_SESSION_ID"],

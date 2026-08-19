@@ -82,6 +82,8 @@ impl Gallery {
                 BrandMarkKind::OpenAi => AgentKind::Codex,
                 BrandMarkKind::Cursor => AgentKind::Cursor,
                 BrandMarkKind::Gemini => AgentKind::Gemini,
+                BrandMarkKind::Grok => AgentKind::Grok,
+                BrandMarkKind::OpenCode => AgentKind::OpenCode,
             };
             let color = Ink::working(agent, DARK);
             div()

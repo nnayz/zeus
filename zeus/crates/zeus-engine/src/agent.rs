@@ -58,6 +58,15 @@ pub struct InjectionSpec {
     /// Same plugin ships hooks: Cursor `stop` → `zeus hook Stop`.
     #[serde(default, rename = "cursorHooks")]
     pub cursor_hooks: bool,
+    /// Grok Build: `GROK_CONFIG_PATH` overlay with `[mcp_servers.zeus]`.
+    #[serde(default, rename = "grokMCP")]
+    pub grok_mcp: bool,
+    /// Gemini CLI: session-local `GEMINI_CLI_HOME` with `mcpServers.zeus`.
+    #[serde(default, rename = "geminiMCP")]
+    pub gemini_mcp: bool,
+    /// OpenCode: `OPENCODE_CONFIG` overlay with `mcp.zeus`.
+    #[serde(default, rename = "opencodeMCP")]
+    pub opencode_mcp: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -349,6 +358,16 @@ mod tests {
         // An agent added by dropping in a JSON file gets the right authority
         // with no code change at all.
         assert_eq!(descriptor("opencode").authority(), Authority::ScreenPrimary);
+    }
+
+    #[test]
+    fn first_class_agents_opt_into_zeus_mcp() {
+        assert!(descriptor("claude-code").injection.claude_mcp);
+        assert!(descriptor("codex").injection.codex_mcp);
+        assert!(descriptor("cursor").injection.cursor_mcp);
+        assert!(descriptor("gemini").injection.gemini_mcp);
+        assert!(descriptor("grok").injection.grok_mcp);
+        assert!(descriptor("opencode").injection.opencode_mcp);
     }
 
     #[test]

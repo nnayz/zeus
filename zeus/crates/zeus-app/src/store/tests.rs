@@ -12,9 +12,9 @@ use zeus_proto::{
 use crate::notifications::NotificationSound;
 
 use super::{
-    ClickModifiers, EventEnvelope, InspectorTab, Prefs, SessionStore, SidebarProjection,
-    StoreEffect, StoreEventChange, TerminalResidency, WindowMode, WindowPlacement,
-    event_publication_policy,
+    ClickModifiers, EventEnvelope, InspectorTab, LineageView, Prefs, SessionStore,
+    SidebarProjection, StoreEffect, StoreEventChange, TerminalResidency, WindowMode,
+    WindowPlacement, event_publication_policy,
 };
 use crate::switcher::{OverviewFilter, OverviewLane, SwitcherKey};
 
@@ -56,6 +56,7 @@ fn session(value: &str, project: &str, created: f64) -> SessionRecord {
         pull_requests: None,
         listening_ports: None,
         foreground_agent: None,
+        workbench: None,
     }
 }
 
@@ -367,7 +368,10 @@ fn spawned_sessions_nest_under_their_parent() {
         ]
     );
     assert!(projection.projects[0].sessions[0].has_children);
+    assert_eq!(projection.projects[0].sessions[0].descendant_count, 3);
+    assert_eq!(projection.projects[0].sessions[1].descendant_count, 1);
     assert!(!projection.projects[0].sessions[4].has_children);
+    assert_eq!(projection.projects[0].sessions[4].descendant_count, 0);
 }
 
 /// Collapsing a parent hides its whole subtree from the rows and from ⌘1…⌘9,
@@ -1181,6 +1185,7 @@ fn prefs_round_trip_and_zoom_clamp() {
         inspector_width: 516.0,
         inspector_tab: InspectorTab::Artifacts,
         inspector_word_wrap: true,
+        lineage_view: LineageView::Tree,
         last_selected_session: Some(id("s")),
         quick_open_roots: "~/fun\n~/src".to_owned(),
         sidebar_project_order: vec![pid("p")],
@@ -1417,6 +1422,7 @@ fn auxiliary_terminal_inherits_context_without_becoming_sidebar_selection() {
     assert_eq!(params.cwd, "/work/p/subdir");
     assert_eq!(params.host.as_deref(), Some("forge"));
     assert_eq!(params.parent, Some(id("one")));
+    assert_eq!(params.workbench, Some(true));
     assert_eq!(store.selected_session_id(), Some(&id("one")));
 }
 
@@ -1458,6 +1464,110 @@ fn auxiliary_terminal_is_hidden_and_removed_with_its_parent() {
         })
         .collect();
     assert_eq!(removed, HashSet::from([id("one"), id("terminal")]));
+}
+
+#[test]
+fn mcp_spawned_shell_is_a_session_tab_not_a_workbench_split() {
+    let primary = session("one", "p", 1.0);
+    let mut child = session("child-shell", "p", 2.0);
+    child.kind = AgentKind::SHELL;
+    child.parent = Some(id("one"));
+    child.workbench = Some(false);
+    child.title_source = TitleSource::ZeusAssigned;
+    let (mut store, _) = hydrated(
+        vec![primary, child],
+        vec![project("p", "Project")],
+        Prefs::default(),
+    );
+
+    assert_eq!(
+        store
+            .ordered_sessions()
+            .into_iter()
+            .map(|session| session.id)
+            .collect::<Vec<_>>(),
+        vec![id("one"), id("child-shell")]
+    );
+    assert!(store.auxiliary_terminal_for(&id("one")).is_none());
+    let strip = store
+        .lineage_strip_for(&id("one"))
+        .expect("parent with a spawned child has a lineage strip");
+    assert_eq!(strip.root.id, id("one"));
+    assert_eq!(
+        strip
+            .nodes
+            .iter()
+            .map(|node| node.session.id.clone())
+            .collect::<Vec<_>>(),
+        vec![id("one"), id("child-shell")]
+    );
+    assert_eq!(
+        store
+            .lineage_strip_for(&id("child-shell"))
+            .map(|strip| strip.root.id.clone()),
+        Some(id("one"))
+    );
+}
+
+#[test]
+fn lineage_strip_walks_from_a_grandchild_to_the_complete_agent_tree() {
+    let root = session("root", "p", 1.0);
+    let mut first = session("first", "p", 2.0);
+    first.parent = Some(id("root"));
+    let mut grandchild = session("grandchild", "p", 3.0);
+    grandchild.parent = Some(id("first"));
+    let mut sibling = session("sibling", "p", 4.0);
+    sibling.parent = Some(id("root"));
+    let (store, _) = hydrated(
+        vec![root, first, grandchild, sibling],
+        vec![project("p", "Project")],
+        Prefs::default(),
+    );
+
+    let strip = store
+        .lineage_strip_for(&id("grandchild"))
+        .expect("grandchild belongs to a live tree");
+    assert_eq!(strip.root.id, id("root"));
+    assert_eq!(
+        strip
+            .nodes
+            .iter()
+            .map(|node| {
+                (
+                    node.session.id.clone(),
+                    node.depth,
+                    node.is_last,
+                    node.descendant_count,
+                    node.rails,
+                )
+            })
+            .collect::<Vec<_>>(),
+        vec![
+            (id("root"), 0, true, 3, 0),
+            (id("first"), 1, false, 1, 1),
+            (id("grandchild"), 2, true, 0, 1),
+            (id("sibling"), 1, true, 0, 0),
+        ]
+    );
+}
+
+#[test]
+fn spawned_child_does_not_steal_the_parent_selection() {
+    let (mut store, mut effects) = hydrated(
+        vec![session("one", "p", 1.0)],
+        vec![project("p", "Project")],
+        Prefs::default(),
+    );
+    store.select(id("one"));
+    drain(&mut effects);
+
+    let mut child = session("child", "p", 2.0);
+    child.parent = Some(id("one"));
+    child.workbench = Some(false);
+    store.upsert_session(child);
+
+    assert_eq!(store.selected_session_id(), Some(&id("one")));
+    assert!(!store.terminal_residency().contains(&id("child")));
 }
 
 #[test]
@@ -1788,4 +1898,36 @@ fn inert_runtime_has_no_background_tasks_or_live_sessions() {
             .is_empty()
     );
     assert!(runtime.snapshots().borrow().sessions.is_empty());
+}
+
+#[test]
+fn preview_runtime_hydrates_fixture_and_publishes_changes() {
+    let fixture =
+        crate::sidebar::SidebarPreviewFixture::make(crate::sidebar::PreviewScenario::Typical);
+    let selected = fixture.selected_session_id.clone();
+    let runtime = super::StoreRuntime::preview_from(fixture.into_store());
+    assert_eq!(
+        runtime
+            .store
+            .read()
+            .expect("session store lock poisoned")
+            .selected_session_id(),
+        selected.as_ref()
+    );
+    let other = runtime
+        .store
+        .read()
+        .expect("session store lock poisoned")
+        .sessions()
+        .keys()
+        .find(|id| selected.as_ref() != Some(*id))
+        .cloned()
+        .expect("another fixture session");
+    let mut changes = runtime.changes();
+    runtime
+        .store
+        .write()
+        .expect("session store lock poisoned")
+        .select(other);
+    assert!(changes.try_recv().is_ok());
 }

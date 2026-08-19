@@ -30,6 +30,9 @@
       "ZEUS_",
       "ZEUS_"
     ],
+    "injection": {
+      "geminiMCP": true
+    },
     "foregroundExecNames": [
       "gemini"
     ],

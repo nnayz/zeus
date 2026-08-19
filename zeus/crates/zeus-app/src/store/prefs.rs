@@ -45,6 +45,18 @@ pub enum InspectorTab {
     Artifacts,
 }
 
+/// How the current spawn family is shown in the terminal pane.
+///
+/// `Tabs` is a compact switcher above the terminal. `Tree` replaces the
+/// terminal with the full agentic workflow genealogy.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LineageView {
+    #[default]
+    Tabs,
+    Tree,
+}
+
 /// Preferences intentionally persist the manifest id as a plain string. The
 /// four pre-catalog enum spellings are accepted forever because prefs survive
 /// upgrades; new saves use the canonical manifest ids (for example
@@ -117,6 +129,8 @@ pub struct Prefs {
     pub inspector_tab: InspectorTab,
     /// Shared soft-wrap preference for the inspector's Review and Code tabs.
     pub inspector_word_wrap: bool,
+    /// Tabs switcher vs dedicated workflow tree for a spawn family.
+    pub lineage_view: LineageView,
     /// Fraction of the terminal workbench reserved for the primary pane when
     /// the lower terminal is open.
     pub workbench_primary_fraction: f32,
@@ -157,6 +171,7 @@ impl Default for Prefs {
             inspector_width: 400.0,
             inspector_tab: InspectorTab::Info,
             inspector_word_wrap: false,
+            lineage_view: LineageView::Tabs,
             workbench_primary_fraction: crate::workbench::DEFAULT_PRIMARY_FRACTION,
             quick_open_roots: String::new(),
             sidebar_project_order: Vec::new(),

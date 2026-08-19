@@ -1,4 +1,4 @@
-//! Window-sidebar state, deterministic preview data, and GPUI rendering.
+//! Window-sidebar state, deterministic workbench preview data, and GPUI rendering.
 
 mod fixture;
 mod state;

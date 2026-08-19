@@ -86,6 +86,7 @@ pub enum IconName {
     Sidebar,
     SidebarRight,
     Sparkle,
+    Spinner,
     Stack,
     Terminal,
     Trash,
@@ -95,7 +96,7 @@ pub enum IconName {
 }
 
 impl IconName {
-    pub const ALL: [Self; 46] = [
+    pub const ALL: [Self; 47] = [
         Self::Activity,
         Self::Archive,
         Self::ArrowDown,
@@ -136,6 +137,7 @@ impl IconName {
         Self::Sidebar,
         Self::SidebarRight,
         Self::Sparkle,
+        Self::Spinner,
         Self::Stack,
         Self::Terminal,
         Self::Trash,
@@ -186,6 +188,7 @@ impl IconName {
             Self::Sidebar => "icons/sidebar.svg",
             Self::SidebarRight => "icons/sidebar-right.svg",
             Self::Sparkle => "icons/sparkle.svg",
+            Self::Spinner => "icons/spinner.svg",
             Self::Stack => "icons/stack.svg",
             Self::Terminal => "icons/terminal.svg",
             Self::Trash => "icons/trash.svg",
@@ -342,6 +345,7 @@ fn embedded_svg(path: &str) -> Option<&'static [u8]> {
         "icons/sidebar.svg" => include_bytes!("../assets/icons/sidebar.svg"),
         "icons/sidebar-right.svg" => include_bytes!("../assets/icons/sidebar-right.svg"),
         "icons/sparkle.svg" => include_bytes!("../assets/icons/sparkle.svg"),
+        "icons/spinner.svg" => include_bytes!("../assets/icons/spinner.svg"),
         "icons/stack.svg" => include_bytes!("../assets/icons/stack.svg"),
         "icons/terminal.svg" => include_bytes!("../assets/icons/terminal.svg"),
         "icons/trash.svg" => include_bytes!("../assets/icons/trash.svg"),

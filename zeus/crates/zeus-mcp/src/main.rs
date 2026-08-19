@@ -139,7 +139,10 @@ fn initialize(params: &Value) -> Value {
              open/start/spawn/close another agent, session, tab, or terminal (Claude Code, \
              Codex, Cursor, Gemini, or a shell), to check what other sessions are doing, to \
              talk to another session, or to parallelize work across git worktrees — no \
-             extra confirmation of intent needed.\n\nTypical orchestration flow: spawn_agent \
+             extra confirmation of intent needed.\n\nNever use the host agent's built-in \
+             collaboration spawn_agent / subagents: those workers stay inside this terminal \
+             and never appear in the Zeus sidebar. Always call this MCP spawn_agent so the \
+             child is a real Zeus tab.\n\nTypical orchestration flow: spawn_agent \
              (optionally worktree:true and an initial prompt) → wait_for_agent(until:\"done\") \
              → read_output → send_prompt for follow-ups → release_agent when finished. \
              get_artifacts returns PR/Linear/preview URLs and listening ports a session has \

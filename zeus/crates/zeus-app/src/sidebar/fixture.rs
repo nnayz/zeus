@@ -35,7 +35,7 @@ pub struct SidebarPreviewFixture {
 }
 
 impl SidebarPreviewFixture {
-    /// Deterministic sidebar contents for preview mode: mock dates, account
+    /// Deterministic workbench contents for preview mode: mock dates, account
     /// identity, and usage values, with no daemon connection.
     pub fn make(scenario: PreviewScenario) -> Self {
         if scenario == PreviewScenario::Empty {
@@ -529,6 +529,7 @@ fn session(
         pull_requests: None,
         listening_ports: None,
         foreground_agent: None,
+        workbench: None,
     })
 }
 

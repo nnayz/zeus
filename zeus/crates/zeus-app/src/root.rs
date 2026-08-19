@@ -176,7 +176,6 @@ pub struct RootView {
     status_banner_generation: u64,
     sound_gate: SoundGate,
     preview: bool,
-    preview_scenario: PreviewScenario,
     #[cfg(target_os = "macos")]
     menu_bar: Option<NativeMenuBar>,
     #[cfg(target_os = "macos")]
@@ -201,17 +200,27 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let sidebar_runtime = (!preview).then(|| Arc::clone(&services.store));
-        let sidebar = cx.new(|cx| Sidebar::new(sidebar_runtime, preview, preview_scenario, cx));
-        let terminal = (!preview).then(|| {
+        let sidebar = cx.new(|cx| {
+            Sidebar::new(
+                Some(Arc::clone(&services.store)),
+                preview,
+                preview_scenario,
+                cx,
+            )
+        });
+        let terminal = {
             let runtime = Arc::clone(&services.store);
             let tokio = Arc::clone(&services.tokio);
-            cx.new(|cx| {
-                let mut terminal = TerminalPane::new(runtime, tokio, window, cx);
-                terminal.show_startup_welcome();
-                terminal
-            })
-        });
+            Some(cx.new(|cx| {
+                if preview {
+                    TerminalPane::new_preview(runtime, tokio, window, cx)
+                } else {
+                    let mut terminal = TerminalPane::new(runtime, tokio, window, cx);
+                    terminal.show_startup_welcome();
+                    terminal
+                }
+            }))
+        };
         let navigation = (!preview).then(|| {
             let runtime = Arc::clone(&services.store);
             cx.new(|cx| NavigationOverlay::new(runtime, window, cx))
@@ -226,15 +235,15 @@ impl RootView {
             let updates = services.updates.clone();
             cx.new(|cx| UtilitySurfaces::new(runtime, tokio, updates, window, cx))
         });
-        let inspector = (!preview || preview_scenario == PreviewScenario::Artifacts).then(|| {
+        let inspector = {
             let runtime = Arc::clone(&services.store);
             let tokio = Arc::clone(&services.tokio);
-            cx.new(|cx| {
+            Some(cx.new(|cx| {
                 let mut inspector = WorkbenchInspector::new(runtime, tokio, cx);
                 inspector.set_preview_account(preview);
                 inspector
-            })
-        });
+            }))
+        };
         if let (Some(terminal), Some(navigation), Some(utility_surfaces)) =
             (&terminal, &navigation, &utility_surfaces)
         {
@@ -598,7 +607,6 @@ impl RootView {
             status_banner_generation: 0,
             sound_gate: SoundGate::default(),
             preview,
-            preview_scenario,
             #[cfg(target_os = "macos")]
             menu_bar,
             #[cfg(target_os = "macos")]
@@ -1325,7 +1333,7 @@ impl RootView {
     /// the terminal chrome button, and the panel's own ✕ -- so the debounce
     /// only has to hold here.
     fn set_inspector_open(&mut self, open: bool, cx: &mut Context<Self>) {
-        if self.preview || self.inspector_open == open {
+        if self.inspector_open == open {
             return;
         }
         let now = Instant::now();
@@ -1576,9 +1584,7 @@ impl RootView {
             .border_1()
             .border_color(terminal.primary.alpha(0.10));
 
-        if self.preview {
-            card = card.child(self.preview_workbench(terminal));
-        } else if split_open {
+        if split_open {
             let available_height = (card_height - 1.0).max(0.0);
             self.terminal_available_height = available_height;
             let heights = self.workbench_layout.pane_heights(available_height);
@@ -1690,89 +1696,6 @@ impl RootView {
         }
 
         card.child(card_outline).into_any_element()
-    }
-
-    fn preview_workbench(&self, colors: SemanticColors) -> AnyElement {
-        let scenario = match self.preview_scenario {
-            PreviewScenario::Typical => "Typical",
-            PreviewScenario::Stress => "Stress",
-            PreviewScenario::Empty => "Empty",
-            PreviewScenario::Artifacts => "Artifacts",
-        };
-        div()
-            .size_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .child(
-                div()
-                    .w(px(360.0))
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .gap(px(22.0))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .items_center()
-                            .gap(px(7.0))
-                            .child(
-                                div()
-                                    .text_size(px(25.0))
-                                    .font_weight(FontWeight::THIN)
-                                    .text_color(colors.secondary)
-                                    .child(sf_symbol_weighted(
-                                        "sidebar.left",
-                                        25.0,
-                                        SymbolWeight::Regular,
-                                        colors.secondary,
-                                    )),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(17.0))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child("Sidebar design preview"),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(Typo::META.size))
-                                    .text_color(colors.secondary)
-                                    .child("Mock data only · no daemon connection"),
-                            ),
-                    )
-                    .child(preview_control("Content", scenario, colors))
-                    .child(preview_control("Appearance", "Dark", colors))
-                    .child(
-                        div()
-                            .w_full()
-                            .p(px(14.0))
-                            .flex()
-                            .flex_col()
-                            .gap(px(9.0))
-                            .rounded(px(Radius::PANEL))
-                            .bg(colors.primary.alpha(0.045))
-                            .border_1()
-                            .border_color(colors.primary.alpha(0.07))
-                            .child(preview_hint(
-                                "cursorarrow.rays",
-                                "Hover rows and project headers",
-                                colors,
-                            ))
-                            .child(preview_hint(
-                                "cursorarrow.click.2",
-                                "Select, collapse, rename, and drag mock sessions",
-                                colors,
-                            ))
-                            .child(preview_hint(
-                                "arrow.left.and.right",
-                                "Resize the sidebar from its trailing edge",
-                                colors,
-                            )),
-                    ),
-            )
-            .into_any_element()
     }
 
     fn close_confirmation(
@@ -2200,57 +2123,6 @@ fn dev_build_marker(label: &str, colors: SemanticColors) -> AnyElement {
                 )
                 .child(div().text_color(Ink::ATTENTION.alpha(0.88)).child("DEV"))
                 .child("·")
-                .child(label.to_owned()),
-        )
-        .into_any_element()
-}
-
-fn preview_control(label: &str, value: &str, colors: SemanticColors) -> AnyElement {
-    div()
-        .w(px(330.0))
-        .flex()
-        .items_center()
-        .child(
-            div()
-                .w(px(82.0))
-                .text_size(px(Typo::ROW_EMPHASIZED.size))
-                .font_weight(Typo::ROW_EMPHASIZED.weight)
-                .text_color(colors.secondary)
-                .child(label.to_owned()),
-        )
-        .child(
-            div()
-                .flex_1()
-                .h(px(26.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(Radius::BADGE))
-                .bg(colors.primary.alpha(0.08))
-                .text_size(px(Typo::META.size))
-                .text_color(colors.primary)
-                .child(value.to_owned()),
-        )
-        .into_any_element()
-}
-
-fn preview_hint(system_image: &str, label: &str, colors: SemanticColors) -> AnyElement {
-    div()
-        .flex()
-        .items_center()
-        .gap(px(9.0))
-        .child(
-            div()
-                .w(px(15.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(sf_symbol(system_image, 11.0, colors.secondary)),
-        )
-        .child(
-            div()
-                .text_size(px(Typo::ROW.size))
-                .text_color(colors.primary.alpha(0.82))
                 .child(label.to_owned()),
         )
         .into_any_element()

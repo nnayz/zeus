@@ -17,6 +17,7 @@ mod markdown_view;
 pub mod navigation;
 pub mod notifications;
 pub mod palette;
+mod preview_terminal;
 pub mod query_editor;
 pub mod quick_open;
 pub mod review_prompt;
@@ -182,32 +183,11 @@ fn main() {
     let store_runtime = {
         let _guard = tokio.enter();
         Arc::new(if preview {
-            StoreRuntime::inert()
+            StoreRuntime::preview_from(SidebarPreviewFixture::make(scenario).into_store())
         } else {
             StoreRuntime::start_default(Arc::clone(&client)).expect("failed to load zeus state")
         })
     };
-    if preview {
-        let fixture = SidebarPreviewFixture::make(scenario);
-        let selected = fixture.selected_session_id.clone();
-        let mut store = store_runtime
-            .store
-            .write()
-            .expect("preview session store lock poisoned");
-        store.hydrate(fixture.list);
-        if let Some(selected) = selected {
-            store.select(selected);
-        }
-        if scenario == PreviewScenario::Artifacts {
-            store
-                .update_preferences(|prefs| {
-                    prefs.inspector_open = true;
-                    prefs.inspector_width = 480.0;
-                    prefs.inspector_tab = store::InspectorTab::Artifacts;
-                })
-                .expect("headless preview preferences");
-        }
-    }
     let (usage_tx, _) = tokio::sync::watch::channel(UsageSnapshot::default());
     if !preview {
         let usage_tx = usage_tx.clone();

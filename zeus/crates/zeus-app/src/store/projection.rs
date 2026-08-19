@@ -23,6 +23,9 @@ pub struct SidebarRow {
     pub depth: u16,
     /// This row has children, whether or not they are currently shown.
     pub has_children: bool,
+    /// Every agent below this one, not just its immediate children. The view
+    /// uses this for the compact branch-count badge when a subtree is folded.
+    pub descendant_count: usize,
     /// This row's subtree is folded away.
     pub collapsed: bool,
     pub pinned: bool,
@@ -232,6 +235,24 @@ fn build_tree(
         list.sort_by(order);
     }
 
+    // Size every subtree without recursion. Spawn lineage is persisted input
+    // and deliberately has no depth limit, so even this small piece of display
+    // metadata follows the same attacker-shaped-input discipline as the
+    // flattening pass below.
+    let mut traversal = Vec::with_capacity(active.len());
+    let mut count_stack = roots.clone();
+    while let Some(index) = count_stack.pop() {
+        traversal.push(index);
+        count_stack.extend(children[index].iter().copied());
+    }
+    let mut descendant_counts = vec![0usize; active.len()];
+    for index in traversal.into_iter().rev() {
+        descendant_counts[index] = children[index]
+            .iter()
+            .map(|child| descendant_counts[*child] + 1)
+            .sum();
+    }
+
     let mut rows = Vec::with_capacity(active.len());
     let mut tree_order = Vec::with_capacity(active.len());
     // Explicit stack rather than recursion: a spawn chain is attacker-shaped
@@ -250,6 +271,7 @@ fn build_tree(
                 session: Arc::clone(session),
                 depth,
                 has_children,
+                descendant_count: descendant_counts[index],
                 collapsed: is_collapsed,
                 pinned: pinned.contains(&session.id),
                 rails,

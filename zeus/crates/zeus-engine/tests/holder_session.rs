@@ -227,6 +227,7 @@ fn record(id: &str) -> zeus_proto::SessionRecord {
         pull_requests: None,
         listening_ports: None,
         foreground_agent: None,
+        workbench: None,
     }
 }
 

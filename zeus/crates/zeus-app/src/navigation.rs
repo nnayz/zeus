@@ -617,6 +617,13 @@ impl NavigationOverlay {
                 cx.emit(NavigationEvent::OpenOverview);
                 self.close_overlay(cx);
             }
+            PaletteCommand::ShowAgentWorkflow => {
+                self.store
+                    .write()
+                    .expect("session store lock poisoned")
+                    .set_lineage_view(crate::store::LineageView::Tree);
+                self.close_overlay(cx);
+            }
             PaletteCommand::OpenWorktrees => {
                 cx.emit(NavigationEvent::OpenWorktrees);
                 self.close_overlay(cx);

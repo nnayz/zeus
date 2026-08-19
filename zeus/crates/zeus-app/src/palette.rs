@@ -61,7 +61,7 @@ pub struct PaletteAction {
     pub enabled: bool,
     pub command: PaletteCommand,
     /// Scored alongside the title but never rendered: the folder path behind
-    /// "New Claude Code in anara", a host's ssh target, and the synonyms people
+    /// "New Claude Code in mldrills", a host's ssh target, and the synonyms people
     /// actually type ("shell" for New Terminal, "preferences" for Settings).
     pub keywords: String,
 }
@@ -867,7 +867,7 @@ mod tests {
         let all = actions(
             AgentKind::CLAUDE_CODE,
             &catalog(),
-            &[project("/work/anara", "anara")],
+            &[project("/work/mldrills", "mldrills")],
             &[],
             None,
         );
@@ -883,7 +883,7 @@ mod tests {
 
         assert_eq!(top("term").as_deref(), Some("new-terminal"));
         assert_eq!(top("ncc").as_deref(), Some("new-default"));
-        assert_eq!(top("anara").as_deref(), Some("new-default-in-/work/anara"));
+        assert_eq!(top("mldrills").as_deref(), Some("new-default-in-/work/mldrills"));
         // Synonyms nobody put in a title: "preferences" is only a keyword.
         assert_eq!(top("preferences").as_deref(), Some("settings"));
         assert_eq!(top("shell").as_deref(), Some("new-terminal"));

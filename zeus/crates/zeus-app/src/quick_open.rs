@@ -170,7 +170,7 @@ pub fn resolve_roots(roots_setting: &str, fallback: &[PathBuf], home: &Path) -> 
 ///
 /// Traversal is breadth-first *by design*. A depth-first walk spends the whole
 /// `INDEX_CAP` inside whichever subtree sorts first — on a checkout-heavy home
-/// directory that meant 20 000 entries burned inside `anara-*` and every folder
+/// directory that meant 20 000 entries burned inside `mldrills-*` and every folder
 /// alphabetically after it invisible to Quick Open. Breadth-first guarantees
 /// every top-level folder is indexed before any of their children, so the cap
 /// truncates the deepest, least useful level instead of the second half of the
@@ -625,7 +625,7 @@ mod tests {
     #[test]
     fn a_deep_first_subtree_cannot_starve_later_top_level_folders() {
         // The real failure this guards: `~/fun` held 260 checkouts, the walk
-        // was depth-first, and the index cap was spent inside the `anara-*`
+        // was depth-first, and the index cap was spent inside the `mldrills-*`
         // block — so `kairoskraft` was never indexed and ⌘P said "No matches".
         let temp = tempdir().unwrap();
         let root = temp.path().join("root");
@@ -667,7 +667,7 @@ mod tests {
             .path()
             .join("Application Support/zeus/quick-open-index.json");
         let roots = vec![PathBuf::from("/work")];
-        let entries = vec![fixture_entry("zeus"), fixture_entry("anara")];
+        let entries = vec![fixture_entry("zeus"), fixture_entry("mldrills")];
 
         store_cache(&path, &roots, &entries);
         assert_eq!(load_cache(&path, &roots), Some(entries.clone()));

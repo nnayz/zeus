@@ -354,10 +354,10 @@ fn migration_and_host_methods_use_the_swift_wire_names() {
         json!({"host": "forge", "sessionID": "s_1"})
     );
     let found: zeus_proto::HostLocateRepoResult = serde_json::from_value(
-        json!({"path": "/home/cristi/code/anara", "originURL": "git@github.com:anara/anara.git"}),
+        json!({"path": "/home/cristi/code/mldrills", "originURL": "git@github.com:mldrills/mldrills.git"}),
     )
     .unwrap();
-    assert_eq!(found.path.as_deref(), Some("/home/cristi/code/anara"));
+    assert_eq!(found.path.as_deref(), Some("/home/cristi/code/mldrills"));
     let miss: zeus_proto::HostLocateRepoResult = serde_json::from_value(json!({})).unwrap();
     assert_eq!(miss, zeus_proto::HostLocateRepoResult::default());
 

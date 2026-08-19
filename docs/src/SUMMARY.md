@@ -5,6 +5,14 @@
 # Using Zeus
 
 - [Getting started](getting-started.md)
+- [The workbench](workbench.md)
+- [Keyboard](keyboard.md)
+- [Agents and status](agents.md)
+- [Worktrees](worktrees.md)
+- [Orchestration](orchestration.md)
+- [Fleet patterns](fleet.md)
+- [Settings](settings.md)
+- [Command line](cli.md)
 - [Remote hosts](remote-hosts.md)
 - [Remote nodes](remote-nodes.md)
 - [Updates](updates.md)

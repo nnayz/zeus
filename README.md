@@ -3,10 +3,10 @@
 [![CI](https://github.com/nnayz/zeus/actions/workflows/ci.yml/badge.svg)](https://github.com/nnayz/zeus/actions/workflows/ci.yml)
 [![GitHub release](https://img.shields.io/github/v/release/nnayz/zeus)](https://github.com/nnayz/zeus/releases/latest)
 
-Native macOS orchestrator for coding agents. Run Claude Code, Codex, Cursor, Gemini and plain
-shells in parallel — across git worktrees or on remote hosts — each with a live status
-(working / needs-you / done) and tmux-like persistence: closing the app never kills a session,
-and a daemon restart brings conversations back.
+Native macOS orchestrator for coding agents. Run Claude Code, Codex, Cursor, Grok, OpenCode,
+Gemini and plain shells in parallel, across git worktrees or on remote hosts, each with a live
+status (working / needs-you / done). Closing the app never kills a session. A daemon restart
+brings conversations back.
 
 ![Zeus desktop app preview](docs/src/images/zeus-preview.png)
 
@@ -29,41 +29,43 @@ macOS 15 or newer.
 
 ## 60-second tour
 
-1. Add a project directory and create a session for Claude Code, Codex, another
-   supported agent, or a plain shell.
-2. Start several sessions, ideally in separate git worktrees when they edit the
-   same repository.
-3. Watch the sidebar instead of every terminal: it shows which agents are
-   working, waiting for you, or done.
-4. Quit and reopen zeus. The daemon keeps each PTY alive and replays the session
-   when you return.
+1. Open a project (`⌘O` or `⌘P`) and press `⌘N` (or `⌘T` for the default agent).
+2. Run several sessions. Give each writer its own git worktree so they do not
+   collide. Ask a hosted agent to `spawn_agent` rather than opening every child
+   by hand.
+3. Watch the sidebar instead of every terminal. `⌘⇧J` jumps to whoever needs
+   you. The workflow tree (`⌘K` → Agent Workflow Tree) is the orchestra pit.
+4. Accept the work in the inspector Review tab. Quit and reopen Zeus: the
+   daemon still holds every PTY.
 
-The [docs book](docs/) covers getting started, remote hosts, MCP orchestration,
-diagnostics, local data, and uninstalling (`mdbook serve docs`).
+The [docs book](https://docs.zeus.nasrul.info) is the user manual: workbench, keyboard,
+agents, orchestration, fleet patterns, remotes, and uninstalling. Build it locally with
+`mdbook serve docs`.
 
 ## What it does
 
 - **Many agents at once.** Each session is a real terminal with a real PTY. Group them by
   project, split them across git worktrees, or run them on a remote host over SSH.
 - **Status you can trust.** zeus reads what an agent actually painted on its screen and tells
-  you which ones are working, which are waiting on you, and which are done — so you can watch
+  you which ones are working, which are waiting on you, and which are done, so you can watch
   ten sessions without reading ten terminals.
 - **Sessions outlive the app.** A background daemon owns the PTYs. Quit zeus, reopen it, and
   everything is still there.
 - **Agents can orchestrate agents.** An MCP server lets a running agent spawn another one,
   watch it, read its output, and answer its prompts.
 
-Claude Code and Codex get first-class status detection and resume. Cursor and Gemini run with
-partial support, and anything else runs as a terminal with running/exited status.
+Claude Code and Codex get the richest status detection and resume. Cursor, Grok, OpenCode,
+Gemini, and the rest of the catalog still get a real PTY and a sidebar row. Anything without a
+manifest runs as a terminal with running/exited status.
 
 ## Architecture
 
 Two processes, one wire protocol:
 
-- **`zeus`** — the desktop app: Rust + [GPUI](https://github.com/zed-industries/zed). Owns the
+- **`zeus`**: the desktop app, Rust + [GPUI](https://github.com/zed-industries/zed). Owns the
   window, sidebar, terminal renderer, command palette, and usage accounting. Lives in
   [`zeus/`](zeus/).
-- **`zeusd-rs`** — the local Engine, launched by the app and outliving it. Owns PTYs and
+- **`zeusd-rs`**: the local Engine, launched by the app and outliving it. Owns PTYs and
   child agent processes, session registry and persistence, worktrees, and the control socket.
 
 `zeus` is also the CLI (a separate binary in `Resources/bin`): the MCP shim injected into agents,

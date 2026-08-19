@@ -40,6 +40,7 @@ pub enum PaletteCommand {
     },
     OpenQuickOpen,
     OpenSessionOverview,
+    ShowAgentWorkflow,
     OpenWorktrees,
     ToggleSidebar,
     OpenSettings,
@@ -145,6 +146,16 @@ pub fn actions_for_default_host(
             enabled: true,
             command: PaletteCommand::OpenSessionOverview,
             keywords: "board grid switcher all sessions".into(),
+        },
+        PaletteAction {
+            id: "agent-workflow".into(),
+            title: "Agent Workflow Tree".into(),
+            system_image: "arrow.triangle.branch",
+            shortcut: None,
+            detail: None,
+            enabled: true,
+            command: PaletteCommand::ShowAgentWorkflow,
+            keywords: "spawn tree lineage family agents workflow graph tabs".into(),
         },
     ]);
 
@@ -608,6 +619,7 @@ mod tests {
                 "new-terminal",
                 "quick-open",
                 "session-overview",
+                "agent-workflow",
                 "new-default-in-/work/zeus",
                 "worktrees",
                 "toggle-sidebar",
@@ -619,7 +631,7 @@ mod tests {
         assert_eq!(result[0].title, "New Codex Session");
         assert_eq!(result[0].shortcut, Some("⌘T"));
         assert_eq!(result[1].title, "New Claude Code Session");
-        assert_eq!(result[7].title, "New Codex in zeus");
+        assert_eq!(result[8].title, "New Codex in zeus");
     }
 
     #[test]
@@ -748,6 +760,7 @@ mod tests {
             pull_requests: None,
             listening_ports: None,
             foreground_agent: None,
+            workbench: None,
         }
     }
 

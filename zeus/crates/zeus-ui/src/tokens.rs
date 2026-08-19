@@ -246,7 +246,10 @@ impl Ink {
     pub fn working(kind: crate::AgentKind, semantic: SemanticColors) -> Rgba {
         match kind {
             crate::AgentKind::ClaudeCode => Palette::CLAY,
-            crate::AgentKind::Codex | crate::AgentKind::Cursor => semantic.primary.alpha(0.82),
+            crate::AgentKind::Codex
+            | crate::AgentKind::Cursor
+            | crate::AgentKind::Grok
+            | crate::AgentKind::OpenCode => semantic.primary.alpha(0.82),
             crate::AgentKind::Gemini => Palette::GEMINI_BLUE,
             crate::AgentKind::Shell | crate::AgentKind::Generic => Self::GENERIC_WORKING,
         }
@@ -258,6 +261,8 @@ impl Ink {
             crate::AgentKind::Codex => rgba_f32(0.180, 0.800, 0.741, 1.0),
             crate::AgentKind::Cursor => rgba_f32(0.62, 0.45, 0.95, 1.0),
             crate::AgentKind::Gemini => rgba_f32(0.85, 0.40, 0.55, 1.0),
+            crate::AgentKind::Grok => rgba_f32(0.90, 0.84, 0.72, 1.0),
+            crate::AgentKind::OpenCode => rgba_f32(0.72, 0.68, 0.64, 1.0),
             crate::AgentKind::Shell | crate::AgentKind::Generic => rgba_f32(0.62, 0.64, 0.68, 1.0),
         }
     }
@@ -304,6 +309,8 @@ pub struct Metrics;
 
 impl Metrics {
     pub const TITLE_BAR: f32 = 38.0;
+    /// Compact agent-family navigator below the terminal toolbar.
+    pub const LINEAGE_STRIP: f32 = 38.0;
     pub const TOOLBAR_EDGE_INSET: f32 = 10.0;
     /// Window-space x coordinate after the macOS close/minimize/zoom cluster.
     ///

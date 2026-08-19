@@ -134,7 +134,10 @@ fn initialize(params: &Value) -> Value {
              open/start/spawn/close another agent, session, tab, or terminal (Claude Code, \
              Codex, Cursor, Gemini, or a shell), to check what other sessions are doing, to \
              talk to another session, or to parallelize work across git worktrees — no \
-             extra confirmation of intent needed.\n\nTypical orchestration flow: spawn_agent \
+             extra confirmation of intent needed.\n\nNever use the host agent's built-in \
+             collaboration spawn_agent / subagents: those workers stay inside this terminal \
+             and never appear in the Zeus sidebar. Always call this MCP spawn_agent so the \
+             child is a real Zeus tab.\n\nTypical orchestration flow: spawn_agent \
              (optionally worktree:true and an initial prompt) → wait_for_agent(until:\"done\") \
              → read_output → send_prompt for follow-ups → release_agent when finished. \
              get_artifacts returns PR/Linear/preview URLs and listening ports a session has \
@@ -167,7 +170,7 @@ fn tool_definitions() -> Vec<Value> {
         tool(
             "spawn_agent",
             &format!(
-                "Open a NEW session (tab) in Zeus running {names} — locally or on a configured remote host. USE THIS whenever the user asks to open/start/spawn/launch another agent, session, or terminal."
+                "Open a NEW Zeus session tab nested under this one, running {names} — locally or on a configured remote host. This is the ONLY way spawned agents appear in the Zeus sidebar and terminal. Do NOT use built-in collaboration/subagent spawn — those stay hidden inside this PTY. USE THIS whenever the user asks to open/start/spawn/launch another agent, session, or terminal."
             ),
             json!({
                 "type":"object",
@@ -357,11 +360,17 @@ fn spawn_agent(args: &Value) -> Result<Value, CliError> {
             .get("prompt")
             .and_then(Value::as_str)
             .map(str::to_string),
-        parent: session_id(),
+        parent: Some(session_id().ok_or_else(|| {
+            CliError::Failure(
+                "ZEUS_SESSION_ID is unset, so Zeus cannot nest this spawn under you in the sidebar. Relaunch this session from Zeus."
+                    .into(),
+            )
+        })?),
         initial_cols: None,
         initial_rows: None,
         host: args.get("host").and_then(Value::as_str).map(str::to_string),
         same_repo_as: None,
+        workbench: Some(false),
     };
     conn::with_conn(Duration::from_secs(60), |conn| {
         conn.request_value(Method::SESSION_SPAWN, &params, Duration::from_secs(60))

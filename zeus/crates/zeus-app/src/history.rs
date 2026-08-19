@@ -98,6 +98,7 @@ pub fn resume_spawn(entry: &HistoryEntry) -> Option<SessionSpawnParams> {
         initial_rows: None,
         host: None,
         same_repo_as: None,
+        workbench: None,
     })
 }
 

@@ -43,6 +43,40 @@ impl RenderOnce for LoadingIndicator {
     }
 }
 
+/// Circular tick that orbits a brand mark while that agent is working.
+/// Reduce Motion freezes the ring, same as [`LoadingIndicator`].
+#[derive(IntoElement)]
+pub struct WorkingOrbit {
+    id: SharedString,
+    size: f32,
+    color: Rgba,
+}
+
+impl WorkingOrbit {
+    pub fn new(id: impl Into<SharedString>, size: f32, color: Rgba) -> Self {
+        Self {
+            id: id.into(),
+            size,
+            color,
+        }
+    }
+}
+
+impl RenderOnce for WorkingOrbit {
+    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        svg()
+            .path(IconName::Spinner.asset_path())
+            .flex_none()
+            .size(px(self.size))
+            .text_color(self.color)
+            .with_animation(
+                self.id,
+                Animation::new(Duration::from_millis(900)).repeat(),
+                |icon, delta| icon.with_transformation(Transformation::rotate(percentage(delta))),
+            )
+    }
+}
+
 /// Single-line text that stays ellipsized until an actual overflow is hovered,
 /// then reveals the complete value with a bounded horizontal marquee.
 ///

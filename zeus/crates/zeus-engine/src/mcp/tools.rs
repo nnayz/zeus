@@ -43,9 +43,12 @@ pub fn tool_definitions_for(kinds: &[String]) -> Vec<ToolDefinition> {
     vec![
         tool(
             "spawn_agent",
-            "Open a NEW session (tab) in zeus running an agent or a shell. USE THIS whenever the \
-             user asks to open, start, spawn or launch another agent, session, or terminal. \
-             Optionally create a fresh git worktree for it and give it an initial prompt.",
+            "Open a NEW Zeus session tab nested under this one. This is the ONLY way \
+             spawned agents appear in the Zeus sidebar and terminal. Do NOT use built-in \
+             collaboration/subagent spawn — those stay hidden inside this PTY. USE THIS \
+             whenever the user asks to open, start, spawn or launch another agent, session, \
+             or terminal. Optionally create a fresh git worktree for it and give it an \
+             initial prompt.",
             json!({
                 "type": "object",
                 "properties": {

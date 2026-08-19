@@ -77,7 +77,7 @@ The app uses blurred window backing, a translucent persistent-width sidebar, an 
 
 ### Sidebar preview fixtures
 
-Deterministic sidebar fixtures render without connecting to the daemon. Run any scenario with:
+Deterministic fixtures render the full workbench (sidebar, terminal chrome, inspector) without connecting to the daemon. Run any scenario with:
 
 ```sh
 env ZEUS_SIDEBAR_PREVIEW=1 ZEUS_SIDEBAR_SCENARIO=typical ./scripts/dev.sh

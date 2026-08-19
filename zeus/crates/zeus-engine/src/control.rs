@@ -758,6 +758,7 @@ impl ControlServer {
         record.worktree_path = worktree_path;
         record.git_branch = git_branch.or_else(|| crate::git::branch(&cwd_path));
         record.parent = p.parent.clone();
+        record.workbench = p.workbench;
         if let (Some(cols), Some(rows)) = (p.initial_cols, p.initial_rows) {
             pty.cols = cols.clamp(2, u16::MAX as i64) as u16;
             pty.rows = rows.clamp(2, u16::MAX as i64) as u16;
@@ -778,6 +779,18 @@ impl ControlServer {
                     crate::inject::CLI_ENV.into(),
                     injection.cli_path.to_string_lossy().into_owned(),
                 ));
+                for (key, value) in crate::inject::injection_env(
+                    &descriptor.injection,
+                    &injection.inject_dir,
+                    &injection.cli_path,
+                    Some(crate::inject::CursorInject {
+                        session_id: &id,
+                        socket_path: &self.socket_path,
+                    }),
+                ) {
+                    pty.env.retain(|(existing, _)| existing != &key);
+                    pty.env.push((key, value));
+                }
             }
             if let Some(uuid) = &agent_session_id {
                 record.agent_session_id = Some(uuid.clone());
@@ -980,6 +993,7 @@ impl ControlServer {
         record.project_id = crate::registry::session_project_id(&captured.cwd, Some(&host.id));
         record.remote_persistence = Some(persistence);
         record.parent = p.parent.clone();
+        record.workbench = p.workbench;
         record.agent_session_id = agent_session_id;
         if let Some(title) = &p.title {
             record.title = title.clone();
@@ -1916,6 +1930,9 @@ impl ControlServer {
                 claude_mcp: descriptor.injection.claude_mcp,
                 cursor_mcp: descriptor.injection.cursor_mcp,
                 cursor_hooks: descriptor.injection.cursor_hooks,
+                grok_mcp: descriptor.injection.grok_mcp,
+                gemini_mcp: descriptor.injection.gemini_mcp,
+                opencode_mcp: descriptor.injection.opencode_mcp,
                 ..Default::default()
             };
             launch_args.extend(crate::inject::injection_args_with_cursor(
@@ -1944,6 +1961,18 @@ impl ControlServer {
                 crate::inject::CLI_ENV.into(),
                 injection.cli_path.to_string_lossy().into_owned(),
             ));
+            for (key, value) in crate::inject::injection_env(
+                &descriptor.injection,
+                &injection.inject_dir,
+                &injection.cli_path,
+                Some(crate::inject::CursorInject {
+                    session_id: id,
+                    socket_path: &self.socket_path,
+                }),
+            ) {
+                pty.env.retain(|(existing, _)| existing != &key);
+                pty.env.push((key, value));
+            }
         }
         Ok(crate::session::SessionSpec {
             id: id.to_string(),
@@ -2319,6 +2348,7 @@ pub(crate) fn new_record(id: &str, kind: &str, cwd: &str) -> zeus_proto::Session
         pull_requests: None,
         listening_ports: None,
         foreground_agent: None,
+        workbench: None,
     }
 }
 
@@ -2907,6 +2937,7 @@ mod tests {
             pull_requests: None,
             listening_ports: None,
             foreground_agent: None,
+            workbench: None,
         }
     }
 

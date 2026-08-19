@@ -267,6 +267,12 @@ pub struct SessionSpawnParams {
     /// `cwd` / the host's defaultCwd when the repo isn't cloned there.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub same_repo_as: Option<SessionId>,
+    /// `true` for the ⌘J workbench split. MCP `spawn_agent` sends `false` so
+    /// the child is a nested session tab rather than a hidden terminal pane.
+    /// Absent on older clients; the Engine then uses the shell-plus-parent
+    /// heuristic for records that predate the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workbench: Option<bool>,
 }
 
 pub type SessionSpawnResult = SessionRecord;

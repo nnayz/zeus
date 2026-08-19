@@ -394,6 +394,37 @@ fn session_record_host_field_is_wire_compatible() {
     typed_round_trip(&record);
 }
 
+#[test]
+fn session_record_workbench_field_is_additive() {
+    let sessions: SessionListResult = fixture_ok(FIXTURES[1]);
+    assert!(
+        sessions
+            .sessions
+            .iter()
+            .all(|session| session.workbench.is_none())
+    );
+
+    let mut record = sessions.sessions[0].clone();
+    record.kind = zeus_proto::AgentKind::SHELL;
+    record.parent = Some(zeus_proto::SessionId::new("s_parent"));
+    assert!(
+        record.is_workbench_terminal(),
+        "legacy shell children stay on the workbench split"
+    );
+
+    record.workbench = Some(false);
+    assert!(
+        !record.is_workbench_terminal(),
+        "MCP-spawned shells are session tabs"
+    );
+    let encoded = serde_json::to_value(&record).unwrap();
+    assert_eq!(encoded["workbench"], json!(false));
+    typed_round_trip(&record);
+
+    record.workbench = Some(true);
+    assert!(record.is_workbench_terminal());
+}
+
 /// The subscribe filter is a wire contract with a Swift daemon, and the exact
 /// key names are what makes it take effect. A daemon that predates the filter
 /// ignores unknown keys and streams everything, so a mis-spelled key fails

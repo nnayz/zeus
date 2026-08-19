@@ -70,6 +70,7 @@ fn record(id: &str, host: Option<&str>, agent_session_id: Option<&str>) -> Sessi
         pull_requests: None,
         listening_ports: None,
         foreground_agent: None,
+        workbench: None,
     }
 }
 

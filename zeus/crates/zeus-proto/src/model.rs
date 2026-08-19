@@ -691,6 +691,12 @@ pub struct SessionRecord {
     pub listening_ports: Option<Vec<PortInfo>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub foreground_agent: Option<AgentKind>,
+    /// Workbench split under a parent session (the ⌘J terminal). MCP-spawned
+    /// children set this to `false` so they stay first-class session tabs.
+    /// Absent on records written before the field existed; those still use
+    /// the shell-plus-parent heuristic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workbench: Option<bool>,
 }
 
 impl SessionRecord {
@@ -700,6 +706,12 @@ impl SessionRecord {
 
     pub fn is_archived(&self) -> bool {
         self.archived_at.is_some()
+    }
+
+    /// The ⌘J split owned by a parent agent. MCP-spawned sessions, including
+    /// shells, are ordinary session tabs — they must not hijack this pane.
+    pub fn is_workbench_terminal(&self) -> bool {
+        self.parent.is_some() && self.kind == AgentKind::SHELL && self.workbench.unwrap_or(true)
     }
 
     pub fn attention(&self) -> AttentionLevel {

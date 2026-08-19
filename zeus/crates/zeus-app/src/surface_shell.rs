@@ -3582,16 +3582,7 @@ fn empty_label(label: &str, colors: SemanticColors) -> impl IntoElement {
 }
 
 fn ui_agent(kind: &ProtoAgentKind) -> zeus_ui::AgentKind {
-    // Brand vocabulary, not a protocol type: a manifest agent the client has
-    // no hand-drawn mark for falls back to the generic terminal treatment.
-    match kind.id() {
-        ProtoAgentKind::CLAUDE_CODE_ID => zeus_ui::AgentKind::ClaudeCode,
-        ProtoAgentKind::CODEX_ID => zeus_ui::AgentKind::Codex,
-        ProtoAgentKind::CURSOR_ID => zeus_ui::AgentKind::Cursor,
-        ProtoAgentKind::GEMINI_ID => zeus_ui::AgentKind::Gemini,
-        ProtoAgentKind::SHELL_ID => zeus_ui::AgentKind::Shell,
-        _ => zeus_ui::AgentKind::Generic,
-    }
+    zeus_ui::AgentKind::from_id(kind.id())
 }
 
 fn folder_name(path: &str) -> &str {

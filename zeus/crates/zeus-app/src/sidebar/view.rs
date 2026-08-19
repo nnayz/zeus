@@ -38,6 +38,9 @@ const SIDEBAR_TITLE_SIZE: f32 = 14.0;
 const SIDEBAR_SUBTITLE_SIZE: f32 = 12.0;
 const SIDEBAR_ROW_HEIGHT: f32 = 28.0;
 const SIDEBAR_NEW_AGENT_HEIGHT: f32 = 48.0;
+/// Width of one lineage column. The row's 6pt flex gap sits after it, yielding
+/// a comfortable 20pt visual step per generation without crushing titles.
+const TREE_COLUMN_WIDTH: f32 = 14.0;
 
 #[derive(Clone, Debug)]
 pub enum SidebarEvent {
@@ -127,24 +130,18 @@ impl Sidebar {
         scenario: PreviewScenario,
         cx: &mut Context<Self>,
     ) -> Self {
-        let (store, preview_effects) = if preview {
-            let fixture = SidebarPreviewFixture::make(scenario);
-            let (mut store, effects) = SessionStore::headless(fixture.prefs);
-            store.hydrate(fixture.list);
-            if let Some(id) = fixture.selected_session_id {
-                store.select(id);
+        let (store, preview_effects) = match &runtime {
+            Some(runtime) => (Arc::clone(&runtime.store), None),
+            None if preview => {
+                let fixture = SidebarPreviewFixture::make(scenario);
+                let (mut store, effects) = SessionStore::headless(fixture.prefs);
+                store.hydrate(fixture.list);
+                if let Some(id) = fixture.selected_session_id {
+                    store.select(id);
+                }
+                (Arc::new(RwLock::new(store)), Some(effects))
             }
-            (Arc::new(RwLock::new(store)), Some(effects))
-        } else {
-            (
-                Arc::clone(
-                    &runtime
-                        .as_ref()
-                        .expect("live sidebar requires StoreRuntime")
-                        .store,
-                ),
-                None,
-            )
+            None => panic!("live sidebar requires StoreRuntime"),
         };
         let (width, visible) = {
             let store = store.read().expect("session store lock poisoned");
@@ -945,6 +942,14 @@ impl Sidebar {
         let title = display_title(session);
         let non_persistent =
             session.remote_persistence == Some(PersistenceCapability::NonPersistent);
+        let tree_badge = (row.has_children && (row.collapsed || hovered || selected)).then(|| {
+            if row.collapsed {
+                format!("+{}", row.descendant_count)
+            } else {
+                let agents = row.descendant_count + 1;
+                format!("{agents} agents")
+            }
+        });
         // Read before the title moves into the marquee below.
         let ended_chip = ended && title != ENDED_TITLE;
         let title_available_width = session_title_available_width(
@@ -956,6 +961,7 @@ impl Sidebar {
             host_label.as_deref(),
             hibernated,
             row.pinned,
+            tree_badge.as_deref(),
             !hovered && selected && shortcut.is_some(),
         );
         let title_marquee_id = format!("session-title-marquee:{}", id.0);
@@ -980,10 +986,10 @@ impl Sidebar {
                 .gap(px(6.0))
                 .rounded(px(Radius::ROW))
                 .bg(RowFill::Selected.color(colors))
-                .children(indent_rails(row, colors))
+                .children(indent_rails(row, colors, true))
                 // The fold control is inert mid-rename, but its column stays so
                 // the text does not slide sideways the moment editing starts.
-                .child(div().w(px(Space::INDENT)).flex_none())
+                .child(div().w(px(TREE_COLUMN_WIDTH)).flex_none())
                 .child(
                     div()
                         .size(px(16.0))
@@ -1145,8 +1151,8 @@ impl Sidebar {
                     cx.notify();
                 }
             }))
-            .children(indent_rails(row, colors))
-            .child(self.disclosure(row, colors, cx))
+            .children(indent_rails(row, colors, selected))
+            .child(self.disclosure(row, selected, colors, cx))
             // The status glyph is the row's whole reason for existing at a
             // glance, so it no longer yields its slot to the close button on
             // hover -- pointing at a working agent used to hide the fact that
@@ -1171,6 +1177,9 @@ impl Sidebar {
                 )
                 .font_weight(Typo::ROW.weight),
             )
+            .when_some(tree_badge, |element, label| {
+                element.child(branch_count_chip(label, session, colors))
+            })
             .when(row.pinned, |element| element.child(pin_mark(colors)))
             // Chips, in descending order of how much they explain an otherwise
             // inert-looking row. Each is flex_none and the title absorbs the
@@ -1256,12 +1265,50 @@ impl Sidebar {
     fn disclosure(
         &self,
         row: &crate::store::SidebarRow,
+        selected: bool,
         colors: SemanticColors,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let slot = div().w(px(Space::INDENT)).flex_none().flex().items_center();
+        let tint = Ink::working(ui_agent_kind(row.session.effective_kind()), colors);
+        let branch = if selected {
+            tint.alpha(0.72)
+        } else {
+            colors.primary.alpha(0.12)
+        };
+        let slot = div()
+            .relative()
+            .w(px(TREE_COLUMN_WIDTH))
+            .h(px(SIDEBAR_ROW_HEIGHT))
+            .flex_none()
+            .flex()
+            .items_center()
+            .when(row.depth > 0, |slot| {
+                slot.child(
+                    div()
+                        .absolute()
+                        .left(px(-6.0))
+                        .top(px(SIDEBAR_ROW_HEIGHT / 2.0))
+                        .w(px(TREE_COLUMN_WIDTH / 2.0 + 6.0))
+                        .h(px(1.0))
+                        .bg(branch),
+                )
+            });
         if !row.has_children {
-            return slot.into_any_element();
+            return slot
+                .when(row.depth > 0, |slot| {
+                    slot.child(
+                        div()
+                            .absolute()
+                            .left(px(TREE_COLUMN_WIDTH / 2.0 - 2.5))
+                            .top(px(SIDEBAR_ROW_HEIGHT / 2.0 - 2.0))
+                            .size(px(5.0))
+                            .rounded_full()
+                            .bg(colors.sidebar_surface())
+                            .border_1()
+                            .border_color(tint.alpha(if selected { 0.88 } else { 0.55 })),
+                    )
+                })
+                .into_any_element();
         }
         let id = row.id().clone();
         slot.id(format!("fold:{}", id.0))
@@ -1277,16 +1324,28 @@ impl Sidebar {
                     .toggle_session_collapsed(id.clone());
                 cx.notify();
             }))
-            .child(sf_symbol_weighted(
-                if row.collapsed {
-                    "chevron.right"
-                } else {
-                    "chevron.down"
-                },
-                8.0,
-                SymbolWeight::Bold,
-                colors.tertiary,
-            ))
+            .child(
+                div()
+                    .size(px(14.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(Radius::CHIP))
+                    .bg(tint.alpha(if row.collapsed { 0.14 } else { 0.075 }))
+                    .border_1()
+                    .border_color(tint.alpha(if row.collapsed { 0.28 } else { 0.14 }))
+                    .hover(move |button| button.bg(tint.alpha(0.18)))
+                    .child(sf_symbol_weighted(
+                        if row.collapsed {
+                            "chevron.right"
+                        } else {
+                            "chevron.down"
+                        },
+                        7.5,
+                        SymbolWeight::Bold,
+                        tint,
+                    )),
+            )
             .into_any_element()
     }
 
@@ -3278,25 +3337,36 @@ fn icon_button(
 /// The "Ended" chip stands down when the title already says it.
 const ENDED_TITLE: &str = "Ended";
 
-/// One leading column per ancestor level. A column is drawn full height while
-/// that ancestor still has siblings below, and stops halfway on the last child
-/// so a subtree visibly closes instead of trailing a rail into the next row.
-fn indent_rails(row: &crate::store::SidebarRow, colors: SemanticColors) -> Vec<AnyElement> {
+/// One leading column per ancestor level. The final column bends into the
+/// agent's node; earlier columns are quiet continuation rails. Selecting a
+/// child inks its final branch in that agent's brand tone, making the active
+/// route through a busy tree instantly legible.
+fn indent_rails(
+    row: &crate::store::SidebarRow,
+    colors: SemanticColors,
+    selected: bool,
+) -> Vec<AnyElement> {
+    let tint = Ink::working(ui_agent_kind(row.session.effective_kind()), colors);
     (0..row.depth)
         .map(|column| {
             let continues = row.rails & (1u32 << column.min(31)) != 0;
             let last_column = column + 1 == row.depth;
-            div()
-                .w(px(Space::INDENT))
+            let branch = if selected && last_column {
+                tint.alpha(0.72)
+            } else {
+                colors.primary.alpha(if last_column { 0.12 } else { 0.085 })
+            };
+            let mut rail = div()
+                .relative()
+                .w(px(TREE_COLUMN_WIDTH))
                 .h(px(SIDEBAR_ROW_HEIGHT))
                 .flex_none()
-                .flex()
-                .justify_center()
                 .child(
                     div()
+                        .absolute()
+                        .left(px(TREE_COLUMN_WIDTH / 2.0))
+                        .top(px(0.0))
                         .w(px(1.0))
-                        // A rail that neither continues nor elbows into this
-                        // row has no business being drawn at all.
                         .h(px(if continues {
                             SIDEBAR_ROW_HEIGHT
                         } else if last_column {
@@ -3304,9 +3374,20 @@ fn indent_rails(row: &crate::store::SidebarRow, colors: SemanticColors) -> Vec<A
                         } else {
                             0.0
                         }))
-                        .bg(colors.primary.alpha(0.10)),
-                )
-                .into_any_element()
+                        .bg(branch),
+                );
+            if last_column {
+                rail = rail.child(
+                    div()
+                        .absolute()
+                        .left(px(TREE_COLUMN_WIDTH / 2.0))
+                        .top(px(SIDEBAR_ROW_HEIGHT / 2.0))
+                        .right(px(0.0))
+                        .h(px(1.0))
+                        .bg(branch),
+                );
+            }
+            rail.into_any_element()
         })
         .collect()
 }
@@ -3317,6 +3398,34 @@ fn pin_mark(colors: SemanticColors) -> AnyElement {
         .flex()
         .items_center()
         .child(sf_symbol("pin.fill", 9.0, colors.tertiary))
+        .into_any_element()
+}
+
+/// Subtree size for coordinator rows. Expanded trees reveal the whole family
+/// count on focus/hover; folded trees retain a terse `+N` so hidden work never
+/// becomes invisible merely because the branch is compacted.
+fn branch_count_chip(
+    label: impl Into<SharedString>,
+    session: &SessionRecord,
+    colors: SemanticColors,
+) -> AnyElement {
+    let tint = Ink::working(ui_agent_kind(session.effective_kind()), colors);
+    div()
+        .flex_none()
+        .h(px(18.0))
+        .px(px(5.0))
+        .flex()
+        .items_center()
+        .gap(px(3.0))
+        .rounded(px(Radius::CHIP))
+        .bg(tint.alpha(0.075))
+        .border_1()
+        .border_color(tint.alpha(0.14))
+        .text_size(px(9.5))
+        .font_weight(Typo::META.weight)
+        .text_color(tint.alpha(0.90))
+        .child(sf_symbol("arrow.triangle.branch", 8.0, tint.alpha(0.85)))
+        .child(label.into())
         .into_any_element()
 }
 
@@ -3610,16 +3719,7 @@ fn agent_picker_shortcut(
 }
 
 fn ui_agent_kind(kind: &ProtoAgentKind) -> AgentKind {
-    // Brand vocabulary, not a protocol type: a manifest agent the client has
-    // no hand-drawn mark for falls back to the generic terminal treatment.
-    match kind.id() {
-        ProtoAgentKind::CLAUDE_CODE_ID => AgentKind::ClaudeCode,
-        ProtoAgentKind::CODEX_ID => AgentKind::Codex,
-        ProtoAgentKind::CURSOR_ID => AgentKind::Cursor,
-        ProtoAgentKind::GEMINI_ID => AgentKind::Gemini,
-        ProtoAgentKind::SHELL_ID => AgentKind::Shell,
-        _ => AgentKind::Generic,
-    }
+    AgentKind::from_id(kind.id())
 }
 
 fn rollup_attention(sessions: &[Arc<SessionRecord>]) -> AttentionLevel {
@@ -3686,10 +3786,11 @@ fn session_title_available_width(
     host_label: Option<&str>,
     hibernated: bool,
     pinned: bool,
+    tree_badge: Option<&str>,
     shortcut_visible: bool,
 ) -> f32 {
     // Row insets + fold column + identity glyph + the gaps between them.
-    let mut available = sidebar_width - 68.0 - f32::from(depth) * (Space::INDENT + 8.0);
+    let mut available = sidebar_width - 72.0 - f32::from(depth) * (TREE_COLUMN_WIDTH + 6.0);
     if migrating {
         available -= 66.0;
     }
@@ -3707,6 +3808,9 @@ fn session_title_available_width(
     }
     if pinned {
         available -= 18.0;
+    }
+    if let Some(label) = tree_badge {
+        available -= label.chars().count() as f32 * 5.4 + 22.0;
     }
     // The close button and the shortcut hint share the trailing slot and are
     // near enough the same width that one reservation covers both.
@@ -3743,8 +3847,9 @@ mod tests {
 
     #[test]
     fn title_overflow_threshold_accounts_for_sidebar_badges() {
-        let plain =
-            session_title_available_width(248.0, 0, false, false, false, None, false, false, false);
+        let plain = session_title_available_width(
+            248.0, 0, false, false, false, None, false, false, None, false,
+        );
         let remote = session_title_available_width(
             248.0,
             0,
@@ -3754,13 +3859,28 @@ mod tests {
             Some("mini-b"),
             false,
             false,
+            None,
             true,
         );
         assert!(plain > remote);
         // A nested row pays for every indent column it sits behind.
-        let nested =
-            session_title_available_width(248.0, 2, false, false, false, None, false, false, false);
+        let nested = session_title_available_width(
+            248.0, 2, false, false, false, None, false, false, None, false,
+        );
         assert!(plain > nested);
+        let coordinator = session_title_available_width(
+            248.0,
+            0,
+            false,
+            false,
+            false,
+            None,
+            false,
+            false,
+            Some("4 agents"),
+            false,
+        );
+        assert!(plain > coordinator);
         assert_eq!(
             session_title_available_width(
                 200.0,
@@ -3771,6 +3891,7 @@ mod tests {
                 Some("very-long-host"),
                 true,
                 true,
+                Some("12 agents"),
                 true,
             ),
             36.0

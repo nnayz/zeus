@@ -29,9 +29,11 @@ use zeus_ui::{
 use crate::code_viewer::{CodeViewer, word_wrap_ranges};
 use crate::diff::{
     DiffFile, DiffHunk, DiffLayer, DiffRow, DiffRowKind, DiffSnapshot, load_local_diff,
-    snapshot_from_read_diff,
+    preview_diff_snapshot, snapshot_from_read_diff,
 };
-use crate::git_review::{GitRepository, GitReviewError, PatchMutation, ReviewStatus};
+use crate::git_review::{
+    GitRepository, GitReviewError, PatchMutation, ReviewStatus, preview_review_status,
+};
 use crate::macos::sf_symbols::{SymbolWeight, sf_symbol, sf_symbol_weighted};
 use crate::markdown::MarkdownDocument;
 use crate::markdown_view::render_markdown;
@@ -326,6 +328,9 @@ impl WorkbenchInspector {
 
     pub fn set_preview_account(&mut self, preview: bool) {
         self.preview_account = preview;
+        if preview {
+            self.diff_layer = DiffLayer::Working;
+        }
     }
 
     pub fn set_panel_width(&mut self, width: f32, cx: &mut Context<Self>) {
@@ -546,12 +551,8 @@ impl WorkbenchInspector {
         self.context = Some(context.clone());
         if self.preview_account {
             self.loading = false;
-            self.state = LoadState::Ready(Arc::new(DiffSnapshot {
-                repo_root: context.cwd,
-                base_ref: Some("main".into()),
-                ..DiffSnapshot::default()
-            }));
-            self.review_state = ReviewLoadState::NoSession;
+            self.state = LoadState::Ready(Arc::new(preview_diff_snapshot(context.cwd)));
+            self.review_state = ReviewLoadState::Ready(Arc::new(preview_review_status()));
             self.refresh_task = None;
             cx.notify();
             return;

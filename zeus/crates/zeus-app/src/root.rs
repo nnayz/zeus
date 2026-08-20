@@ -576,6 +576,30 @@ impl RootView {
         if inspector_open && let Some(inspector) = &inspector {
             inspector.update(cx, |inspector, cx| inspector.set_visible(true, cx));
         }
+        if preview && let Some(path) = std::env::var_os("ZEUS_PREVIEW_SCREENSHOT") {
+            cx.spawn_in(window, async move |this, cx| {
+                cx.background_executor()
+                    .timer(Duration::from_millis(2500))
+                    .await;
+                let _ = this.update_in(cx, |_this, window, _cx| match window.render_to_image() {
+                    Ok(image) => {
+                        if let Err(error) = image.save(&path) {
+                            eprintln!("zeus: preview screenshot failed: {error}");
+                        } else {
+                            eprintln!(
+                                "zeus: preview screenshot saved ({}x{})",
+                                image.width(),
+                                image.height()
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        eprintln!("zeus: preview screenshot failed: {error}");
+                    }
+                });
+            })
+            .detach();
+        }
         // Seed both seams from the restored layout so the first frame paints
         // the settled panels instead of sliding them open at launch.
         let sidebar_seam = if sidebar.read(cx).is_visible() {
@@ -2090,7 +2114,9 @@ impl Render for RootView {
         if let Some(status) = self.status_banner(colors, cx) {
             root = root.child(status);
         }
-        if let Some(build) = &self.services.dev_build {
+        if !self.preview
+            && let Some(build) = &self.services.dev_build
+        {
             root = root.child(dev_build_marker(build.marker_label(), colors));
         }
         root

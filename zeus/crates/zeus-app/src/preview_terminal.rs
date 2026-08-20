@@ -1,22 +1,91 @@
+use std::cell::Cell;
+
 use zeus_proto::grid::{ChangedRow, GridCell, GridUpdate, TermColor, TermStyle};
 use zeus_proto::{AgentKind, SessionRecord, SessionStatus};
 use zeus_term::buffer::GridBuffer;
 
-const PREVIEW_GRID_COLS: u16 = 108;
-const PREVIEW_GRID_ROWS: u16 = 40;
-const WRAP: usize = 88;
+const PREVIEW_GRID_COLS: u16 = 64;
+const PREVIEW_GRID_ROWS: u16 = 36;
+
+#[derive(Clone, Copy)]
+struct PreviewLayout {
+    cols: u16,
+    rows: u16,
+    wrap: usize,
+    header_inner: usize,
+}
+
+impl PreviewLayout {
+    const DEFAULT: Self = Self {
+        cols: PREVIEW_GRID_COLS,
+        rows: PREVIEW_GRID_ROWS,
+        wrap: 58,
+        header_inner: 50,
+    };
+
+    fn from_size(cols: u16, rows: u16) -> Self {
+        let cols = cols.clamp(40, 160);
+        let rows = rows.clamp(16, 80);
+        let wrap = usize::from(cols).saturating_sub(2).max(32);
+        let header_inner = wrap.saturating_sub(4).min(50);
+        Self {
+            cols,
+            rows,
+            wrap,
+            header_inner,
+        }
+    }
+}
+
+thread_local! {
+    static LAYOUT: Cell<PreviewLayout> = const { Cell::new(PreviewLayout::DEFAULT) };
+}
+
+fn layout() -> PreviewLayout {
+    LAYOUT.with(Cell::get)
+}
+
+fn wrap_width() -> usize {
+    layout().wrap
+}
+
+fn header_inner() -> usize {
+    layout().header_inner
+}
+const CODEX_VERSION: &str = "0.148.0";
+const CODEX_MODEL: &str = "gpt-5.6-sol";
+const CODEX_EFFORT: &str = "xhigh";
+const DEL_BG: TermColor = TermColor::Rgb(0x3a, 0x1e, 0x22);
+const ADD_BG: TermColor = TermColor::Rgb(0x1a, 0x34, 0x28);
+const DEL_FG: TermColor = TermColor::Rgb(0xd0, 0xb4, 0xb6);
+const ADD_FG: TermColor = TermColor::Rgb(0xb6, 0xd6, 0xc2);
 
 #[derive(Clone)]
 struct Span {
     text: String,
     fg: TermColor,
+    bg: TermColor,
     style: TermStyle,
 }
 
 type Line = Vec<Span>;
 
 pub(crate) fn preview_session_grid(session: &SessionRecord) -> GridBuffer {
-    paint_preview_lines(&transcript(session))
+    preview_session_grid_sized(session, PREVIEW_GRID_COLS, PREVIEW_GRID_ROWS)
+}
+
+pub(crate) fn preview_session_grid_sized(
+    session: &SessionRecord,
+    cols: u16,
+    rows: u16,
+) -> GridBuffer {
+    let next = PreviewLayout::from_size(cols, rows);
+    LAYOUT.with(|slot| {
+        let previous = slot.replace(next);
+        let grid = paint_preview_lines(&transcript(session));
+        slot.set(previous);
+        grid
+    })
 }
 
 fn transcript(session: &SessionRecord) -> Vec<Line> {
@@ -40,48 +109,74 @@ fn transcript(session: &SessionRecord) -> Vec<Line> {
 }
 
 fn codex_sidebar(session: &SessionRecord) -> Vec<Line> {
-    let mut lines = codex_chrome(session, "gpt-5.3-codex");
+    let mut lines = codex_chrome(session);
     if session.title.contains("cloning") {
-        lines.extend([
-        blank(),
-        user_prompt(&session.title),
-        blank(),
-        dim("■ Thinking"),
-        wrap_body("Clone should leave the UI immediately. Progress and failures stay attached to the session, not the foreground path."),
-            blank(),
-            tool("Read", "zeus/crates/zeus-engine/src/workspace.rs"),
-            tool("Edit", "zeus/crates/zeus-engine/src/workspace.rs"),
-            tool("Edit", "zeus/crates/zeus-app/src/store/mod.rs"),
-            blank(),
-            wrap_body("Moved repository cloning onto a background worker. The active session still sees progress, and a failed fetch stays retryable."),
-            blank(),
-            dim("• 8 files  +431 −381"),
-            prompt(),
-        ]);
-        return lines;
+        lines.push(blank());
+        lines.extend(codex_user(&session.title));
+        lines.push(blank());
+        lines.extend(codex_ran(
+            "rg clone_repository zeus/crates",
+            &["workspace.rs", "store/mod.rs"],
+            11,
+        ));
+        lines.push(blank());
+        lines.extend(codex_patch(
+            "crates/zeus-engine/src/workspace.rs",
+            8,
+            3,
+            &[
+                HunkRow::ctx(40, "    let checkout = request.repo.clone();"),
+                HunkRow::del(41, "    clone_repository(&checkout).await?;"),
+                HunkRow::add(41, "    tokio::spawn(async move {"),
+                HunkRow::add(42, "        clone_repository(&checkout).await"),
+                HunkRow::add(43, "    });"),
+                HunkRow::ctx(44, "    Ok(())"),
+            ],
+        ));
+        lines.push(blank());
+        lines.extend(codex_say_path(
+            "Moved repository cloning onto a background worker in ",
+            "workspace.rs",
+        ));
+        return finish_codex(lines);
     }
-    lines.extend([
-        blank(),
-        user_prompt(&session.title),
-        blank(),
-        dim("■ Thinking"),
-        wrap_body("Pinned sessions belong above project groups. The archive bucket is a drop target, not a peer of live rows."),
-        blank(),
-        tool("Read", "zeus/crates/zeus-app/src/sidebar/view.rs"),
-        tool("Read", "zeus/crates/zeus-app/src/sidebar/state.rs"),
-        tool("Edit", "zeus/crates/zeus-app/src/sidebar/view.rs"),
-        tool("Test", "zeus/crates/zeus-app/src/sidebar/view.rs"),
-        blank(),
-        wrap_body("Tightened the left sidebar: 28pt rows, hover-only project actions, and a live drag preview that keeps ⌘n hints aligned."),
-        blank(),
-        color(6, "fn project_header(name: &str, hover: bool) -> Row {"),
-        color(6, "    Row::new().height(18.0).child(folder_badge(name))"),
-        color(6, "}"),
-        blank(),
-        dim("• 3 files  +86 −41"),
-        prompt(),
-    ]);
-    lines
+    lines.push(blank());
+    lines.extend(codex_user(&session.title));
+    lines.push(blank());
+    lines.extend(codex_ran(
+        "rg project_header crates/zeus-app/src/sidebar",
+        &["view.rs", "state.rs"],
+        13,
+    ));
+    lines.push(blank());
+    lines.extend(codex_patch(
+        "crates/zeus-app/src/sidebar/view.rs",
+        12,
+        7,
+        &[
+            HunkRow::ctx(214, "    let title = session.title.clone();"),
+            HunkRow::del(215, "    let height = 32.0;"),
+            HunkRow::del(216, "    let actions = project_actions(session);"),
+            HunkRow::add(215, "    let height = 28.0;"),
+            HunkRow::add(
+                216,
+                "    let actions = hover.then(|| row_actions(session));",
+            ),
+            HunkRow::ctx(217, "    Row::new()"),
+        ],
+    ));
+    lines.push(blank());
+    lines.extend(codex_ran(
+        "cargo test -p zeus-app -- sidebar",
+        &["running 14 tests", "test sidebar::view ... ok"],
+        8,
+    ));
+    lines.push(dim("─".repeat(wrap_width().min(56))));
+    lines.extend(codex_say_path(
+        "Tightened the left sidebar: 28pt rows and hover-only actions in ",
+        "view.rs",
+    ));
+    finish_codex(lines)
 }
 
 fn claude_release(session: &SessionRecord) -> Vec<Line> {
@@ -159,22 +254,25 @@ fn claude_review(session: &SessionRecord) -> Vec<Line> {
 }
 
 fn codex_rail(session: &SessionRecord) -> Vec<Line> {
-    let mut lines = codex_chrome(session, "gpt-5.3-codex");
-    lines.extend([
-        blank(),
-        user_prompt(&session.title),
-        blank(),
-        dim("■ Thinking"),
-        wrap_body("A grandchild must inherit the continuing rail from its parent and terminate on the last sibling."),
-        blank(),
-        tool("Read", "zeus/crates/zeus-app/src/sidebar/view.rs"),
-        tool("Edit", "zeus/crates/zeus-app/src/sidebar/view.rs"),
-        blank(),
-        wrap_body("Rail geometry checks out. Continuing segments stay 10pt inset; the terminator is only painted on the last child at each depth."),
-        blank(),
-        dim("idle · last turn 1m ago"),
-    ]);
-    lines
+    let mut lines = codex_chrome(session);
+    lines.push(blank());
+    lines.extend(codex_user(&session.title));
+    lines.push(blank());
+    lines.extend(codex_thought(
+        "A grandchild must inherit the continuing rail from its parent and terminate on the last sibling.",
+    ));
+    lines.push(blank());
+    lines.extend(codex_explored(&["Read view.rs", "Search row.depth"]));
+    lines.push(blank());
+    lines.extend(codex_edited(
+        "+24 −6",
+        &["crates/zeus-app/src/sidebar/view.rs"],
+    ));
+    lines.push(blank());
+    lines.extend(codex_say(
+        "Rail geometry checks out. Continuing segments stay 10pt inset; the terminator is only painted on the last child at each depth.",
+    ));
+    finish_codex(lines)
 }
 
 fn shell_dev_server(session: &SessionRecord) -> Vec<Line> {
@@ -271,43 +369,51 @@ fn claude_question(session: &SessionRecord) -> Vec<Line> {
 }
 
 fn codex_benchmarks(session: &SessionRecord) -> Vec<Line> {
-    let mut lines = codex_chrome(session, "gpt-5.3-codex");
-    lines.extend([
-        blank(),
-        user_prompt(&session.title),
-        blank(),
-        dim("■ Thinking"),
-        wrap_body("Need the latest retrieval numbers before calling the regression. Compare nDCG and recall against last week's baseline."),
-        blank(),
-        tool("Read", "benchmarks/retrieval/latest.json"),
-        tool("Read", "benchmarks/retrieval/baseline.json"),
-        blank(),
-        color(6, "nDCG@10     0.812  →  0.847   +4.3%"),
-        color(6, "Recall@50   0.901  →  0.918   +1.9%"),
-        color(3, "p95 latency 184ms  →  211ms   +14.7%"),
-        blank(),
-        wrap_body("Quality is up, but the p95 regression is real. The extra reranker pass is the likely cause — checking the batch size next."),
-        prompt(),
-    ]);
-    lines
+    let mut lines = codex_chrome(session);
+    lines.push(blank());
+    lines.extend(codex_user(&session.title));
+    lines.push(blank());
+    lines.extend(codex_thought(
+        "Need the latest retrieval numbers before calling the regression. Compare nDCG and recall against last week's baseline.",
+    ));
+    lines.push(blank());
+    lines.extend(codex_explored(&["Read latest.json", "Read baseline.json"]));
+    lines.push(blank());
+    lines.extend(codex_ran(
+        "python benches/retrieval.py --compare",
+        &[
+            "nDCG@10     0.812  →  0.847   +4.3%",
+            "Recall@50   0.901  →  0.918   +1.9%",
+            "p95 latency 184ms  →  211ms   +14.7%",
+        ],
+        0,
+    ));
+    lines.push(blank());
+    lines.extend(codex_say(
+        "Quality is up, but the p95 regression is real. The extra reranker pass is the likely cause — checking the batch size next.",
+    ));
+    finish_codex(lines)
 }
 
 fn codex_hibernated(session: &SessionRecord) -> Vec<Line> {
-    let mut lines = codex_chrome(session, "gpt-5.3-codex");
-    lines.extend([
-        blank(),
-        user_prompt(&session.title),
-        blank(),
-        wrap_body("Input handlers now ignore events until hydration finishes. The previous race could commit a half-mounted field."),
-        blank(),
-        tool("Edit", "packages/forms/src/HydrationGuard.ts"),
-        tool("Test", "packages/forms/src/HydrationGuard.test.ts"),
-        blank(),
-        dim("• 2 files  +41 −18"),
-        blank(),
-        dim("hibernated · idle 35m"),
-    ]);
-    lines
+    let mut lines = codex_chrome(session);
+    lines.push(blank());
+    lines.extend(codex_user(&session.title));
+    lines.push(blank());
+    lines.extend(codex_say(
+        "Input handlers now ignore events until hydration finishes. The previous race could commit a half-mounted field.",
+    ));
+    lines.push(blank());
+    lines.extend(codex_edited(
+        "+41 −18",
+        &[
+            "packages/forms/src/HydrationGuard.ts",
+            "packages/forms/src/HydrationGuard.test.ts",
+        ],
+    ));
+    lines.push(blank());
+    lines.push(dim("  hibernated · idle 35m"));
+    finish_codex(lines)
 }
 
 fn claude_archived(session: &SessionRecord) -> Vec<Line> {
@@ -363,22 +469,28 @@ fn codex_profile(session: &SessionRecord) -> Vec<Line> {
         .memory_bytes
         .map(|bytes| format!("{:.1} GB", bytes as f64 / 1_000_000_000.0))
         .unwrap_or_else(|| "7.9 GB".into());
-    let mut lines = codex_chrome(session, "gpt-5.3-codex");
-    lines.extend([
-        blank(),
-        user_prompt(&session.title),
-        blank(),
-        dim("■ Thinking"),
-        wrap_body("The dense list is paying for a full projection rebuild on every status tick. Glyphs should not invalidate the row layout."),
-        blank(),
-        tool("Read", "zeus/crates/zeus-app/src/sidebar/view.rs"),
-        tool("Profile", "sidebar render · 1.8k rows"),
-        blank(),
-        color(3, format!("rss {memory}   layout 4.2ms   glyphs 11.4ms")),
-        wrap_body("Status glyphs are the hot path. Caching them per (id, state) drops the list below 1ms on the stress fixture."),
-        prompt(),
-    ]);
-    lines
+    let mut lines = codex_chrome(session);
+    lines.push(blank());
+    lines.extend(codex_user(&session.title));
+    lines.push(blank());
+    lines.extend(codex_thought(
+        "The dense list is paying for a full projection rebuild on every status tick. Glyphs should not invalidate the row layout.",
+    ));
+    lines.push(blank());
+    lines.extend(codex_explored(&[
+        "Read view.rs",
+        "Profile sidebar render · 1.8k rows",
+    ]));
+    lines.push(blank());
+    lines.push(color(
+        3,
+        format!("  rss {memory}   layout 4.2ms   glyphs 11.4ms"),
+    ));
+    lines.push(blank());
+    lines.extend(codex_say(
+        "Status glyphs are the hot path. Caching them per (id, state) drops the list below 1ms on the stress fixture.",
+    ));
+    finish_codex(lines)
 }
 
 fn generic_transcript(session: &SessionRecord) -> Vec<Line> {
@@ -387,7 +499,30 @@ fn generic_transcript(session: &SessionRecord) -> Vec<Line> {
         AgentKind::CURSOR_ID => cursor_chrome(session, "composer-1.5"),
         AgentKind::GEMINI_ID => gemini_chrome(session, "gemini-2.5-pro"),
         AgentKind::SHELL_ID => vec![color(2, format!("nayz@zeus {} %", project_name(session)))],
-        _ => codex_chrome(session, "gpt-5.3-codex"),
+        _ => {
+            let mut lines = codex_chrome(session);
+            lines.push(blank());
+            lines.extend(codex_user(&session.title));
+            lines.push(blank());
+            match &session.status {
+                SessionStatus::Starting => lines.push(dim("  Starting…")),
+                SessionStatus::Working => {
+                    lines.extend(codex_say("Working through the current turn."));
+                    return finish_codex(lines);
+                }
+                SessionStatus::NeedsInput(_) => {
+                    if let Some(detail) = &session.needs_input {
+                        lines.push(box_top("Input"));
+                        lines.push(box_body(&detail.summary));
+                        lines.push(box_bottom());
+                    }
+                }
+                SessionStatus::Idle => lines.push(dim("  idle")),
+                SessionStatus::Exited(_) => lines.push(dim("  exited")),
+                SessionStatus::Unknown => {}
+            }
+            return finish_codex(lines);
+        }
     };
     lines.push(blank());
     lines.push(user_prompt(&session.title));
@@ -412,20 +547,316 @@ fn generic_transcript(session: &SessionRecord) -> Vec<Line> {
     lines
 }
 
-fn codex_chrome(session: &SessionRecord, model: &str) -> Vec<Line> {
+fn codex_chrome(session: &SessionRecord) -> Vec<Line> {
+    let directory = home_path(&session.cwd);
     vec![
-        line([bold(">_  Codex"), dim_span(format!("  {model}"))]),
-        dim(format!(
-            "    {}{}",
-            session.cwd,
-            session
-                .git_branch
-                .as_deref()
-                .map(|branch| format!("  ·  {branch}"))
-                .unwrap_or_default()
-        )),
-        rule(),
+        dim(format!("╭{}╮", "─".repeat(header_inner() + 2))),
+        padded_box_row(
+            header_inner(),
+            vec![
+                dim_span(">_ "),
+                bold("OpenAI Codex"),
+                dim_span(format!(" (v{CODEX_VERSION})")),
+            ],
+        ),
+        padded_box_row(header_inner(), Vec::new()),
+        padded_box_row(
+            header_inner(),
+            vec![
+                dim_span("model:     "),
+                text(CODEX_MODEL),
+                dim_span(" "),
+                color_span(3, CODEX_EFFORT),
+                dim_span("   "),
+                color_span(6, "/model"),
+                dim_span(" to change"),
+            ],
+        ),
+        padded_box_row(
+            header_inner(),
+            vec![dim_span("directory: "), text(directory)],
+        ),
+        dim(format!("╰{}╯", "─".repeat(header_inner() + 2))),
+        blank(),
+        line([
+            dim_span("  "),
+            span("Tip:", TermColor::Default, TermStyle::BOLD),
+            dim_span(" "),
+            span("New", TermColor::Ansi(6), TermStyle::BOLD),
+            text(" Use "),
+            color_span(6, "/fast"),
+            text(" to enable our fastest inference with increased plan usage."),
+        ]),
     ]
+}
+
+fn home_path(path: &str) -> String {
+    path.strip_prefix("/Users/preview")
+        .map(|rest| format!("~{rest}"))
+        .unwrap_or_else(|| path.to_string())
+}
+
+fn finish_codex(history: Vec<Line>) -> Vec<Line> {
+    pin_bottom(history, codex_composer())
+}
+
+fn pin_bottom(mut history: Vec<Line>, footer: Vec<Line>) -> Vec<Line> {
+    let rows = usize::from(layout().rows);
+    let footer_h = footer.len();
+    let available = rows.saturating_sub(footer_h);
+    if history.len() > available {
+        let keep_head = 12.min(available);
+        let keep_tail = available.saturating_sub(keep_head);
+        let mut kept = history[..keep_head].to_vec();
+        if keep_tail > 0 {
+            kept.extend(history[history.len() - keep_tail..].iter().cloned());
+        }
+        history = kept;
+    }
+    history.resize_with(available, blank);
+    history.extend(footer);
+    history
+}
+
+fn codex_composer() -> Vec<Line> {
+    vec![
+        blank(),
+        line([
+            dim_span("> "),
+            span(
+                "Ask Codex to do anything",
+                TermColor::Default,
+                TermStyle::DIM,
+            ),
+        ]),
+        blank(),
+        line([
+            dim_span("  "),
+            color_span(3, format!("{CODEX_MODEL} {CODEX_EFFORT}")),
+            dim_span("  ·  "),
+            color_span(2, "~/Projects/zeus"),
+        ]),
+    ]
+}
+
+fn codex_user(title: &str) -> Vec<Line> {
+    prefix_wrap(
+        span("› ", TermColor::Default, TermStyle::BOLD | TermStyle::DIM),
+        "  ",
+        title,
+        TermColor::Default,
+        TermStyle::empty(),
+    )
+}
+
+fn codex_thought(body: &str) -> Vec<Line> {
+    prefix_wrap(
+        dim_span("• "),
+        "  ",
+        body,
+        TermColor::Default,
+        TermStyle::DIM | TermStyle::ITALIC,
+    )
+}
+
+fn codex_say(body: &str) -> Vec<Line> {
+    prefix_wrap(
+        dim_span("• "),
+        "  ",
+        body,
+        TermColor::Default,
+        TermStyle::empty(),
+    )
+}
+
+fn codex_say_path(before: &str, path: &str) -> Vec<Line> {
+    vec![line([dim_span("• "), text(before), color_span(6, path)])]
+}
+
+fn codex_explored(entries: &[&str]) -> Vec<Line> {
+    let mut lines = vec![line([
+        dim_span("• "),
+        span("Explored", TermColor::Default, TermStyle::BOLD),
+    ])];
+    for (index, entry) in entries.iter().enumerate() {
+        let branch = if index == 0 { "  └ " } else { "    " };
+        lines.push(line([dim_span(branch), dim_span(*entry)]));
+    }
+    lines
+}
+
+fn codex_edited(stats: &str, paths: &[&str]) -> Vec<Line> {
+    let mut lines = vec![line([
+        dim_span("• "),
+        span("Edited", TermColor::Default, TermStyle::BOLD),
+        dim_span(format!(" {stats}")),
+    ])];
+    for (index, path) in paths.iter().enumerate() {
+        let branch = if index == 0 { "  └ " } else { "    " };
+        lines.push(line([dim_span(branch), dim_span(*path)]));
+    }
+    lines
+}
+
+fn codex_ran(command: &str, output: &[&str], extra_lines: usize) -> Vec<Line> {
+    let mut lines = vec![line([
+        dim_span("• "),
+        span("Ran", TermColor::Default, TermStyle::BOLD),
+        dim_span(" "),
+        color_span(6, command),
+    ])];
+    for (index, row) in output.iter().enumerate() {
+        let branch = if index == 0 { "  └ " } else { "    " };
+        lines.push(line([dim_span(branch), dim_span(*row)]));
+    }
+    if extra_lines > 0 {
+        lines.push(dim(format!(
+            "    … +{extra_lines} lines (ctrl + t to view transcript)"
+        )));
+    }
+    lines
+}
+
+struct HunkRow {
+    number: u32,
+    kind: HunkKind,
+    text: &'static str,
+}
+
+enum HunkKind {
+    Ctx,
+    Add,
+    Del,
+}
+
+impl HunkRow {
+    fn ctx(number: u32, text: &'static str) -> Self {
+        Self {
+            number,
+            kind: HunkKind::Ctx,
+            text,
+        }
+    }
+
+    fn add(number: u32, text: &'static str) -> Self {
+        Self {
+            number,
+            kind: HunkKind::Add,
+            text,
+        }
+    }
+
+    fn del(number: u32, text: &'static str) -> Self {
+        Self {
+            number,
+            kind: HunkKind::Del,
+            text,
+        }
+    }
+}
+
+fn codex_patch(path: &str, plus: u32, minus: u32, rows: &[HunkRow]) -> Vec<Line> {
+    let mut lines = vec![line([
+        dim_span("• "),
+        span("Edited", TermColor::Default, TermStyle::BOLD),
+        dim_span(" "),
+        text(path),
+        dim_span(" ("),
+        span(format!("+{plus}"), TermColor::Ansi(2), TermStyle::empty()),
+        dim_span(" "),
+        span(format!("-{minus}"), TermColor::Ansi(1), TermStyle::empty()),
+        dim_span(")"),
+    ])];
+    for row in rows {
+        lines.push(hunk_line(row));
+    }
+    lines
+}
+
+fn hunk_line(row: &HunkRow) -> Line {
+    let gutter = format!("{:>4} ", row.number);
+    let marker = match row.kind {
+        HunkKind::Ctx => " ",
+        HunkKind::Add => "+",
+        HunkKind::Del => "-",
+    };
+    let body = format!("{marker}{}", row.text);
+    let (fg, bg) = match row.kind {
+        HunkKind::Ctx => (TermColor::Default, TermColor::DefaultInverted),
+        HunkKind::Add => (ADD_FG, ADD_BG),
+        HunkKind::Del => (DEL_FG, DEL_BG),
+    };
+    let used = gutter.chars().count() + body.chars().count();
+    let pad = usize::from(layout().cols).saturating_sub(used);
+    line([
+        dim_span(gutter),
+        span_on(
+            format!("{body}{}", " ".repeat(pad)),
+            fg,
+            bg,
+            TermStyle::empty(),
+        ),
+    ])
+}
+
+fn prefix_wrap(
+    prefix: Span,
+    continuation: &str,
+    body: &str,
+    fg: TermColor,
+    style: TermStyle,
+) -> Vec<Line> {
+    let prefix_width = prefix.text.chars().count();
+    let width = wrap_width().saturating_sub(prefix_width).max(16);
+    let wrapped = wrap_words(body, width);
+    wrapped
+        .into_iter()
+        .enumerate()
+        .map(|(index, text)| {
+            if index == 0 {
+                line([prefix.clone(), span(text, fg, style)])
+            } else {
+                line([dim_span(continuation), span(text, fg, style)])
+            }
+        })
+        .collect()
+}
+
+fn wrap_words(text: &str, width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for word in text.split_whitespace() {
+        if current.is_empty() {
+            current = word.to_string();
+            continue;
+        }
+        if current.chars().count() + 1 + word.chars().count() <= width {
+            current.push(' ');
+            current.push_str(word);
+        } else {
+            lines.push(std::mem::take(&mut current));
+            current = word.to_string();
+        }
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
+}
+
+fn padded_box_row(inner: usize, spans: Vec<Span>) -> Line {
+    let used: usize = spans.iter().map(|span| span.text.chars().count()).sum();
+    let pad = inner.saturating_sub(used);
+    let mut row = vec![dim_span("│ ")];
+    row.extend(spans);
+    if pad > 0 {
+        row.push(dim_span(" ".repeat(pad)));
+    }
+    row.push(dim_span(" │"));
+    row
 }
 
 fn claude_chrome(session: &SessionRecord) -> Vec<Line> {
@@ -479,50 +910,65 @@ fn project_name(session: &SessionRecord) -> &str {
     session.cwd.rsplit('/').next().unwrap_or(&session.cwd)
 }
 
+fn wrap_cells_wordwise(mut cells: Vec<GridCell>, width: usize) -> Vec<Vec<GridCell>> {
+    if width == 0 {
+        return vec![cells];
+    }
+    let mut lines = Vec::new();
+    while cells.len() > width {
+        let split = cells[..width]
+            .iter()
+            .rposition(|cell| cell.scalar == u32::from(' '))
+            .filter(|&index| index > 0)
+            .map(|index| index + 1)
+            .unwrap_or(width);
+        let rest = cells.split_off(split);
+        lines.push(std::mem::take(&mut cells));
+        cells = rest;
+        let skip = cells
+            .iter()
+            .position(|cell| cell.scalar != u32::from(' '))
+            .unwrap_or(cells.len());
+        cells.drain(..skip);
+    }
+    lines.push(cells);
+    lines
+}
+
 fn paint_preview_lines(lines: &[Line]) -> GridBuffer {
-    let cols = PREVIEW_GRID_COLS;
-    let rows = PREVIEW_GRID_ROWS;
+    let PreviewLayout { cols, rows, .. } = layout();
     let width = usize::from(cols);
     let mut expanded = Vec::new();
     for line in lines {
         let mut cells = Vec::new();
         for span in line {
             for ch in span.text.chars() {
-                cells.push(GridCell::new(
-                    u32::from(ch),
-                    span.fg,
-                    TermColor::DefaultInverted,
-                    span.style,
-                ));
+                cells.push(GridCell::new(u32::from(ch), span.fg, span.bg, span.style));
             }
         }
         if cells.is_empty() {
             expanded.push(Vec::new());
             continue;
         }
-        while cells.len() > width {
-            let rest = cells.split_off(width);
-            expanded.push(std::mem::take(&mut cells));
-            cells = rest;
-        }
-        expanded.push(cells);
+        expanded.extend(wrap_cells_wordwise(cells, width));
     }
-    let visible = if expanded.len() > usize::from(rows) {
-        &expanded[expanded.len() - usize::from(rows)..]
-    } else {
-        expanded.as_slice()
-    };
+    let row_limit = usize::from(rows);
+    if expanded.len() > row_limit {
+        let head = 12.min(row_limit);
+        let tail = row_limit.saturating_sub(head);
+        let mut clipped = expanded[..head].to_vec();
+        if tail > 0 {
+            clipped.extend(expanded[expanded.len() - tail..].iter().cloned());
+        }
+        expanded = clipped;
+    }
+    let visible = expanded.as_slice();
     let start = rows.saturating_sub(u16::try_from(visible.len()).unwrap_or(rows));
-    let mut cursor_col = 1;
+    let (cursor_col, cursor_row) = cursor_from_visible(visible, start, cols, rows);
     let changed_rows = visible
         .iter()
         .enumerate()
         .map(|(index, cells)| {
-            if index + 1 == visible.len() {
-                cursor_col = u16::try_from(cells.len())
-                    .unwrap_or(0)
-                    .min(cols.saturating_sub(1));
-            }
             ChangedRow::new(start + u16::try_from(index).unwrap_or(0), cells.clone())
         })
         .collect();
@@ -531,7 +977,7 @@ fn paint_preview_lines(lines: &[Line]) -> GridBuffer {
         cols,
         rows,
         cursor_col,
-        cursor_row: rows.saturating_sub(1),
+        cursor_row,
         cursor_visible: true,
         is_full_snapshot: true,
         changed_rows,
@@ -539,10 +985,40 @@ fn paint_preview_lines(lines: &[Line]) -> GridBuffer {
     buffer
 }
 
+fn cursor_from_visible(visible: &[Vec<GridCell>], start: u16, cols: u16, rows: u16) -> (u16, u16) {
+    for (index, cells) in visible.iter().enumerate().rev() {
+        let mut col = 0u16;
+        for cell in cells {
+            if cell.scalar == u32::from('>')
+                && cells
+                    .get(usize::from(col) + 1)
+                    .is_some_and(|next| next.scalar == u32::from(' '))
+            {
+                return (
+                    (col + 2).min(cols.saturating_sub(1)),
+                    start + u16::try_from(index).unwrap_or(0),
+                );
+            }
+            col = col.saturating_add(1);
+        }
+    }
+    (
+        u16::try_from(visible.last().map_or(0, Vec::len))
+            .unwrap_or(0)
+            .min(cols.saturating_sub(1)),
+        rows.saturating_sub(1),
+    )
+}
+
 fn span(text: impl Into<String>, fg: TermColor, style: TermStyle) -> Span {
+    span_on(text, fg, TermColor::DefaultInverted, style)
+}
+
+fn span_on(text: impl Into<String>, fg: TermColor, bg: TermColor, style: TermStyle) -> Span {
     Span {
         text: text.into(),
         fg,
+        bg,
         style,
     }
 }
@@ -576,7 +1052,7 @@ fn blank() -> Line {
 }
 
 fn rule() -> Line {
-    dim("─".repeat(72))
+    dim("─".repeat(wrap_width()))
 }
 
 fn prompt() -> Line {
@@ -589,14 +1065,6 @@ fn user_prompt(title: &str) -> Line {
 
 fn ok(value: impl Into<String>) -> Line {
     line([color_span(2, "✓  "), text(value)])
-}
-
-fn tool(kind: &str, path: &str) -> Line {
-    line([
-        span("■ ", TermColor::Ansi(4), TermStyle::empty()),
-        span(format!("{kind:<8}"), TermColor::Ansi(4), TermStyle::BOLD),
-        span(path, TermColor::Default, TermStyle::DIM),
-    ])
 }
 
 fn claude_say(value: &str) -> Line {
@@ -625,16 +1093,11 @@ fn gemini_tool(kind: &str, path: &str) -> Line {
 }
 
 fn wrap_body(value: &str) -> Line {
-    // Single visual line for the painter; wrapping is pre-split by callers
-    // that need multiple rows. Keep short bodies on one row.
-    if value.len() <= WRAP {
-        return vec![text(value)];
-    }
     vec![text(value)]
 }
 
 fn box_top(title: &str) -> Line {
-    let pad = WRAP.saturating_sub(title.chars().count() + 5);
+    let pad = wrap_width().saturating_sub(title.chars().count() + 5);
     line([
         color_span(8, "╭─ "),
         span(title, TermColor::Ansi(6), TermStyle::BOLD),
@@ -645,7 +1108,7 @@ fn box_top(title: &str) -> Line {
 
 fn box_body(value: impl Into<String>) -> Line {
     let value = value.into();
-    let pad = WRAP.saturating_sub(value.chars().count() + 4);
+    let pad = wrap_width().saturating_sub(value.chars().count() + 4);
     line([
         color_span(8, "│ "),
         text(value),
@@ -656,7 +1119,7 @@ fn box_body(value: impl Into<String>) -> Line {
 fn box_choice(selected: bool, value: impl Into<String>) -> Line {
     let marker = if selected { "❯ " } else { "  " };
     let value = value.into();
-    let pad = WRAP.saturating_sub(value.chars().count() + 6);
+    let pad = wrap_width().saturating_sub(value.chars().count() + 6);
     line([
         color_span(8, "│ "),
         span(
@@ -684,7 +1147,7 @@ fn box_choice(selected: bool, value: impl Into<String>) -> Line {
 fn box_bottom() -> Line {
     line([
         color_span(8, "╰"),
-        color_span(8, "─".repeat(WRAP.saturating_sub(2))),
+        color_span(8, "─".repeat(wrap_width().saturating_sub(2))),
         color_span(8, "╯"),
     ])
 }
@@ -719,7 +1182,7 @@ mod tests {
     fn typical_sessions_paint_distinct_agent_transcripts() {
         let fixture = SidebarPreviewFixture::make(PreviewScenario::Typical);
         let cases = [
-            ("preview-codex", "Codex"),
+            ("preview-codex", "OpenAI Codex"),
             ("preview-claude", "Claude Code"),
             ("preview-cursor", "cursor agent"),
             ("preview-shell", "localhost:3000"),
@@ -752,5 +1215,49 @@ mod tests {
         let text = grid_text(session(&fixture, "preview-codex"));
         assert!(text.contains("background worker"));
         assert!(text.contains(&session(&fixture, "preview-codex").title));
+    }
+
+    #[test]
+    fn long_preview_lines_wrap_on_word_boundaries() {
+        let cells: Vec<_> = "one two three four five six seven eight nine ten extra words here"
+            .chars()
+            .map(|ch| {
+                GridCell::new(
+                    u32::from(ch),
+                    TermColor::Default,
+                    TermColor::DefaultInverted,
+                    TermStyle::empty(),
+                )
+            })
+            .collect();
+        let lines = wrap_cells_wordwise(cells, 24);
+        assert!(lines.len() > 1);
+        assert!(lines.iter().all(|line| line.len() <= 24));
+        let text: String = lines
+            .iter()
+            .flat_map(|line| line.iter().map(|cell| char::from_u32(cell.scalar).unwrap()))
+            .collect();
+        assert!(text.contains("one two"));
+        assert!(!text.contains("seveneight"));
+    }
+
+    #[test]
+    fn typical_codex_session_matches_the_interactive_tui() {
+        let fixture = SidebarPreviewFixture::make(PreviewScenario::Typical);
+        let text = grid_text(session(&fixture, "preview-codex"));
+        assert!(text.contains(">_ OpenAI Codex"), "{text}");
+        assert!(text.contains("v0.148.0"), "{text}");
+        assert!(text.contains("Tip:"), "{text}");
+        assert!(text.contains("/fast"), "{text}");
+        assert!(
+            text.contains("› Polish the left sidebar hierarchy"),
+            "{text}"
+        );
+        assert!(text.contains("• Ran"), "{text}");
+        assert!(text.contains("• Edited"), "{text}");
+        assert!(text.contains("+12"), "{text}");
+        assert!(text.contains("ctrl + t to view transcript"), "{text}");
+        assert!(text.contains("Ask Codex to do anything"), "{text}");
+        assert!(text.contains("gpt-5.6-sol"), "{text}");
     }
 }

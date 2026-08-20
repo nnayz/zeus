@@ -8,7 +8,7 @@ Gemini and plain shells in parallel, across git worktrees or on remote hosts, ea
 status (working / needs-you / done). Closing the app never kills a session. A daemon restart
 brings conversations back.
 
-![Zeus desktop app preview](docs/src/images/zeus-preview.png)
+![Zeus desktop app preview](site/static/preview.png)
 
 ## Install
 

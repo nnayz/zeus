@@ -394,6 +394,8 @@ tokio::spawn(async move { clone_repository(request).await });
             sidebar_pinned_sessions: vec![claude.id.clone()],
             sidebar_collapsed_projects: vec![mldrills.id.clone()],
             sidebar_expanded_archives: vec![settings.id.clone()],
+            inspector_tab: InspectorTab::Changes,
+            inspector_word_wrap: true,
             ..Prefs::default()
         };
         prefs.normalize();
@@ -553,6 +555,8 @@ mod tests {
         assert_eq!(fixture.prefs.sidebar_pinned_sessions.len(), 1);
         assert_eq!(fixture.prefs.sidebar_collapsed_projects.len(), 1);
         assert_eq!(fixture.prefs.sidebar_expanded_archives.len(), 1);
+        assert_eq!(fixture.prefs.inspector_tab, InspectorTab::Changes);
+        assert!(fixture.prefs.inspector_word_wrap);
     }
 
     #[test]

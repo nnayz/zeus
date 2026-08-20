@@ -18,3 +18,8 @@ zeus/target/
 
 # mdBook output
 docs/book/
+
+# Product site
+site/node_modules/
+site/.svelte-kit/
+site/build/

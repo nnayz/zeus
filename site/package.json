@@ -1,0 +1,20 @@
+{
+  "name": "zeus-site",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite dev",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "@sveltejs/adapter-static": "^3.0.10",
+    "@sveltejs/kit": "^2.47.0",
+    "@sveltejs/vite-plugin-svelte": "^6.2.0",
+    "@tailwindcss/vite": "^4.1.13",
+    "svelte": "^5.39.0",
+    "tailwindcss": "^4.1.13",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.5"
+  }
+}

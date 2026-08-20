@@ -17,7 +17,7 @@ use gpui::{
 use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 use zeus_client::attachment::{SessionAttachment, TerminalChunk};
-use zeus_proto::grid::GridUpdate;
+use zeus_proto::grid::{ChangedRow, GridUpdate};
 use zeus_proto::{
     AgentKind as ProtoAgentKind, ArtifactKind, ExitReason, PrCheck, Project, PullRequestStatus,
     Resumability, RiskHint, SessionArtifact, SessionId, SessionRecord, SessionStatus, TitleSource,
@@ -41,7 +41,7 @@ use zeus_ui::{
 use crate::clipboard_transfer::StagedClipboardImage;
 use crate::macos::sf_symbols::{SymbolWeight, sf_symbol, sf_symbol_weighted};
 use crate::navigation::{NavigationOverlay, ToggleCommandPalette, ToggleQuickOpen, query_label};
-use crate::preview_terminal::preview_session_grid;
+use crate::preview_terminal::{preview_session_grid, preview_session_grid_sized};
 use crate::query_editor::{self, ClipboardEdit, Edit, QueryEditor};
 use crate::session_surfaces::switcher_key;
 use crate::store::{LineageNode, LineageStrip, LineageView, StoreRuntime};
@@ -2102,8 +2102,73 @@ impl TerminalPane {
         cx.notify();
     }
 
+    fn reflow_preview_grid(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(session) = self.selected_session() else {
+            return;
+        };
+        let font_size = self
+            .runtime
+            .store
+            .read()
+            .expect("session store lock poisoned")
+            .preferences()
+            .terminal_font_size;
+        let viewport = self.viewport.unwrap_or_else(|| {
+            let bounds = window.inner_window_bounds().get_bounds();
+            TerminalViewport {
+                x: 0.0,
+                y: 0.0,
+                width: f32::from(bounds.size.width),
+                height: f32::from(bounds.size.height),
+            }
+        });
+        let metrics = CellMetrics::measure(
+            window.text_system(),
+            &font(crate::fonts::mono_family()),
+            px(font_size),
+        );
+        let size = estimated_grid_size(
+            viewport.width,
+            viewport.height,
+            0.0,
+            self.lineage_chrome_height(),
+            metrics,
+        );
+        let Some(resident) = self.residents.get_mut(&session.id) else {
+            return;
+        };
+        if resident.last_size == size {
+            return;
+        }
+        resident.last_size = size;
+        let grid = preview_session_grid_sized(session.as_ref(), size.0, size.1);
+        let changed_rows = (0..grid.rows)
+            .filter_map(|row| {
+                grid.row(usize::from(row))
+                    .map(|cells| ChangedRow::new(row, cells.to_vec()))
+            })
+            .collect();
+        resident.element.apply(
+            GridUpdate {
+                cols: grid.cols,
+                rows: grid.rows,
+                cursor_col: grid.cursor.col,
+                cursor_row: grid.cursor.row,
+                cursor_visible: grid.cursor.visible,
+                is_full_snapshot: true,
+                changed_rows,
+            },
+            window,
+        );
+        cx.notify();
+    }
+
     fn update_selected_geometry(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.preview || self.lineage_tree_open() {
+        if self.lineage_tree_open() {
+            return;
+        }
+        if self.preview {
+            self.reflow_preview_grid(window, cx);
             return;
         }
         let Some(session) = self.selected_session() else {

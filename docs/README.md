@@ -1,7 +1,7 @@
 # Documentation
 
-User-facing docs are an [mdBook](https://rust-lang.github.io/mdBook/) under
-`docs/`.
+User-facing documentation is built with [mdBook](https://rust-lang.github.io/mdBook/)
+and lives under `docs/`.
 
 ```sh
 # from the repository root (/Users/nayz/Desktop/zeus)

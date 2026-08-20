@@ -329,6 +329,86 @@ pub fn parse_unified_diff(patch: &str) -> DiffSnapshot {
     parse_unified_diff_bytes(patch.as_bytes())
 }
 
+/// Deterministic Review-tab snapshot for sidebar preview fixtures.
+///
+/// Preview mode never talks to Git, so the inspector would otherwise render an
+/// empty working tree. The patch is the same sidebar-hierarchy work the Codex
+/// terminal fixture claims to have just written.
+pub fn preview_diff_snapshot(repo_root: PathBuf) -> DiffSnapshot {
+    let mut snapshot = parse_unified_diff(PREVIEW_SIDEBAR_PATCH);
+    snapshot.repo_root = repo_root;
+    snapshot.base_ref = Some("main".into());
+    snapshot.layer = DiffLayer::Working;
+    snapshot
+}
+
+const PREVIEW_SIDEBAR_PATCH: &str = "\
+diff --git a/crates/zeus-app/src/sidebar/view.rs b/crates/zeus-app/src/sidebar/view.rs
+index 4e2a11c..9b81d04 100644
+--- a/crates/zeus-app/src/sidebar/view.rs
++++ b/crates/zeus-app/src/sidebar/view.rs
+@@ -214,12 +214,16 @@ fn session_row(session: &SessionRow, hover: bool) -> Row {
+     let title = session.title.clone();
+-    let height = 32.0;
+-    let actions = project_actions(session);
++    let height = 28.0;
++    let actions = hover.then(|| row_actions(session));
+     Row::new()
+         .height(height)
+         .child(status_glyph(session.status))
+         .child(title_label(&title))
+-        .child(actions)
++        .when_some(actions, |row, actions| row.child(actions))
+ }
+ 
++fn project_header(name: &str, hover: bool) -> Row {
++    Row::new().height(18.0).child(folder_badge(name, hover))
++}
++
+ fn archive_bucket() -> DropTarget {
+     DropTarget::new(ArchiveBucket)
+ }
+@@ -401,8 +405,11 @@ fn drag_preview(rows: &[SessionRow]) -> Preview {
+     Preview::new()
+         .live(true)
+-        .offset(point(0.0, 4.0))
++        .offset(point(0.0, 2.0))
+         .child(stack)
++        .child(command_hint(rows.len()))
+ }
+diff --git a/crates/zeus-app/src/sidebar/state.rs b/crates/zeus-app/src/sidebar/state.rs
+index 18cc90a..77f2e1b 100644
+--- a/crates/zeus-app/src/sidebar/state.rs
++++ b/crates/zeus-app/src/sidebar/state.rs
+@@ -88,9 +88,12 @@ impl SidebarState {
+     pub fn pin(&mut self, id: SessionId) {
+-        self.pinned.push(id);
++        self.pinned.retain(|pinned| pinned != &id);
++        self.pinned.insert(0, id);
+         self.archived.retain(|archived| archived != &id);
+     }
+ 
+     pub fn archive(&mut self, id: SessionId) {
++        self.pinned.retain(|pinned| pinned != &id);
+         self.archived.push(id);
+     }
+diff --git a/crates/zeus-app/src/sidebar/tests.rs b/crates/zeus-app/src/sidebar/tests.rs
+index 55ab001..c0d9e22 100644
+--- a/crates/zeus-app/src/sidebar/tests.rs
++++ b/crates/zeus-app/src/sidebar/tests.rs
+@@ -40,6 +40,18 @@ fn typical_fixture_carries_a_two_level_spawn_tree() {
+     assert_eq!(nested.last().map(|row| row.depth), Some(2));
+ }
++
++#[test]
++fn project_header_keeps_actions_off_until_hover() {
++    let idle = project_header(\"Zeus\", false);
++    assert!(idle.actions().is_none());
++    let hover = project_header(\"Zeus\", true);
++    assert!(hover.actions().is_some());
++}
+";
+
 fn parse_unified_diff_bytes(patch: &[u8]) -> DiffSnapshot {
     let mut snapshot = DiffSnapshot::default();
     let mut old_line = None;
@@ -721,6 +801,21 @@ mod tests {
     #[test]
     fn empty_patch_is_an_empty_snapshot() {
         assert_eq!(parse_unified_diff(""), DiffSnapshot::default());
+    }
+
+    #[test]
+    fn preview_sidebar_diff_fills_the_review_panel() {
+        let snapshot = preview_diff_snapshot(PathBuf::from("/Users/preview/Projects/zeus"));
+        assert_eq!(snapshot.files, 3);
+        assert!(snapshot.additions > 0);
+        assert!(snapshot.deletions > 0);
+        assert!(!snapshot.rows.is_empty());
+        assert!(
+            snapshot
+                .file_diffs
+                .iter()
+                .any(|file| file.path.ends_with("view.rs"))
+        );
     }
 
     #[test]

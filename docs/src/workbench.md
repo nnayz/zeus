@@ -98,8 +98,13 @@ back to the window.
 "New Claude Code in *this project*", "New Codex on *this host*", move the
 selected Claude session, sync prefs, settings, docs, updates.
 
-`⌘P` is folders. Type a directory. Return launches your default agent there.
-Add extra search roots in Settings → General.
+`⌘P` is the unified navigator. It searches files in the selected local
+session's project (or the first open project on the startup screen), every
+agent session, and indexed folders. Return opens a file in Code, switches to a
+session, or launches your default agent in a folder; `⌘Return` launches a
+terminal for a folder result. Add extra folder search roots in Settings →
+General. Remote sessions still appear, but their files are not indexed through
+the local filesystem.
 
 ## Layout
 

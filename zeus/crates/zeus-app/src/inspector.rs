@@ -394,6 +394,13 @@ impl WorkbenchInspector {
         self.select_tab(InspectorTab::Code, cx);
     }
 
+    /// An explicit Code destination can stand on its own before an agent has
+    /// been selected. RootView uses this to let Cmd+P reveal a startup file
+    /// without weakening the normal session gate for Info/Review/Artifacts.
+    pub const fn is_code_destination(&self) -> bool {
+        matches!(self.selected_tab, InspectorTab::Code)
+    }
+
     fn selected_context(&self) -> Option<DiffContext> {
         let store = self
             .runtime

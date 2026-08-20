@@ -1548,7 +1548,7 @@ impl UtilitySurfaces {
                     "New sessions",
                     setting_row(
                         "Default agent",
-                        "Used by ⌘T and Quick Open.",
+                        "Used by ⌘T and folder results in Quick Open.",
                         self.default_agent_dropdown(cx),
                         colors,
                     ),

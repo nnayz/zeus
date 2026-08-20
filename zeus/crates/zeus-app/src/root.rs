@@ -344,6 +344,15 @@ impl RootView {
                 NavigationEvent::CheckForUpdates => {
                     this.services.updates.check(true);
                 }
+                NavigationEvent::OpenFile { cwd, reference } => {
+                    let inspector = this.inspector.clone();
+                    this.reveal_inspector(cx);
+                    if let Some(inspector) = inspector {
+                        inspector.update(cx, |inspector, cx| {
+                            inspector.open_file_reference(cwd.clone(), reference.clone(), cx);
+                        });
+                    }
+                }
             })
             .detach();
         }
@@ -1910,12 +1919,18 @@ impl Render for RootView {
             .inspector_width
             .max(self.inspector_min_width())
             .min(self.inspector_max_width);
-        let inspector_width =
-            if self.inspector_open && !startup_welcome_visible && has_selected_session {
-                inspector_panel_width
-            } else {
-                0.0
-            };
+        let inspector_has_standalone_destination = self
+            .inspector
+            .as_ref()
+            .is_some_and(|inspector| inspector.read(cx).is_code_destination());
+        let inspector_width = if self.inspector_open
+            && (inspector_has_standalone_destination
+                || (!startup_welcome_visible && has_selected_session))
+        {
+            inspector_panel_width
+        } else {
+            0.0
+        };
         let now = Instant::now();
         self.sidebar_seam =
             advance_seam(&mut self.sidebar_slide, occupied_sidebar_width, now, window);

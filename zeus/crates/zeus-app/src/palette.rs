@@ -135,7 +135,7 @@ pub fn actions_for_default_host(
             detail: None,
             enabled: true,
             command: PaletteCommand::OpenQuickOpen,
-            keywords: "folder project directory jump goto find".into(),
+            keywords: "file folder project directory session agent jump goto find".into(),
         },
         PaletteAction {
             id: "session-overview".into(),
@@ -883,7 +883,10 @@ mod tests {
 
         assert_eq!(top("term").as_deref(), Some("new-terminal"));
         assert_eq!(top("ncc").as_deref(), Some("new-default"));
-        assert_eq!(top("mldrills").as_deref(), Some("new-default-in-/work/mldrills"));
+        assert_eq!(
+            top("mldrills").as_deref(),
+            Some("new-default-in-/work/mldrills")
+        );
         // Synonyms nobody put in a title: "preferences" is only a keyword.
         assert_eq!(top("preferences").as_deref(), Some("settings"));
         assert_eq!(top("shell").as_deref(), Some("new-terminal"));

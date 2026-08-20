@@ -4,8 +4,8 @@
 
 ## General
 
-**Default agent.** What `⌘T` and Quick Open launch. Used by the sidebar's
-primary New Agent hint as well.
+**Default agent.** What `⌘T` and a folder result in Quick Open launch. Used by
+the sidebar's primary New Agent hint as well.
 
 **Projects sidebar on the right.** Mirrors the chrome: projects on the
 trailing edge, inspector on the leading one.
@@ -26,8 +26,9 @@ memory pauses. Working sessions stay silent.
 six hours. Download and restart always wait for a click. See
 [Updates](updates.md).
 
-**Quick Open roots.** Extra folders, one per line, scanned four levels
-deep. Empty means the default folder plus parents of open projects.
+**Quick Open roots.** Extra entries for Quick Open's Projects & Folders
+section, one per line and scanned four levels deep. Empty means the default
+folder plus parents of open projects.
 
 ## Terminal
 

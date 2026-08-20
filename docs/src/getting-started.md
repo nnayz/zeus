@@ -17,7 +17,7 @@ never installs one until you click restart. See [Updates](updates.md).
 ## Ten minutes to a fleet of one
 
 1. Open Zeus. If no project is open, use **Open…** (`⌘O`) or **Quick Open**
-   (`⌘P`) and pick a repository.
+   (`⌘P`) and pick a repository from the Projects & Folders section.
 2. Press `⌘N`. Choose Claude Code, Codex, or whatever is installed, type the
    first prompt, and press Return. You can also press `⌘T` to launch your
    default agent in the current project with no prompt.

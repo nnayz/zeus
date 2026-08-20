@@ -12,7 +12,7 @@ is the backup for anything you forget.
 | `⌥⌘T` | New terminal (login shell) |
 | `⌘⇧N` | New Codex session |
 | `⌘O` | Open a project folder |
-| `⌘P` | Quick Open a folder, then spawn the default agent |
+| `⌘P` | Search project files, agent sessions, and folders |
 | `⌘W` | Close the selected session |
 | `⌘⇧T` | Reopen the last closed session |
 | `⌘⇧W` | Archive the selected session |

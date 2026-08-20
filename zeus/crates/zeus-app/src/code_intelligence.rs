@@ -322,6 +322,43 @@ impl CodeIntelligence {
         results
     }
 
+    /// Rank only workspace file paths. The global Quick Open surface uses
+    /// this narrower view: symbols remain available in the code viewer's own
+    /// picker, while Cmd+P stays predictable and always opens a file.
+    pub fn search_files(&self, query: &str, limit: usize) -> Vec<SearchHit> {
+        if limit == 0 {
+            return Vec::new();
+        }
+
+        let query = query.trim();
+        let mut results = Vec::new();
+        for file in &self.index().files {
+            let score = if query.is_empty() {
+                Some(0)
+            } else {
+                path_score(query, &file.display_path)
+            };
+            if let Some(score) = score {
+                results.push(SearchHit {
+                    relative_path: file.relative_path.clone(),
+                    kind: SearchHitKind::File,
+                    line: None,
+                    preview: file.display_path.clone(),
+                    score,
+                });
+            }
+        }
+
+        results.sort_by(|left, right| {
+            right
+                .score
+                .cmp(&left.score)
+                .then_with(|| left.relative_path.cmp(&right.relative_path))
+        });
+        results.truncate(limit);
+        results
+    }
+
     fn resolve_workspace_file(
         &self,
         requested: &Path,
@@ -1465,6 +1502,17 @@ mod tests {
         let function = intelligence.search("render_viewer", 10);
         assert_eq!(function[0].kind, SearchHitKind::Symbol);
         assert_eq!(function[0].line, Some(2));
+
+        let files_only = intelligence.search_files("CodeIntelligence", 10);
+        assert!(
+            files_only
+                .iter()
+                .all(|hit| hit.kind == SearchHitKind::File && hit.line.is_none())
+        );
+        assert_eq!(
+            files_only[0].relative_path,
+            Path::new("src/code_intelligence.rs")
+        );
     }
 
     #[test]

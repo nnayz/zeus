@@ -44,6 +44,41 @@ pub struct ReviewStatus {
     pub conflicted: Vec<FileChange>,
 }
 
+/// Deterministic Review cockpit for sidebar preview fixtures.
+pub fn preview_review_status() -> ReviewStatus {
+    ReviewStatus {
+        repo_root: PathBuf::from("/Users/preview/Projects/zeus"),
+        branch: BranchInfo {
+            name: Some("sidebar-craft".into()),
+            oid: Some("9b81d04c".into()),
+            upstream: Some("origin/sidebar-craft".into()),
+            ahead: 2,
+            behind: 0,
+        },
+        staged: vec![file_change(
+            "crates/zeus-app/src/sidebar/view.rs",
+            ChangeKind::Modified,
+        )],
+        unstaged: vec![file_change(
+            "crates/zeus-app/src/sidebar/state.rs",
+            ChangeKind::Modified,
+        )],
+        untracked: vec![file_change(
+            "crates/zeus-app/src/sidebar/tests.rs",
+            ChangeKind::Added,
+        )],
+        conflicted: Vec::new(),
+    }
+}
+
+fn file_change(path: &str, kind: ChangeKind) -> FileChange {
+    FileChange {
+        path: PathBuf::from(path),
+        original_path: None,
+        kind,
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct BranchInfo {
     /// `None` means detached HEAD. An unborn branch still has a name.
@@ -994,6 +1029,16 @@ mod tests {
     use crate::diff::{DiffHunk, DiffLayer, load_local_diff};
     use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    fn preview_review_status_has_staged_and_working_files() {
+        let status = preview_review_status();
+        assert_eq!(status.branch.name.as_deref(), Some("sidebar-craft"));
+        assert_eq!(status.staged.len(), 1);
+        assert_eq!(status.unstaged.len(), 1);
+        assert_eq!(status.untracked.len(), 1);
+        assert_eq!(status.branch.ahead, 2);
+    }
 
     static NEXT_REPO: AtomicU64 = AtomicU64::new(0);
 

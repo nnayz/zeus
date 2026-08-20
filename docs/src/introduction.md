@@ -13,13 +13,14 @@ to the session that is stuck, and accept the work.
 
 ## Install
 
-```sh
-brew tap nnayz/zeus https://github.com/nnayz/zeus.git
-brew install --cask nnayz/zeus/zeus
-```
+Zeus requires macOS 15 or newer. Download the current universal DMG from
+[Releases](https://github.com/nnayz/zeus/releases/latest), drag Zeus to
+Applications, then complete the one-time Gatekeeper exception. The current
+release is ad-hoc signed and is not available through Homebrew.
 
-Or download the latest DMG from
-[Releases](https://github.com/nnayz/zeus/releases/latest). macOS 15 or newer.
+See [Getting started](getting-started.md) or the
+[illustrated macOS install guide](https://nnayz.github.io/zeus/install/) for
+the complete installation flow.
 
 ## In this book
 

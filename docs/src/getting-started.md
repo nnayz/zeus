@@ -2,17 +2,21 @@
 
 ## Install
 
-Zeus requires macOS 15 or newer. Install the signed, notarized universal build:
+Zeus requires macOS 15 or newer. The current universal DMG is ad-hoc signed,
+not Developer ID signed or notarized. Download it only from
+[GitHub Releases](https://github.com/nnayz/zeus/releases/latest), open the DMG,
+and drag Zeus to Applications.
 
-```sh
-brew tap nnayz/zeus https://github.com/nnayz/zeus.git
-brew install --cask nnayz/zeus/zeus
-```
+For the first launch, open Finder → Applications, Control-click or right-click
+Zeus, and choose **Open**. If macOS still blocks it, try to open Zeus once, then
+go to System Settings → Privacy & Security → Security and choose **Open
+Anyway**. The
+[illustrated macOS install guide](https://nnayz.github.io/zeus/install/) shows
+each screen in the flow.
 
-Alternatively, download the latest DMG from
-[GitHub Releases](https://github.com/nnayz/zeus/releases/latest), open it, and
-drag Zeus to Applications. The app checks the same release feed for updates. It
-never installs one until you click restart. See [Updates](updates.md).
+Do not disable Gatekeeper or remove quarantine attributes globally. Homebrew
+installation and in-app updates remain unavailable until a Developer ID signed
+and notarized release ships. See [Updates](updates.md).
 
 ## Ten minutes to a fleet of one
 

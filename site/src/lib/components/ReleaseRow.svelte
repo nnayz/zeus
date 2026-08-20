@@ -5,15 +5,20 @@
   let { release }: { release: Release } = $props();
 </script>
 
-<div class="release-row">
-  <a class="release-row__title hover:no-underline" href="{base}/releases/{release.version}/"
-    >v{release.version}</a
-  >
-  <time class="release-row__date" datetime={release.date}>{formatDate(release.date)}</time>
-  <p class="release-row__summary">
-    {release.summary}
+<article class="release-row">
+  <div class="release-row__meta">
+    <time class="release-row__date" datetime={release.date}>{formatDate(release.date)}</time>
+    <a class="release-row__version" href="{base}/releases/{release.version}/"
+      >v{release.version}</a
+    >
     {#if release.unsigned}
-      <span class="tag ml-1 align-middle">unsigned</span>
+      <span class="tag">unsigned</span>
     {/if}
-  </p>
-</div>
+  </div>
+
+  <div class="release-row__summary">
+    {#each release.summary as paragraph}
+      <p>{paragraph}</p>
+    {/each}
+  </div>
+</article>

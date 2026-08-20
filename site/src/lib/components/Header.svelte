@@ -9,9 +9,10 @@
   <a href="{base}/" class="text-[14px] font-medium leading-5 text-[var(--color-text)] hover:no-underline"
     >{title}</a
   >
-  <nav class="flex items-center gap-4 text-[14px] font-medium leading-5">
+  <nav class="flex items-center gap-3 sm:gap-4 text-[14px] font-medium leading-5">
+    <a href="{base}/install/">Install</a>
     <a href="{base}/releases/">Releases</a>
-    <a href="{base}/security/">Security</a>
+    <a href="{base}/security/" class="hidden sm:inline">Security</a>
     <a href={DOCS} rel="external">Docs</a>
     <a href={GITHUB}>GitHub</a>
   </nav>

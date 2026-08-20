@@ -1,7 +1,12 @@
 # Updates
 
-Zeus updates itself from GitHub Releases. Checks are automatic; installing an
-update always waits for you.
+The updater is disabled for the current ad-hoc-signed release. It rejects
+builds that are not Developer ID signed and notarized, including v0.0.1. Until
+a qualifying release ships, download new versions manually from
+[GitHub Releases](https://github.com/nnayz/zeus/releases).
+
+Once signed releases are available, Zeus will use the flow below. Checks are
+automatic; installing an update always waits for you.
 
 ## What you see
 

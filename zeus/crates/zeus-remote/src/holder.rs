@@ -29,6 +29,7 @@ use crate::state::{
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 const DIFF_COALESCE: Duration = Duration::from_millis(16);
+const OUTPUT_BATCH_BYTES: usize = 64 * 1024;
 const INTERACTIVE_GRID_BUDGET: u8 = 2;
 const MAX_OUTBOUND_BYTES: usize = 20 << 20;
 const MAX_PENDING_INPUT_BYTES: usize = 1 << 20;
@@ -658,7 +659,7 @@ impl Holder {
                         .as_ref()
                         .is_some_and(|connection| connection.epoch.is_some())
                     {
-                        self.queue(RemoteMessage::Terminal(Frame::output(offset, bytes)))?;
+                        self.queue_output(offset, bytes)?;
                     }
                     if self
                         .state
@@ -1012,6 +1013,11 @@ impl Holder {
         {
             return Ok(());
         }
+        // Live output and the terminal state produced from it share one
+        // coalescing deadline. Queue the partial output batch immediately
+        // before its grid publication so the attach writer carries both in
+        // the same outbound pass.
+        self.flush_output()?;
         let grid = self.screen.grid_update(false);
         self.state.snapshot_sequence = self.state.snapshot_sequence.saturating_add(1);
         if grid.is_full_snapshot {
@@ -1034,11 +1040,31 @@ impl Holder {
         Ok(())
     }
 
+    fn queue_output(&mut self, offset: u64, bytes: &[u8]) -> io::Result<()> {
+        let Some(mut connection) = self.connection.take() else {
+            return Ok(());
+        };
+        connection.buffer_output(offset, bytes)?;
+        self.restore_queued_connection(connection)
+    }
+
+    fn flush_output(&mut self) -> io::Result<()> {
+        let Some(mut connection) = self.connection.take() else {
+            return Ok(());
+        };
+        connection.flush_output()?;
+        self.restore_queued_connection(connection)
+    }
+
     fn queue(&mut self, message: RemoteMessage) -> io::Result<()> {
         let Some(mut connection) = self.connection.take() else {
             return Ok(());
         };
         connection.queue(message)?;
+        self.restore_queued_connection(connection)
+    }
+
+    fn restore_queued_connection(&mut self, mut connection: Connection) -> io::Result<()> {
         if connection.outbound.len() > MAX_OUTBOUND_BYTES {
             if connection.sent != 0 {
                 // Bytes from the head frame already reached the client; a
@@ -1072,6 +1098,9 @@ impl Holder {
     }
 
     fn record_exit(&mut self) -> io::Result<()> {
+        if self.dirty_since.is_some() {
+            self.emit_grid_delta()?;
+        }
         // Close and join the independent guard before reaping the session
         // leader. This lets it kill any surviving grandchildren while the
         // process-group id is still protected from PID reuse by the zombie.
@@ -1148,6 +1177,8 @@ struct Connection {
     epoch: Option<u64>,
     outbound: Vec<u8>,
     sent: usize,
+    pending_output_offset: Option<u64>,
+    pending_output: Vec<u8>,
 }
 
 impl Connection {
@@ -1158,11 +1189,56 @@ impl Connection {
             epoch: None,
             outbound: Vec::with_capacity(64 * 1024),
             sent: 0,
+            pending_output_offset: None,
+            pending_output: Vec::with_capacity(OUTPUT_BATCH_BYTES),
         }
     }
 
     fn queue(&mut self, message: RemoteMessage) -> io::Result<()> {
+        self.flush_output()?;
+        self.queue_direct(message)
+    }
+
+    fn queue_direct(&mut self, message: RemoteMessage) -> io::Result<()> {
         RemoteCodec::encode_into(&message, &mut self.outbound).map_err(io::Error::other)
+    }
+
+    fn buffer_output(&mut self, mut offset: u64, mut bytes: &[u8]) -> io::Result<()> {
+        while !bytes.is_empty() {
+            if let Some(start) = self.pending_output_offset {
+                let expected = start.saturating_add(self.pending_output.len() as u64);
+                if offset != expected {
+                    self.flush_output()?;
+                    continue;
+                }
+            } else {
+                self.pending_output_offset = Some(offset);
+            }
+
+            let count = bytes
+                .len()
+                .min(OUTPUT_BATCH_BYTES - self.pending_output.len());
+            self.pending_output.extend_from_slice(&bytes[..count]);
+            offset = offset.saturating_add(count as u64);
+            bytes = &bytes[count..];
+            if self.pending_output.len() == OUTPUT_BATCH_BYTES {
+                self.flush_output()?;
+            }
+        }
+        Ok(())
+    }
+
+    fn flush_output(&mut self) -> io::Result<()> {
+        let Some(offset) = self.pending_output_offset else {
+            return Ok(());
+        };
+        self.queue_direct(RemoteMessage::Terminal(Frame::output(
+            offset,
+            &self.pending_output,
+        )))?;
+        self.pending_output.clear();
+        self.pending_output_offset = None;
+        Ok(())
     }
 
     fn queue_error(&mut self, code: &str, message: &str, fatal: bool) -> io::Result<()> {
@@ -1179,6 +1255,8 @@ impl Connection {
         // immediately discarded and the PTY event loop cannot wait forever.
         self.outbound.clear();
         self.sent = 0;
+        self.pending_output.clear();
+        self.pending_output_offset = None;
         if self.queue_error(code, message, true).is_err() {
             return;
         }
@@ -1300,6 +1378,82 @@ fn terminate_process_group(pid: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zeus_proto::grid::{ChangedRow, GridCell, GridUpdate};
+
+    fn test_connection() -> (Connection, UnixStream) {
+        let (stream, peer) = UnixStream::pair().expect("socket pair");
+        (Connection::new(stream), peer)
+    }
+
+    fn decode_outbound(connection: &Connection) -> Vec<RemoteMessage> {
+        RemoteCodec::new()
+            .feed(&connection.outbound)
+            .expect("decode outbound messages")
+    }
+
+    #[test]
+    fn output_reads_are_batched_into_64_kib_frames() {
+        let (mut connection, _peer) = test_connection();
+        let chunk = [b'x'; 1024];
+
+        for index in 0..63 {
+            connection
+                .buffer_output(index * chunk.len() as u64, &chunk)
+                .expect("buffer output");
+        }
+        assert!(connection.outbound.is_empty());
+        assert_eq!(connection.pending_output.len(), 63 * 1024);
+
+        connection
+            .buffer_output(63 * chunk.len() as u64, &chunk)
+            .expect("complete batch");
+        assert!(connection.pending_output.is_empty());
+        let messages = decode_outbound(&connection);
+        assert_eq!(messages.len(), 1);
+        let RemoteMessage::Terminal(frame) = &messages[0] else {
+            panic!("expected output frame");
+        };
+        let (offset, bytes) = frame.output_payload().expect("output payload");
+        assert_eq!(offset, 0);
+        assert_eq!(bytes.len(), OUTPUT_BATCH_BYTES);
+        assert!(bytes.iter().all(|byte| *byte == b'x'));
+    }
+
+    #[test]
+    fn partial_output_waits_for_publication_and_precedes_grid_delta() {
+        let (mut connection, _peer) = test_connection();
+        connection
+            .buffer_output(41, b"partial")
+            .expect("buffer partial output");
+        assert!(connection.outbound.is_empty());
+
+        connection.flush_output().expect("coalescing flush");
+        connection
+            .queue(RemoteMessage::GridDelta(GridDelta {
+                sequence: 7,
+                alt_screen: false,
+                bracketed_paste: false,
+                mouse_reporting: false,
+                grid: GridUpdate {
+                    cols: 1,
+                    rows: 1,
+                    cursor_col: 0,
+                    cursor_row: 0,
+                    cursor_visible: true,
+                    is_full_snapshot: false,
+                    changed_rows: vec![ChangedRow::new(0, vec![GridCell::BLANK])],
+                },
+            }))
+            .expect("queue grid delta");
+
+        let messages = decode_outbound(&connection);
+        assert_eq!(messages.len(), 2);
+        let RemoteMessage::Terminal(frame) = &messages[0] else {
+            panic!("expected output before grid delta");
+        };
+        assert_eq!(frame.output_payload(), Some((41, b"partial".as_slice())));
+        assert!(matches!(messages[1], RemoteMessage::GridDelta(_)));
+    }
 
     #[test]
     fn pending_bytes_compact_after_a_complete_write() {

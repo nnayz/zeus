@@ -136,35 +136,15 @@
   background: #1b2029;
 }
 
-.download-link {
-  display: inline-flex;
-  align-items: center;
-  min-height: 40px;
-  padding: 8px 14px;
-  border: 1px solid #2f89ba;
-  border-radius: 8px;
-  background: #123249;
-  color: #8ed5ff;
-  font-weight: 600;
-}
-
-.download-link:hover {
-  border-color: var(--color-link);
-  background: #173d57;
-  text-decoration: none;
-}
-
 .install-note {
-  padding: 14px 16px;
-  border: 1px solid #5d4a23;
-  border-left: 3px solid var(--color-accent);
+  padding: 12px 14px;
   border-radius: 8px;
-  background: #17150f;
+  background: var(--color-surface);
 }
 
 .install-note strong {
-  color: var(--color-accent);
-  font-weight: 600;
+  color: var(--color-text);
+  font-weight: 500;
 }
 
 .install-note p {
@@ -172,24 +152,20 @@
 }
 
 .install-shot {
-  width: min(860px, calc(100vw - 40px));
-  margin: 20px 0 28px 50%;
-  overflow: hidden;
-  border: 1px solid var(--color-border);
-  border-radius: 10px;
-  background: var(--color-surface);
-  transform: translateX(-50%);
+  width: 100%;
+  margin: 16px 0 24px;
 }
 
 .install-shot img {
   display: block;
   width: 100%;
   height: auto;
+  border-radius: 8px;
+  background: var(--color-surface);
 }
 
 .install-shot figcaption {
-  padding: 9px 12px 10px;
-  border-top: 1px solid var(--color-border);
+  padding-top: 8px;
   color: var(--color-muted);
   font-size: 12px;
   line-height: 18px;

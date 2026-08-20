@@ -12,7 +12,7 @@ Zeus requires macOS 15 or newer. The current DMG is a universal build for Apple 
 Macs.
 
 <div class="install-note" role="note" aria-label="Unsigned build warning">
-  <strong>Before you continue</strong>
+  <strong>Unsigned build.</strong>
   <p>
     v{latest.version} is ad-hoc signed, not Developer ID signed or notarized. That is why macOS
     shows a security warning. Continue only if you downloaded the DMG from the official
@@ -28,7 +28,7 @@ but the button and menu labels are the ones to look for.
 Download the latest universal installer:
 
 <p>
-  <a class="download-link" href={latest.dmg}>Download Zeus v{latest.version} (.dmg)</a>
+  <a href={latest.dmg}>Download Zeus v{latest.version} (.dmg)</a>
 </p>
 
 Or copy the direct download URL:

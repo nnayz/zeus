@@ -1,7 +1,7 @@
 # Updates
 
 The updater is disabled for the current ad-hoc-signed release. It rejects
-builds that are not Developer ID signed and notarized, including v0.0.1. Until
+builds that are not Developer ID signed and notarized, including v0.1.0. Until
 a qualifying release ships, download new versions manually from
 [GitHub Releases](https://github.com/nnayz/zeus/releases).
 

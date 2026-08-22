@@ -197,6 +197,12 @@ impl HolderManagerServer {
                 "session control paths are outside manager directory".into(),
             ));
         }
+        // This check intentionally runs in the detached Holder process, not
+        // only in the Engine. macOS can authorize the GUI/Engine while still
+        // denying a separately signed or stale Holder; metadata alone also
+        // succeeds in cases where directory enumeration returns EPERM.
+        crate::cwd::validate_directory(Path::new(&spec.cwd))
+            .map_err(|error| HolderError::Rejected(error.to_string()))?;
         Ok(())
     }
 
@@ -269,10 +275,11 @@ fn write_pid_file(path: &Path) -> HolderResult<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::time::Duration;
 
     use super::HolderManagerServer;
-    use crate::holder::{HolderManagerClient, HolderManagerPaths};
+    use crate::holder::{HolderLaunchSpec, HolderManagerClient, HolderManagerPaths, HolderPaths};
 
     #[test]
     fn an_idle_manager_accepts_immediate_graceful_shutdown() {
@@ -290,5 +297,36 @@ mod tests {
         client.shutdown_if_idle().expect("idle shutdown");
         worker.join().expect("manager thread").expect("manager run");
         assert!(!client.is_alive());
+    }
+
+    #[test]
+    fn launch_validation_distinguishes_a_missing_cwd() {
+        let temporary = tempfile::tempdir().expect("tempdir");
+        let directory = temporary.path().join("holders");
+        let paths = HolderPaths::new(&directory, "s_missing");
+        let server = HolderManagerServer::new(&directory, Duration::from_secs(30));
+        let spec = HolderLaunchSpec {
+            session_id: "s_missing".into(),
+            socket_path: paths.socket().to_string_lossy().into_owned(),
+            pid_file_path: paths.pid_file().to_string_lossy().into_owned(),
+            log_file_path: temporary
+                .path()
+                .join("s_missing.bin")
+                .to_string_lossy()
+                .into_owned(),
+            argv: vec!["/bin/true".into()],
+            cwd: temporary
+                .path()
+                .join("does-not-exist")
+                .to_string_lossy()
+                .into_owned(),
+            environment: HashMap::new(),
+            cols: 80,
+            rows: 24,
+            disk_capacity: crate::holder::protocol::DEFAULT_DISK_CAPACITY,
+        };
+
+        let error = server.validate(&spec).expect_err("missing cwd");
+        assert!(error.to_string().contains(crate::cwd::NOT_FOUND));
     }
 }

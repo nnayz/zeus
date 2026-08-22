@@ -43,22 +43,24 @@ pub fn tool_definitions_for(kinds: &[String]) -> Vec<ToolDefinition> {
     vec![
         tool(
             "spawn_agent",
-            "Open a NEW Zeus session tab nested under this one. This is the ONLY way \
+            "Open ONE new Zeus session tab nested under this one. This is the ONLY way \
              spawned agents appear in the Zeus sidebar and terminal. Do NOT use built-in \
              collaboration/subagent spawn — those stay hidden inside this PTY. USE THIS \
              whenever the user asks to open, start, spawn or launch another agent, session, \
              or terminal. Optionally create a fresh git worktree for it and give it an \
-             initial prompt.",
+             initial prompt. Unless the user explicitly requests multiple agents, call this \
+             exactly once. If the user does not name a kind, omit kind and Zeus will use the \
+             configured default; never guess, probe, or fan out across agent kinds.",
             json!({
                 "type": "object",
                 "properties": {
-                    "kind": { "type": "string", "enum": kind_enum, "description": "Which agent to run." },
+                    "kind": { "type": "string", "enum": kind_enum, "description": "Which agent to run. Omit to use Zeus's configured default agent." },
                     "cwd": { "type": "string", "description": "Working directory (a repo path when worktree is true)." },
                     "worktree": { "type": "boolean", "description": "Create a fresh git worktree off cwd and run there (local spawns only)." },
                     "prompt": { "type": "string", "description": "Initial prompt to send once the agent is ready." },
                     "name": { "type": "string", "description": "Session title." }
                 },
-                "required": ["kind", "cwd"]
+                "required": ["cwd"]
             }),
         ),
         tool(
@@ -246,6 +248,9 @@ mod tests {
             .filter_map(Value::as_str)
             .collect();
         assert_eq!(enumerated, vec!["opencode", "shell"]);
+        let required = spawn.input_schema["required"].as_array().expect("required");
+        assert!(!required.iter().any(|field| field == "kind"));
+        assert!(required.iter().any(|field| field == "cwd"));
     }
 
     #[test]

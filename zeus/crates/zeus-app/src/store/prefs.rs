@@ -73,14 +73,7 @@ where
     D: Deserializer<'de>,
 {
     let saved = String::deserialize(deserializer)?;
-    Ok(match saved.as_str() {
-        "claudeCode" | AgentKind::CLAUDE_CODE_ID => AgentKind::CLAUDE_CODE,
-        "codex" => AgentKind::CODEX,
-        "cursor" => AgentKind::CURSOR,
-        "gemini" => AgentKind::GEMINI,
-        "shell" => AgentKind::SHELL,
-        _ => AgentKind::new(saved),
-    })
+    Ok(AgentKind::from_preference_id(saved))
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -198,7 +191,7 @@ impl Prefs {
     }
 
     pub fn path_in_home(home: &Path) -> PathBuf {
-        home.join("Library/Application Support/zeus/prefs.json")
+        zeus_proto::paths::ZeusPaths::preferences_file(home)
     }
 
     pub fn load(path: &Path) -> io::Result<Self> {

@@ -108,6 +108,22 @@ impl AgentKind {
         }
     }
 
+    /// Decodes the plain-string id stored in `prefs.json`. The four legacy
+    /// spellings remain valid because preferences outlive protocol and
+    /// manifest migrations.
+    #[must_use]
+    pub fn from_preference_id(saved: impl Into<String>) -> Self {
+        let saved = saved.into();
+        match saved.as_str() {
+            "claudeCode" | Self::CLAUDE_CODE_ID => Self::CLAUDE_CODE,
+            Self::CODEX_ID => Self::CODEX,
+            Self::CURSOR_ID => Self::CURSOR,
+            Self::GEMINI_ID => Self::GEMINI,
+            Self::SHELL_ID => Self::SHELL,
+            _ => Self::new(saved),
+        }
+    }
+
     #[must_use]
     pub fn generic(command: impl Into<String>) -> Self {
         Self {

@@ -855,13 +855,17 @@ impl Session {
                         rows: pty.rows,
                         disk_capacity: crate::holder::protocol::DEFAULT_DISK_CAPACITY,
                     };
-                    if HolderLauncher::launch(&holder.executable, &paths, &launch).is_err() {
-                        mark_launch_failed(&shared);
+                    if let Err(error) = HolderLauncher::launch(&holder.executable, &paths, &launch)
+                    {
+                        mark_launch_failed(&shared, &error.to_string());
                         return;
                     }
-                    let Ok(floor) = wait_for_holder(&client, &logs_dir, &id, pre_spawn_tail) else {
-                        mark_launch_failed(&shared);
-                        return;
+                    let floor = match wait_for_holder(&client, &logs_dir, &id, pre_spawn_tail) {
+                        Ok(floor) => floor,
+                        Err(error) => {
+                            mark_launch_failed(&shared, &error.to_string());
+                            return;
+                        }
                     };
                     if let Ok(stat) = client.stat() {
                         shared.child_pid.store(stat.child_pid, Ordering::SeqCst);
@@ -2554,9 +2558,18 @@ fn pump_held(
     shared.exited.store(true, Ordering::SeqCst);
 }
 
-/// Records a deferred launch that never produced a child: the session
-/// reports exit 127, the spawn-failure convention the app already knows.
-fn mark_launch_failed(shared: &Shared) {
+/// Records a deferred launch that never produced a child. The exact Holder
+/// diagnostic is written into the session screen before exit 127 so the UI
+/// and MCP `read_output` expose an actionable error instead of an empty tab.
+fn mark_launch_failed(shared: &Shared, error: &str) {
+    let output = format!("Zeus could not start this session.\r\n{error}\r\n");
+    let _ = shared.log.lock().expect("log").append(output.as_bytes());
+    shared
+        .screen
+        .lock()
+        .expect("screen")
+        .feed(output.as_bytes());
+    shared.grid_wake.notify();
     *shared.exit.lock().expect("exit") = Some(Exit::Code(127));
     let outcome = shared.reducer.lock().expect("reducer").reduce(
         StatusSignal::ProcessExit {

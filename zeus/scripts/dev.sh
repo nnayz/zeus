@@ -91,7 +91,10 @@ if ! git -C "${workspace_dir}" diff --quiet --ignore-submodules -- \
     dirty="+dirty"
 fi
 build_label="${branch}@${short_sha}${dirty}"
-bundle_id="com.zeus.zeus.dev.${short_sha}"
+# Stable on purpose: macOS TCC keys Files & Folders grants to the signed app
+# identity. The build label/window chrome still distinguishes commits without
+# invalidating Desktop/Documents access on every rebuild.
+bundle_id="com.zeus.zeus.dev.local"
 display_name="zeus dev ${short_sha}"
 
 mkdir -p "${target_dir}"
@@ -99,15 +102,20 @@ mkdir -p "${target_dir}"
 cd "${workspace_dir}"
 echo "==> Building ${display_name} (${profile})"
 # zeus-app does not pull the Engine or automation helpers into target/<profile>/.
-# Build all four so a clean checkout launches against this tree's binaries
-# instead of a missing or stale installed-app/debug helper.
+# Build the complete local process family so every process that touches a
+# selected folder can run from the signed app bundle. Launching zeusd-rs or
+# zeus-holder loose from target/ loses the app's macOS folder authorization.
 if (( ${#cargo_args[@]} > 0 )); then
     cargo build --package zeus-app --bin zeus --package zeus-engine --bin zeusd-rs \
+        --bin zeus-holder --bin zeus-ssh-askpass \
         --package zeus-cli --bin zeus-cli --package zeus-mcp --bin zeus-mcp \
+        --package zeus-remote --bin zeus-remote \
         "${cargo_args[@]}"
 else
     cargo build --package zeus-app --bin zeus --package zeus-engine --bin zeusd-rs \
-        --package zeus-cli --bin zeus-cli --package zeus-mcp --bin zeus-mcp
+        --bin zeus-holder --bin zeus-ssh-askpass \
+        --package zeus-cli --bin zeus-cli --package zeus-mcp --bin zeus-mcp \
+        --package zeus-remote --bin zeus-remote
 fi
 
 binary="${target_dir}/${profile}/zeus"
@@ -121,6 +129,17 @@ if [[ ! -x "${engine_bin}" ]]; then
     echo "error: cargo did not produce ${engine_bin}" >&2
     exit 1
 fi
+cli_bin="${target_dir}/${profile}/zeus-cli"
+mcp_bin="${target_dir}/${profile}/zeus-mcp"
+holder_bin="${target_dir}/${profile}/zeus-holder"
+askpass_bin="${target_dir}/${profile}/zeus-ssh-askpass"
+remote_bin="${target_dir}/${profile}/zeus-remote"
+for helper in "${cli_bin}" "${mcp_bin}" "${holder_bin}" "${askpass_bin}" "${remote_bin}"; do
+    if [[ ! -x "${helper}" ]]; then
+        echo "error: cargo did not produce ${helper}" >&2
+        exit 1
+    fi
+done
 
 # Every invocation gets a fresh bundle. Replacing a bundle beneath a still-
 # running process invalidates its code signature, which is especially easy to
@@ -128,9 +147,17 @@ fi
 bundle_root="$(mktemp -d "${target_dir}/zeus-dev-${short_sha}.XXXXXX")"
 app_path="${bundle_root}/${display_name}.app"
 contents="${app_path}/Contents"
-mkdir -p "${contents}/MacOS" "${contents}/Resources"
+app_bin_dir="${contents}/Resources/bin"
+mkdir -p "${contents}/MacOS" "${app_bin_dir}"
 cp "${binary}" "${contents}/MacOS/zeus"
 cp "${workspace_dir}/assets/dev-icon.icns" "${contents}/Resources/dev-icon.icns"
+cp "${engine_bin}" "${app_bin_dir}/zeusd-rs"
+cp "${cli_bin}" "${app_bin_dir}/zeus"
+cp "${mcp_bin}" "${app_bin_dir}/zeus-mcp"
+cp "${holder_bin}" "${app_bin_dir}/zeus-holder"
+cp "${askpass_bin}" "${app_bin_dir}/zeus-ssh-askpass"
+cp "${remote_bin}" "${app_bin_dir}/zeus-remote"
+cp -R "${workspace_dir}/crates/zeus-engine/manifests" "${app_bin_dir}/manifests"
 
 version="$(sed -n 's/^version = "\(.*\)"/\1/p' "${workspace_dir}/crates/zeus-app/Cargo.toml" | head -1)"
 cat > "${contents}/Info.plist" <<PLIST
@@ -155,9 +182,34 @@ cat > "${contents}/Info.plist" <<PLIST
 </plist>
 PLIST
 
-# A bundle assembled after Cargo's link step must be sealed as a unit. Ad-hoc
-# signing gives it coherent bundle metadata without ever resembling a release.
-codesign --force --sign - \
+# A stable development certificate keeps TCC grants across rebuilds. Prefer an
+# explicit identity, then the repository's optional "Zeus Dev" certificate;
+# ad-hoc remains a zero-setup fallback for contributors who do not need
+# protected Desktop/Documents folders.
+dev_sign_id="${ZEUS_DEV_SIGN_IDENTITY:-}"
+if [[ -z "${dev_sign_id}" ]] && security find-identity -v -p codesigning 2>/dev/null | grep -q '"Zeus Dev"'; then
+    dev_sign_id="Zeus Dev"
+fi
+if [[ -z "${dev_sign_id}" ]]; then
+    dev_sign_id="-"
+    echo "==> Warning: ad-hoc signing; Files & Folders grants may not survive rebuilds"
+    echo "    Run ../scripts/make-dev-cert.sh once, or set ZEUS_DEV_SIGN_IDENTITY."
+else
+    echo "==> Signing development bundle with: ${dev_sign_id}"
+fi
+
+# Sign nested executables first so the bundle seals a coherent helper family.
+for helper in \
+    "${app_bin_dir}/zeus" \
+    "${app_bin_dir}/zeus-mcp" \
+    "${app_bin_dir}/zeusd-rs" \
+    "${app_bin_dir}/zeus-holder" \
+    "${app_bin_dir}/zeus-ssh-askpass" \
+    "${app_bin_dir}/zeus-remote"
+do
+    codesign --force --sign "${dev_sign_id}" "${helper}"
+done
+codesign --force --sign "${dev_sign_id}" \
     --entitlements "${workspace_dir}/assets/zeus.entitlements" \
     --identifier "${bundle_id}" \
     "${app_path}"
@@ -168,24 +220,9 @@ if [[ -n "${settings_preview}" ]]; then
     launch_environment+=("ZEUS_SETTINGS_PREVIEW=${settings_preview}")
 fi
 
-# The Rust app fail-closes unless Hello reports engineKind=zeus-rust-engine.
-# Prefer a local cargo build of zeusd-rs, then the packaged Rust Engine in
-# an installed bundle. Never point at Swift `zeusd` — the client rejects it
-# and the UI comes up unable to spawn or list sessions.
-if [[ -z "${ZEUSD_PATH:-}" ]]; then
-    for candidate in \
-        "${target_dir}/${profile}/zeusd-rs" \
-        "${target_dir}/debug/zeusd-rs" \
-        "${target_dir}/release/zeusd-rs" \
-        "${HOME}/Applications/zeus.app/Contents/Resources/bin/zeusd-rs" \
-        "/Applications/zeus.app/Contents/Resources/bin/zeusd-rs"
-    do
-        if [[ -x "${candidate}" ]]; then
-            launch_environment+=("ZEUSD_PATH=${candidate}")
-            break
-        fi
-    done
-fi
+# The bundled Engine above is authoritative. An explicitly exported
+# ZEUSD_PATH remains a developer override, but this script no longer points a
+# signed app at loose target/ helpers that lack its folder authorization.
 
 echo "==> Launching ${display_name} (${build_label})"
 echo "    ${app_path}"

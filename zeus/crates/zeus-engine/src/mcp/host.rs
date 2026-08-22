@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use zeus_proto::{SessionId, SessionStatus};
+use zeus_proto::{AgentKind, SessionId, SessionStatus};
 
 use super::ToolHost;
 use crate::git;
@@ -31,6 +31,9 @@ pub struct RegistryHost {
     holder: Option<crate::session::HolderConfig>,
     /// The session calling these tools, when it identified itself.
     caller: Option<String>,
+    /// Used only when `spawn_agent.kind` is omitted. Explicit tool arguments
+    /// always win.
+    default_agent: String,
 }
 
 impl RegistryHost {
@@ -40,6 +43,8 @@ impl RegistryHost {
             logs_dir: logs_dir.into(),
             holder: None,
             caller: std::env::var(SESSION_ID_ENV).ok(),
+            default_agent: configured_default_agent()
+                .unwrap_or_else(|| AgentKind::CLAUDE_CODE_ID.to_owned()),
         }
     }
 
@@ -56,11 +61,28 @@ impl RegistryHost {
         self
     }
 
+    /// Overrides the configured default, primarily for deterministic tests.
+    pub fn with_default_agent(mut self, default_agent: impl Into<String>) -> Self {
+        self.default_agent = default_agent.into();
+        self
+    }
+
     fn registry(&self) -> Result<std::sync::MutexGuard<'_, Registry>, String> {
         self.registry
             .lock()
             .map_err(|_| "engine state is poisoned".to_string())
     }
+}
+
+fn configured_default_agent() -> Option<String> {
+    let home = std::env::var_os("HOME").map(PathBuf::from)?;
+    let bytes = std::fs::read(zeus_proto::paths::ZeusPaths::preferences_file(home)).ok()?;
+    let preferences: Value = serde_json::from_slice(&bytes).ok()?;
+    let saved = preferences
+        .get("defaultAgent")
+        .and_then(Value::as_str)?
+        .trim();
+    (!saved.is_empty()).then(|| AgentKind::from_preference_id(saved).id().to_owned())
 }
 
 fn required_str(arguments: &Value, key: &str) -> Result<String, String> {
@@ -202,7 +224,11 @@ impl ToolHost for RegistryHost {
                 let repo = required_str(arguments, "repo")?;
                 let branch = arguments.get("branch").and_then(Value::as_str);
                 let base = arguments.get("base").and_then(Value::as_str);
+                crate::cwd::validate_directory(Path::new(&repo))
+                    .map_err(|error| error.to_string())?;
                 let info = git::create_worktree(Path::new(&repo), branch, base)
+                    .map_err(|error| error.to_string())?;
+                crate::cwd::validate_directory(Path::new(&info.path))
                     .map_err(|error| error.to_string())?;
                 Ok(json!({ "path": info.path, "branch": info.branch }))
             }
@@ -300,15 +326,19 @@ impl RegistryHost {
     /// `wait_for_agent` then `send_prompt`. The pending prompt is returned so
     /// the caller knows it still owes it.
     fn spawn_agent(&self, arguments: &Value) -> Result<Value, String> {
-        let kind = required_str(arguments, "kind")?;
+        let kind = arguments
+            .get("kind")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|kind| !kind.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| self.default_agent.clone());
         let cwd = required_str(arguments, "cwd")?;
         if let Some(host) = arguments.get("host").and_then(Value::as_str) {
             return self.spawn_agent_remote(arguments, &kind, &cwd, host);
         }
         let cwd_path = PathBuf::from(&cwd);
-        if !cwd_path.is_dir() {
-            return Err(format!("cwd {cwd:?} is not a directory"));
-        }
+        crate::cwd::validate_directory(&cwd_path).map_err(|error| error.to_string())?;
         let wants_worktree = arguments
             .get("worktree")
             .and_then(Value::as_bool)
@@ -332,6 +362,7 @@ impl RegistryHost {
         } else {
             (cwd_path, None, git::branch(Path::new(&cwd)))
         };
+        crate::cwd::validate_directory(&working_dir).map_err(|error| error.to_string())?;
 
         let mut registry = self.registry()?;
         let engine = registry.engine();

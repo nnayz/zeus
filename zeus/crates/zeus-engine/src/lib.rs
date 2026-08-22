@@ -24,6 +24,7 @@ pub mod attach;
 pub mod browser;
 pub mod checkpoint;
 pub mod control;
+pub mod cwd;
 pub mod detect;
 pub mod directories;
 pub mod events;

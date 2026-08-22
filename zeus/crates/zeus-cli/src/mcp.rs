@@ -7,9 +7,9 @@ use std::time::Duration;
 
 use serde_json::{Map, Value, json};
 use zeus_proto::{
-    EventsSubscribeParams, EventsWaitParams, Method, SendTextParams, SessionId, SessionIdParams,
-    SessionRecord, SessionSpawnParams, TestRunParams, WorktreeCreateParams, WorktreeListParams,
-    WorktreeRemoveParams,
+    AgentKind, EventsSubscribeParams, EventsWaitParams, Method, SendTextParams, SessionId,
+    SessionIdParams, SessionRecord, SessionSpawnParams, TestRunParams, WorktreeCreateParams,
+    WorktreeListParams, WorktreeRemoveParams,
 };
 
 use crate::catalog::{self, AgentCatalog};
@@ -137,7 +137,10 @@ fn initialize(params: &Value) -> Value {
              extra confirmation of intent needed.\n\nNever use the host agent's built-in \
              collaboration spawn_agent / subagents: those workers stay inside this terminal \
              and never appear in the Zeus sidebar. Always call this MCP spawn_agent so the \
-             child is a real Zeus tab.\n\nTypical orchestration flow: spawn_agent \
+             child is a real Zeus tab. Unless the user explicitly requests multiple agents, \
+             make exactly one spawn_agent call. When the user does not name an agent kind, omit \
+             kind so Zeus uses the configured default; never probe or fan out across kinds.\n\n\
+             Typical orchestration flow: spawn_agent \
              (optionally worktree:true and an initial prompt) → wait_for_agent(until:\"done\") \
              → read_output → send_prompt for follow-ups → release_agent when finished. \
              get_artifacts returns PR/Linear/preview URLs and listening ports a session has \
@@ -170,19 +173,19 @@ fn tool_definitions() -> Vec<Value> {
         tool(
             "spawn_agent",
             &format!(
-                "Open a NEW Zeus session tab nested under this one, running {names} — locally or on a configured remote host. This is the ONLY way spawned agents appear in the Zeus sidebar and terminal. Do NOT use built-in collaboration/subagent spawn — those stay hidden inside this PTY. USE THIS whenever the user asks to open/start/spawn/launch another agent, session, or terminal."
+                "Open ONE new Zeus session tab nested under this one, running {names} — locally or on a configured remote host. This is the ONLY way spawned agents appear in the Zeus sidebar and terminal. Do NOT use built-in collaboration/subagent spawn — those stay hidden inside this PTY. USE THIS whenever the user asks to open/start/spawn/launch another agent, session, or terminal. Unless the user explicitly requests multiple agents, call this exactly once. If the user does not name a kind, omit kind and Zeus will use the configured default; never guess, probe, or fan out across agent kinds."
             ),
             json!({
                 "type":"object",
                 "properties":{
-                    "kind":{"type":"string","enum":kinds,"description":"Which agent to run."},
+                    "kind":{"type":"string","enum":kinds,"description":"Which agent to run. Omit to use Zeus's configured default agent."},
                     "cwd":{"type":"string","description":"Working directory."},
                     "host":{"type":"string","description":"Host id from hosts.json."},
                     "worktree":{"type":"boolean","description":"Create a fresh git worktree off cwd and run there. Local only."},
                     "prompt":{"type":"string","description":"Initial prompt to send once the agent is ready."},
                     "name":{"type":"string","description":"Session title."}
                 },
-                "required":["kind","cwd"]
+                "required":["cwd"]
             }),
         ),
         tool(
@@ -340,7 +343,7 @@ fn fetch_sessions() -> Result<Vec<SessionRecord>, CliError> {
 }
 
 fn spawn_agent(args: &Value) -> Result<Value, CliError> {
-    let kind_str = require_string(args, "kind")?;
+    let kind_str = requested_spawn_kind(args);
     let descriptor = AgentCatalog::shared().resolve(&kind_str).ok_or_else(|| {
         let known = AgentCatalog::shared()
             .ordered
@@ -375,6 +378,37 @@ fn spawn_agent(args: &Value) -> Result<Value, CliError> {
     conn::with_conn(Duration::from_secs(60), |conn| {
         conn.request_value(Method::SESSION_SPAWN, &params, Duration::from_secs(60))
     })
+}
+
+fn requested_spawn_kind(args: &Value) -> String {
+    spawn_kind_with_default(args, configured_default_agent())
+}
+
+fn spawn_kind_with_default(args: &Value, configured: Option<String>) -> String {
+    if let Some(kind) = args
+        .get("kind")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|kind| !kind.is_empty())
+    {
+        return kind.to_owned();
+    }
+    configured.unwrap_or_else(|| AgentKind::CLAUDE_CODE_ID.to_owned())
+}
+
+fn configured_default_agent() -> Option<String> {
+    let home = env::var_os("HOME").map(PathBuf::from)?;
+    let bytes = std::fs::read(zeus_proto::paths::ZeusPaths::preferences_file(home)).ok()?;
+    let preferences: Value = serde_json::from_slice(&bytes).ok()?;
+    default_agent_from_preferences(&preferences)
+}
+
+fn default_agent_from_preferences(preferences: &Value) -> Option<String> {
+    let saved = preferences
+        .get("defaultAgent")
+        .and_then(Value::as_str)?
+        .trim();
+    (!saved.is_empty()).then(|| AgentKind::from_preference_id(saved).id().to_owned())
 }
 
 fn list_agents() -> Result<Value, CliError> {
@@ -1019,5 +1053,38 @@ mod tests {
             );
         }
         assert!(!names.contains(&"test_run"));
+    }
+
+    #[test]
+    fn spawn_agent_omits_kind_to_use_the_configured_default() {
+        let tools = tool_definitions();
+        let spawn = tools
+            .iter()
+            .find(|tool| tool["name"] == "spawn_agent")
+            .expect("spawn_agent");
+        let required = spawn["inputSchema"]["required"]
+            .as_array()
+            .expect("required");
+        assert!(!required.iter().any(|field| field == "kind"));
+        assert!(required.iter().any(|field| field == "cwd"));
+
+        assert_eq!(
+            default_agent_from_preferences(&json!({"defaultAgent": "codex"})).as_deref(),
+            Some("codex")
+        );
+        assert_eq!(
+            default_agent_from_preferences(&json!({"defaultAgent": "claudeCode"})).as_deref(),
+            Some("claude-code")
+        );
+        assert_eq!(requested_spawn_kind(&json!({"kind": "gemini"})), "gemini");
+        assert_eq!(
+            spawn_kind_with_default(&json!({}), Some("codex".into())),
+            "codex"
+        );
+        assert_eq!(
+            spawn_kind_with_default(&json!({"kind": "gemini"}), Some("codex".into())),
+            "gemini",
+            "an explicit kind must override the configured default"
+        );
     }
 }

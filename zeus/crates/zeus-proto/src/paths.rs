@@ -14,6 +14,11 @@ pub const BIN_DIR_NAME: &str = "bin";
 pub const MANIFEST_OVERRIDES_RELATIVE_PATH: &str = "manifests/overrides";
 pub const DAEMON_LOG_FILE_NAME: &str = "zeusd.log";
 pub const HOSTS_CONFIG_FILE_NAME: &str = "hosts.json";
+/// Preferences predate the Engine's capitalized support directory. Keep this
+/// exact spelling: the default macOS volume is case-insensitive, but external
+/// and test homes do not have to be.
+pub const PREFERENCES_SUPPORT_RELATIVE_PATH: &str = "Library/Application Support/zeus";
+pub const PREFERENCES_FILE_NAME: &str = "prefs.json";
 
 pub const ENV_SESSION_ID: &str = "ZEUS_SESSION_ID";
 pub const ENV_SOCKET: &str = "ZEUS_SOCKET";
@@ -56,6 +61,12 @@ impl ZeusPaths {
 
     pub fn hosts_config_file(home: impl AsRef<Path>) -> PathBuf {
         Self::app_support(home).join(HOSTS_CONFIG_FILE_NAME)
+    }
+
+    pub fn preferences_file(home: impl AsRef<Path>) -> PathBuf {
+        home.as_ref()
+            .join(PREFERENCES_SUPPORT_RELATIVE_PATH)
+            .join(PREFERENCES_FILE_NAME)
     }
 }
 

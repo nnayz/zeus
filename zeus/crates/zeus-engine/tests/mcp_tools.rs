@@ -407,7 +407,7 @@ fn spawn_agent_starts_a_session_owned_by_its_caller() {
         json!({ "kind": "claude-code", "cwd": "/no/such/dir" }),
     )
     .expect_err("bad cwd");
-    assert!(bad_cwd.contains("not a directory"), "got {bad_cwd}");
+    assert!(bad_cwd.contains("cwd_not_found"), "got {bad_cwd}");
 
     // Old clients may still send `host`; fail before cwd inspection, host
     // lookup, code sync, or session creation while the new transport is dark.
@@ -459,13 +459,15 @@ fn a_spawned_session_records_its_parent_and_appears_as_a_child() {
     )));
     let server = McpServer::new(
         tool_definitions(),
-        RegistryHost::new(Arc::clone(&registry), &logs).with_caller(Some("s_parent".to_string())),
+        RegistryHost::new(Arc::clone(&registry), &logs)
+            .with_caller(Some("s_parent".to_string()))
+            .with_default_agent("sleeper"),
     );
 
     let spawned = call(
         &server,
         "spawn_agent",
-        json!({ "kind": "sleeper", "cwd": "/tmp", "name": "worker one", "prompt": "do the thing" }),
+        json!({ "cwd": "/tmp", "name": "worker one", "prompt": "do the thing" }),
     )
     .expect("spawn");
 
@@ -482,6 +484,7 @@ fn a_spawned_session_records_its_parent_and_appears_as_a_child() {
         .expect("registry")
         .record(&id)
         .expect("spawned record");
+    assert_eq!(record.kind.id(), "sleeper");
     assert_eq!(record.workbench, Some(false));
     assert!(!record.is_workbench_terminal());
 

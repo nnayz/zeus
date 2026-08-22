@@ -57,9 +57,12 @@ cargo clippy --workspace -- -D warnings
 ```
 
 Run the app under development through `dev.sh`, which builds a throwaway app
-bundle with a commit-specific name, bundle id, window title, Dock icon, and
-in-window build marker. It also removes agent-session environment variables
-that would otherwise stop zeus from finding or launching the shared daemon:
+bundle with a commit-specific name, window title, Dock icon, and in-window
+build marker. Its bundle id is deliberately stable so macOS Files & Folders
+grants survive rebuilds, and the Engine/Holder/CLI helpers run from inside that
+signed bundle so they inherit the selected-folder identity. It also removes
+agent-session environment variables that would otherwise stop zeus from
+finding or launching the shared daemon:
 
 ```sh
 ./scripts/dev.sh
@@ -67,6 +70,11 @@ that would otherwise stop zeus from finding or launching the shared daemon:
 ./scripts/dev.sh --settings remote
 ./scripts/dev.sh -- --features audio-playback
 ```
+
+For protected Desktop/Documents projects, set `ZEUS_DEV_SIGN_IDENTITY` to a
+stable code-signing identity or run `../scripts/make-dev-cert.sh` once to
+install the repository's local `Zeus Dev` identity. `dev.sh` falls back to
+ad-hoc signing but warns that macOS grants may not survive the next rebuild.
 
 The dev and installed apps deliberately share the daemon, socket, sessions,
 preferences, and Application Support directory. That makes the dev build useful

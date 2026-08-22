@@ -675,24 +675,25 @@ impl ControlServer {
             argv
         };
 
+        // Validate the requested checkout before invoking git. In particular,
+        // do not collapse a macOS TCC denial into git's generic spawn error.
+        let requested_cwd = PathBuf::from(&p.cwd);
+        crate::cwd::validate_directory(&requested_cwd).map_err(cwd_control_error)?;
+
         // A worktree spawn creates the checkout first, then lands in it.
         let mut cwd = p.cwd.clone();
         let mut worktree_path = None;
         let mut git_branch = None;
         if p.new_worktree.unwrap_or(false) {
             let info =
-                crate::git::create_worktree(Path::new(&p.cwd), p.worktree_branch.as_deref(), None)
+                crate::git::create_worktree(&requested_cwd, p.worktree_branch.as_deref(), None)
                     .map_err(io_control_error)?;
             git_branch.clone_from(&info.branch);
             cwd.clone_from(&info.path);
             worktree_path = Some(info.path);
         }
         let cwd_path = PathBuf::from(&cwd);
-        if !cwd_path.is_dir() {
-            return Err(ControlError::bad_request(format!(
-                "cwd {cwd:?} is not a directory"
-            )));
-        }
+        crate::cwd::validate_directory(&cwd_path).map_err(cwd_control_error)?;
 
         let mut registry = self.registry.lock().map_err(poisoned)?;
         let engine = registry.engine();
@@ -2224,12 +2225,14 @@ impl ControlServer {
 
     fn worktree_create(&self, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
         let p: zeus_proto::WorktreeCreateParams = decode(params)?;
+        crate::cwd::validate_directory(Path::new(&p.repo_path)).map_err(cwd_control_error)?;
         let info = crate::git::create_worktree(
             Path::new(&p.repo_path),
             p.branch.as_deref(),
             p.base.as_deref(),
         )
         .map_err(io_control_error)?;
+        crate::cwd::validate_directory(Path::new(&info.path)).map_err(cwd_control_error)?;
         self.events.publish(
             "worktree.created",
             json!({ "repoPath": p.repo_path, "path": info.path, "branch": info.branch }),
@@ -2464,6 +2467,10 @@ fn io_control_error(error: std::io::Error) -> ControlError {
         std::io::ErrorKind::NotFound => ControlError::not_found(error.to_string()),
         _ => ControlError::internal(error.to_string()),
     }
+}
+
+fn cwd_control_error(error: crate::cwd::CwdAccessError) -> ControlError {
+    ControlError::new(error.code, error.message)
 }
 
 fn history_entry_to_wire(entry: crate::history::HistoryEntry) -> zeus_proto::HistoryEntry {

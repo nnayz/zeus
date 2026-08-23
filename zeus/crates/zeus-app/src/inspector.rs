@@ -55,9 +55,13 @@ const TRAFFIC_LIGHT_LANE: f32 =
 const INSPECTOR_HEADER_LEADING_INSET: f32 = 8.0;
 const ACCOUNT_MENU_WIDTH: f32 = 244.0;
 
-/// Narrowest width that still fits the tab strip, panel toggle, and account avatar.
-pub fn min_width(mirrored: bool) -> f32 {
-    300.0 + if mirrored { TRAFFIC_LIGHT_LANE } else { 0.0 }
+/// Narrowest width that still fits the tab strip, panel toggle, account avatar,
+/// and (when mirrored) the macOS window-button lane.
+///
+/// Both orientations use the conservative width so flipping the workbench can
+/// never change the center terminal's allocation.
+pub fn min_width() -> f32 {
+    300.0 + TRAFFIC_LIGHT_LANE
 }
 
 #[derive(Clone, Copy)]
@@ -1159,14 +1163,11 @@ impl WorkbenchInspector {
             );
 
         let x = if self.mirrored() {
-            let width = self
-                .runtime
-                .store
-                .read()
-                .expect("session store lock poisoned")
-                .preferences()
-                .inspector_width
-                .max(min_width(true));
+            // RootView keeps `panel_width` synchronized with the horizontal
+            // solver, including automatic compact clamps. Anchor floating
+            // inspector chrome to that rendered width rather than the wider
+            // persisted preference.
+            let width = self.panel_width.max(min_width());
             width - Metrics::TOOLBAR_EDGE_INSET
         } else {
             f32::from(window.viewport_size().width) - Metrics::TOOLBAR_EDGE_INSET
@@ -5025,7 +5026,7 @@ mod tests {
     impl Render for InspectorHarness {
         fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
             div()
-                .w(px(min_width(false)))
+                .w(px(min_width()))
                 .h_full()
                 .overflow_hidden()
                 .child(self.inspector.clone())
@@ -5343,7 +5344,7 @@ mod tests {
             px(Metrics::TOOLBAR_COMPACT_GAP),
             "the account avatar should sit directly after the right-aligned tabs"
         );
-        assert!(avatar.right() <= px(min_width(false)));
+        assert!(avatar.right() <= px(min_width()));
 
         cx.simulate_click(changes.center(), Modifiers::none());
         let inspector = harness.read_with(cx, |harness, _| harness.inspector.clone());

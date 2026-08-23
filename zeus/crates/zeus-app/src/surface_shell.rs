@@ -1976,6 +1976,42 @@ impl UtilitySurfaces {
                         colors,
                     ),
                     colors,
+                ))
+                .child(setting_section(
+                    "Input",
+                    div()
+                        .flex()
+                        .flex_col()
+                        .child(toggle_row(
+                            "Option as Meta",
+                            "Send Option-key combinations with an Escape prefix instead of typing macOS-composed characters.",
+                            self.prefs.terminal_option_as_meta,
+                            "toggle-terminal-option-as-meta",
+                            colors,
+                            cx,
+                            |this, cx| {
+                                this.prefs.terminal_option_as_meta =
+                                    !this.prefs.terminal_option_as_meta;
+                                this.persist_prefs();
+                                cx.notify();
+                            },
+                        ))
+                        .child(setting_divider(colors))
+                        .child(toggle_row(
+                            "Copy on select",
+                            "Copy terminal text when a local mouse selection is completed.",
+                            self.prefs.terminal_copy_on_select,
+                            "toggle-terminal-copy-on-select",
+                            colors,
+                            cx,
+                            |this, cx| {
+                                this.prefs.terminal_copy_on_select =
+                                    !this.prefs.terminal_copy_on_select;
+                                this.persist_prefs();
+                                cx.notify();
+                            },
+                        )),
+                    colors,
                 )),
             colors,
         )

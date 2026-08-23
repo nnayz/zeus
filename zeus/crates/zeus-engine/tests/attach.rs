@@ -13,7 +13,7 @@ use zeus_engine::control::ControlServer;
 use zeus_engine::detect::ManifestEngine;
 use zeus_engine::registry::Registry;
 use zeus_proto::ControlMessage;
-use zeus_proto::frames::{Frame, FrameCodec, FrameType};
+use zeus_proto::frames::{Frame, FrameCodec, FrameType, TerminalModes};
 use zeus_proto::grid::GridUpdate;
 
 fn engine() -> Arc<ManifestEngine> {
@@ -51,8 +51,21 @@ impl FrameReader {
                 }
                 continue;
             }
-            assert!(Instant::now() < deadline, "timed out waiting for {what}");
-            let count = self.stream.read(&mut chunk).expect("read frames");
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .unwrap_or_else(|| panic!("timed out waiting for {what}"));
+            self.stream
+                .set_read_timeout(Some(remaining))
+                .expect("set frame read timeout");
+            let count = self.stream.read(&mut chunk).unwrap_or_else(|error| {
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) {
+                    panic!("timed out waiting for {what}");
+                }
+                panic!("read frames while waiting for {what}: {error}");
+            });
             assert!(count > 0, "data channel closed while waiting for {what}");
             self.queue
                 .extend(self.codec.feed(&chunk[..count]).expect("valid frames"));
@@ -111,7 +124,7 @@ fn an_attach_is_seeded_then_streams_diffs_and_answers_input() {
         params: Some(json!({
             "kind": { "shell": {} },
             "cwd": "/tmp",
-            "argv": ["/bin/sh", "-c", "printf 'seeded-screen\\n'; exec cat"],
+            "argv": ["/bin/sh", "-c", "printf 'seeded-screen\\n'; stty -echo -icanon min 1 time 0; exec cat"],
         })),
     });
     let mut reader = std::io::BufReader::new(control.try_clone().expect("clone"));
@@ -149,9 +162,16 @@ fn an_attach_is_seeded_then_streams_diffs_and_answers_input() {
         "the seed carries what the child already painted"
     );
 
-    let _modes = frames.until("initial modes", |frame| {
+    let modes = frames.until("initial modes", |frame| {
         frame.frame_type == FrameType::Modes
     });
+    assert_eq!(
+        modes.modes_payload(),
+        Some(TerminalModes {
+            alternate_scroll: true,
+            ..TerminalModes::default()
+        })
+    );
 
     // Let the per-session pump establish its shared diff baseline. Its first
     // sample is allowed to be a FullSnapshot: if input beats that first tick,
@@ -220,6 +240,77 @@ fn an_attach_is_seeded_then_streams_diffs_and_answers_input() {
                 .flatten()
                 .is_some_and(|update| update.cols == 100 && update.rows == 30)
     });
+
+    // Mode-only output must cross the same channel even when it changes no
+    // visible cells. This is the state the pane uses for arrow and paste
+    // encoding, so it cannot wait for or be inferred from a later grid.
+    data.write_all(
+        &FrameCodec::encode(&Frame::input(
+            b"\x1b[?1h\x1b[?2004h\x1b[?1003h\x1b[?1005h\x1b[?1007l\x1b[?1004h".to_vec(),
+        ))
+        .expect("encode"),
+    )
+    .expect("enable input modes");
+    let enabled = frames.until("enabled input modes", |frame| {
+        frame.modes_payload().is_some_and(|modes| {
+            modes.application_cursor_keys
+                && modes.bracketed_paste
+                && modes.mouse_reporting
+                && modes.mouse_utf8
+                && modes.mouse_motion
+                && !modes.alternate_scroll
+                && modes.focus_reporting
+        })
+    });
+    assert_eq!(
+        enabled.modes_payload(),
+        Some(TerminalModes {
+            application_cursor_keys: true,
+            bracketed_paste: true,
+            mouse_reporting: true,
+            mouse_utf8: true,
+            mouse_motion: true,
+            focus_reporting: true,
+            ..TerminalModes::default()
+        })
+    );
+
+    // A fresh attachment is seeded from the authoritative screen modes, not
+    // from client defaults or only from changes observed after reconnect.
+    drop(frames);
+    drop(data);
+    let mut data = UnixStream::connect(server.socket_path()).expect("reconnect data");
+    let mut attach_line = serde_json::to_vec(&json!({ "attach": id })).expect("encode");
+    attach_line.push(b'\n');
+    data.write_all(&attach_line).expect("reattach");
+    let mut frames = FrameReader::new(data.try_clone().expect("clone reattached data"));
+    frames.until("reattached seed grid", |frame| {
+        frame.frame_type == FrameType::Grid
+    });
+    let reattached = frames.until("reattached input modes", |frame| {
+        frame.frame_type == FrameType::Modes
+    });
+    assert_eq!(reattached.modes_payload(), enabled.modes_payload());
+
+    data.write_all(
+        &FrameCodec::encode(&Frame::input(
+            b"\x1b[?1l\x1b[?2004l\x1b[?1003l\x1b[?1005l\x1b[?1004l".to_vec(),
+        ))
+        .expect("encode"),
+    )
+    .expect("disable input modes");
+    let disabled = frames.until("disabled input modes", |frame| {
+        frame.modes_payload().is_some_and(|modes| {
+            !modes.application_cursor_keys
+                && !modes.bracketed_paste
+                && !modes.mouse_reporting
+                && !modes.mouse_utf8
+                && !modes.mouse_motion
+                && !modes.alternate_scroll
+                && !modes.focus_reporting
+        })
+    });
+    assert_eq!(disabled.modes_payload(), Some(TerminalModes::default()));
 
     // Clean up the child.
     send(&ControlMessage::Request {

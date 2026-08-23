@@ -309,8 +309,9 @@ pub struct TerminalPrepaintState {
 struct CursorPaint {
     row: u16,
     col: u16,
-    quad: PaintQuad,
+    quads: Vec<PaintQuad>,
     glyph: Option<ShapedLine>,
+    masks_text: bool,
 }
 
 impl TerminalElement {
@@ -371,6 +372,12 @@ impl TerminalElement {
     #[must_use]
     pub fn grid_rows(&self) -> u16 {
         read_lock(&self.buffer).rows
+    }
+
+    /// Columns in the authoritative mirrored screen.
+    #[must_use]
+    pub fn grid_cols(&self) -> u16 {
+        read_lock(&self.buffer).cols
     }
 
     #[must_use]
@@ -472,12 +479,18 @@ impl TerminalElement {
         mutex_lock(&self.shared.viewport).scroll_to_absolute(absolute_row, anchor, visible_rows)
     }
 
-    pub fn set_modes(&self, alt_screen: bool, mouse_reporting: bool) -> bool {
+    pub fn set_modes(
+        &self,
+        alt_screen: bool,
+        mouse_reporting: bool,
+        alternate_scroll: bool,
+    ) -> bool {
         let mut modes = mutex_lock(&self.shared.modes);
         let entered_alt = alt_screen && !modes.alt_screen;
         *modes = TerminalModes {
             alt_screen,
             mouse_reporting,
+            alternate_scroll,
         };
         drop(modes);
         entered_alt && mutex_lock(&self.shared.viewport).enter_alt_screen()
@@ -489,8 +502,8 @@ impl TerminalElement {
         mutex_lock(&self.shared.modes).mouse_reporting
     }
 
-    /// Resolves a wheel event and applies local scrollback movement. Daemon
-    /// routes are returned for the app to pass to `SessionAttachment::scroll`.
+    /// Resolves a wheel event and applies local scrollback movement. Terminal
+    /// routes are returned for the app to encode with the live mouse modes.
     pub fn route_wheel(&self, event: WheelEvent) -> Option<WheelRoute> {
         let modes = *mutex_lock(&self.shared.modes);
         let route = mutex_lock(&self.shared.scroll_router).route(modes, event)?;
@@ -532,10 +545,27 @@ impl TerminalElement {
         });
     }
 
+    /// Extends the current selection from its existing anchor, or creates an
+    /// empty anchor when Shift-click begins without a selection.
+    pub fn extend_selection(&self, col: usize, window_row: usize) {
+        let absolute_row = mutex_lock(&self.shared.viewport).absolute_row(window_row);
+        mutex_lock(&self.shared.selection).extend_to(SelectionPoint {
+            row: absolute_row,
+            col,
+        });
+    }
+
     pub fn select_word(&self, col: usize, window_row: usize) {
         let viewport = mutex_lock(&self.shared.viewport).clone();
         let buffer = read_lock(&self.buffer);
         mutex_lock(&self.shared.selection).select_word(&viewport, &buffer, window_row, col);
+    }
+
+    /// Selects every cell in one terminal row with an exclusive endpoint.
+    pub fn select_line(&self, window_row: usize) {
+        let viewport = mutex_lock(&self.shared.viewport).clone();
+        let buffer = read_lock(&self.buffer);
+        mutex_lock(&self.shared.selection).select_line(&viewport, &buffer, window_row);
     }
 
     pub fn clear_selection(&self) {
@@ -981,7 +1011,7 @@ impl Element for TerminalElement {
             );
         }
 
-        let cursor_visible = cursor_should_render(focused, cursor.visible);
+        let cursor_visible = cursor_should_render(cursor.visible);
         let cursor = if cursor_visible
             && viewport.view_offset() == 0
             && usize::from(cursor.row) < visible_rows
@@ -997,14 +1027,15 @@ impl Element for TerminalElement {
                 bounds.left() + metrics.x_for_col(cursor.col),
                 bounds.top() + metrics.y_for_row(cursor.row),
             );
+            let cursor_bounds = Bounds::new(origin, size(metrics.cell_width, metrics.line_height));
             Some(CursorPaint {
                 row: cursor.row,
                 col: cursor.col,
-                quad: fill(
-                    Bounds::new(origin, size(metrics.cell_width, metrics.line_height)),
-                    self.theme.cursor,
-                ),
-                glyph: self.shape_cursor_glyph(cell, metrics, window),
+                quads: cursor_quads(cursor_bounds, self.theme.cursor, focused),
+                glyph: focused
+                    .then(|| self.shape_cursor_glyph(cell, metrics, window))
+                    .flatten(),
+                masks_text: focused,
             })
         } else {
             None
@@ -1102,7 +1133,7 @@ impl Element for TerminalElement {
                     if prepaint
                         .cursor
                         .as_ref()
-                        .is_some_and(|cursor| cursor.row == row)
+                        .is_some_and(|cursor| cursor.row == row && cursor.masks_text)
                     {
                         let cursor = prepaint.cursor.as_ref().unwrap();
                         paint_line_around_cursor(
@@ -1137,7 +1168,7 @@ impl Element for TerminalElement {
                 if prepaint
                     .cursor
                     .as_ref()
-                    .is_some_and(|cursor| cursor.row == *row)
+                    .is_some_and(|cursor| cursor.row == *row && cursor.masks_text)
                 {
                     let cursor = prepaint.cursor.as_ref().unwrap();
                     paint_line_around_cursor(line, origin, bounds, metrics, cursor.col, window, cx);
@@ -1158,7 +1189,9 @@ impl Element for TerminalElement {
             }
 
             if let Some(cursor) = prepaint.cursor.take() {
-                window.paint_quad(cursor.quad);
+                for quad in cursor.quads {
+                    window.paint_quad(quad);
+                }
                 if let Some(glyph) = cursor.glyph {
                     let origin = point(
                         bounds.left() + metrics.x_for_col(cursor.col),
@@ -1190,8 +1223,39 @@ impl Element for TerminalElement {
     }
 }
 
-const fn cursor_should_render(focused: bool, protocol_visible: bool) -> bool {
-    focused && protocol_visible
+const fn cursor_should_render(protocol_visible: bool) -> bool {
+    protocol_visible
+}
+
+fn cursor_quads(bounds: Bounds<Pixels>, color: gpui::Rgba, focused: bool) -> Vec<PaintQuad> {
+    if focused {
+        return vec![fill(bounds, color)];
+    }
+    let stroke = px(1.0);
+    vec![
+        fill(
+            Bounds::new(bounds.origin, size(bounds.size.width, stroke)),
+            color,
+        ),
+        fill(
+            Bounds::new(
+                point(bounds.left(), bounds.bottom() - stroke),
+                size(bounds.size.width, stroke),
+            ),
+            color,
+        ),
+        fill(
+            Bounds::new(bounds.origin, size(stroke, bounds.size.height)),
+            color,
+        ),
+        fill(
+            Bounds::new(
+                point(bounds.right() - stroke, bounds.top()),
+                size(stroke, bounds.size.height),
+            ),
+            color,
+        ),
+    ]
 }
 
 fn append_background_quads(
@@ -1572,11 +1636,18 @@ mod link_tests {
     }
 
     #[test]
-    fn static_cursor_follows_focus_and_protocol_visibility() {
-        assert!(super::cursor_should_render(true, true));
-        assert!(!super::cursor_should_render(false, true));
-        assert!(!super::cursor_should_render(true, false));
-        assert!(!super::cursor_should_render(false, false));
+    fn cursor_visibility_follows_the_terminal_protocol() {
+        assert!(super::cursor_should_render(true));
+        assert!(!super::cursor_should_render(false));
+        let bounds = Bounds::new(point(px(0.0), px(0.0)), size(px(8.0), px(16.0)));
+        assert_eq!(
+            super::cursor_quads(bounds, gpui::rgba(0xffffffff), true).len(),
+            1
+        );
+        assert_eq!(
+            super::cursor_quads(bounds, gpui::rgba(0xffffffff), false).len(),
+            4
+        );
     }
 
     #[test]

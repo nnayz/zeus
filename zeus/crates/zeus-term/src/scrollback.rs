@@ -454,6 +454,7 @@ impl ScrollbackViewport {
 pub struct TerminalModes {
     pub alt_screen: bool,
     pub mouse_reporting: bool,
+    pub alternate_scroll: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -476,11 +477,15 @@ pub enum WheelRoute {
     Local {
         lines: i64,
     },
-    Daemon {
-        direction: u8,
+    Mouse {
+        up: bool,
         lines: u16,
         col: u16,
         row: u16,
+    },
+    AlternateScroll {
+        up: bool,
+        lines: u16,
     },
 }
 
@@ -496,16 +501,24 @@ impl ScrollRouter {
             WheelDelta::PrecisePoints(delta) => self.precise_steps(delta, event.line_height),
             WheelDelta::Lines(delta) => classic_steps(delta, event.visible_rows),
         }?;
-        if !modes.alt_screen && !modes.mouse_reporting {
-            return Some(WheelRoute::Local {
-                lines: i64::from(steps),
+        if modes.mouse_reporting {
+            return Some(WheelRoute::Mouse {
+                up: steps > 0,
+                lines: steps.unsigned_abs().min(u16::MAX.into()) as u16,
+                col: event.col,
+                row: event.row,
             });
         }
-        Some(WheelRoute::Daemon {
-            direction: u8::from(steps < 0),
-            lines: steps.unsigned_abs().min(u16::MAX.into()) as u16,
-            col: event.col,
-            row: event.row,
+        if modes.alt_screen {
+            return modes
+                .alternate_scroll
+                .then_some(WheelRoute::AlternateScroll {
+                    up: steps > 0,
+                    lines: steps.unsigned_abs().min(u16::MAX.into()) as u16,
+                });
+        }
+        Some(WheelRoute::Local {
+            lines: i64::from(steps),
         })
     }
 
@@ -895,15 +908,38 @@ mod tests {
                 TerminalModes {
                     alt_screen: false,
                     mouse_reporting: true,
+                    alternate_scroll: false,
                 },
                 event(-12.0),
             ),
-            Some(WheelRoute::Daemon {
-                direction: 1,
+            Some(WheelRoute::Mouse {
+                up: false,
                 lines: 1,
                 col: 3,
                 row: 4,
             })
+        );
+        assert_eq!(
+            router.route(
+                TerminalModes {
+                    alt_screen: true,
+                    mouse_reporting: false,
+                    alternate_scroll: true,
+                },
+                event(12.0),
+            ),
+            Some(WheelRoute::AlternateScroll { up: true, lines: 1 })
+        );
+        assert_eq!(
+            router.route(
+                TerminalModes {
+                    alt_screen: true,
+                    mouse_reporting: false,
+                    alternate_scroll: false,
+                },
+                event(12.0),
+            ),
+            None
         );
     }
 }

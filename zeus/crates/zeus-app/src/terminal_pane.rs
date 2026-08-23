@@ -11,12 +11,13 @@ use gpui::{
     AnyElement, App, ClickEvent, ClipboardEntry, ClipboardItem, Context, Entity, EventEmitter,
     FocusHandle, KeyBinding, KeyDownEvent, KeyUpEvent, ModifiersChangedEvent, MouseButton,
     PathBuilder, PathPromptOptions, Render, Rgba, ScrollDelta, ScrollHandle, ScrollWheelEvent,
-    SharedString, StatefulInteractiveElement, Task, Window, actions, canvas, div, font, point,
-    prelude::*, px, rgba,
+    SharedString, StatefulInteractiveElement, Subscription, Task, Window, actions, canvas, div,
+    font, point, prelude::*, px, rgba,
 };
 use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 use zeus_client::attachment::{SessionAttachment, TerminalChunk};
+use zeus_proto::frames::TerminalModes as WireTerminalModes;
 use zeus_proto::grid::{ChangedRow, GridUpdate};
 use zeus_proto::{
     AgentKind as ProtoAgentKind, ArtifactKind, ExitReason, PrCheck, Project, PullRequestStatus,
@@ -27,9 +28,13 @@ use zeus_term::element::{SharedGridBuffer, TerminalElement, TerminalReference};
 use zeus_term::find::{FindSnapshot, SearchRequest, TerminalFindModel};
 use zeus_term::keys::{
     Key as TermKey, KeyEvent as TermKeyEvent, Modifiers as TermModifiers, NamedKey, TermInputModes,
-    encode_key, paste,
+    alternate_scroll, encode_key, paste,
 };
 use zeus_term::metrics::CellMetrics;
+use zeus_term::mouse::{
+    MouseButton as TermMouseButton, MouseModes, MouseModifiers, motion_report, press_report,
+    release_report, wheel_reports,
+};
 use zeus_term::repaint::{RepaintAction, RepaintPacer};
 use zeus_term::scrollback::{WheelDelta, WheelEvent, WheelRoute};
 use zeus_term::theme::TermTheme;
@@ -401,12 +406,6 @@ enum AttachmentState {
 enum AttachmentCommand {
     Input(Vec<u8>),
     Resize(u16, u16),
-    Scroll {
-        direction: u8,
-        lines: u16,
-        col: u16,
-        row: u16,
-    },
     Close,
 }
 
@@ -438,15 +437,6 @@ impl AttachmentControl {
         let _ = self.tx.send(AttachmentCommand::Resize(cols, rows));
     }
 
-    fn scroll(&self, direction: u8, lines: u16, col: u16, row: u16) {
-        let _ = self.tx.send(AttachmentCommand::Scroll {
-            direction,
-            lines,
-            col,
-            row,
-        });
-    }
-
     fn close(&self) {
         let _ = self.tx.send(AttachmentCommand::Close);
     }
@@ -466,6 +456,15 @@ struct ResidentTerminal {
     element: TerminalElement,
     attachment: AttachmentControl,
     attachment_state: AttachmentState,
+    input_modes: TermInputModes,
+    mouse_modes: MouseModes,
+    /// Suppresses a release/motion sequence when a platform-click was consumed
+    /// locally to open a reference instead of being pressed in the TUI.
+    suppress_left_report: bool,
+    reported_button_down: Option<TermMouseButton>,
+    /// Mouse-tracking applications care about cell transitions, not every
+    /// subpixel pointer event GPUI produces inside the same cell.
+    last_reported_mouse: Option<(usize, usize, Option<TermMouseButton>)>,
     find: Option<TerminalFindModel>,
     /// The editable text behind `find`'s query, so ⌘F gets the same caret,
     /// selection, and readline keys as the other query fields.
@@ -587,6 +586,7 @@ pub struct TerminalPane {
     local_clipboard_images: Vec<StagedClipboardImage>,
     _pane_events: Task<()>,
     _store_changes: Task<()>,
+    _focus_subscriptions: Vec<Subscription>,
 }
 
 impl EventEmitter<TerminalPaneEvent> for TerminalPane {}
@@ -653,6 +653,12 @@ impl TerminalPane {
         if matches!(session_source, SessionSource::FollowSelection) {
             window.focus(&focus, cx);
         }
+        let focus_in = cx.on_focus_in(&focus, window, |this, _window, cx| {
+            this.report_terminal_focus(true, cx);
+        });
+        let focus_out = cx.on_focus_out(&focus, window, |this, _event, _window, cx| {
+            this.report_terminal_focus(false, cx);
+        });
         let (pane_tx, mut pane_rx) = mpsc::unbounded_channel();
         let pane_events = cx.spawn_in(window, async move |this, cx| {
             let mut batch = Vec::new();
@@ -741,6 +747,7 @@ impl TerminalPane {
             local_clipboard_images: Vec::new(),
             _pane_events: pane_events,
             _store_changes: store_changes,
+            _focus_subscriptions: vec![focus_in, focus_out],
         };
         pane.reconcile_residency();
         pane.sync_status_glyphs(pane.current_colors(), window, cx);
@@ -854,6 +861,11 @@ impl TerminalPane {
                     element,
                     attachment,
                     attachment_state,
+                    input_modes: TermInputModes::default(),
+                    mouse_modes: MouseModes::default(),
+                    suppress_left_report: false,
+                    reported_button_down: None,
+                    last_reported_mouse: None,
                     find: None,
                     find_query: QueryEditor::default(),
                     last_size: (0, 0),
@@ -873,7 +885,17 @@ impl TerminalPane {
                     .cloned()
             })
             .flatten();
-        let selection_changed = selected_id != self.observed_selected_id;
+        let previous_id = self.observed_selected_id.clone();
+        let selection_changed = selected_id != previous_id;
+        let was_focused = self.focus.is_focused(window);
+        if selection_changed
+            && was_focused
+            && let Some(previous) = previous_id.as_ref()
+            && let Some(resident) = self.residents.get(previous)
+            && resident.input_modes.focus_reporting
+        {
+            resident.attachment.input(b"\x1b[O".to_vec());
+        }
         self.observed_selected_id = selected_id.clone();
 
         self.reconcile_residency();
@@ -883,8 +905,16 @@ impl TerminalPane {
         // successful spawns select their daemon-assigned id on the async store
         // path. Following the selection here covers both RPC/event orderings
         // and avoids trying to focus a terminal before its id exists.
-        if selection_changed && selected_id.is_some() {
-            window.focus(&self.focus, cx);
+        if selection_changed && let Some(selected_id) = selected_id {
+            if was_focused {
+                if let Some(resident) = self.residents.get(&selected_id)
+                    && resident.input_modes.focus_reporting
+                {
+                    resident.attachment.input(b"\x1b[I".to_vec());
+                }
+            } else {
+                window.focus(&self.focus, cx);
+            }
         }
         cx.notify();
     }
@@ -908,6 +938,21 @@ impl TerminalPane {
 
     pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus, cx);
+    }
+
+    fn report_terminal_focus(&mut self, focused: bool, cx: &mut Context<Self>) {
+        let Some(id) = self.selected_id() else {
+            return;
+        };
+        let Some(resident) = self.residents.get_mut(&id) else {
+            return;
+        };
+        if resident.input_modes.focus_reporting {
+            resident
+                .attachment
+                .input(if focused { b"\x1b[I" } else { b"\x1b[O" }.to_vec());
+        }
+        cx.notify();
     }
 
     pub fn show_startup_welcome(&mut self) {
@@ -1020,17 +1065,32 @@ impl TerminalPane {
                 }
                 self.apply_grid_updates(id, [update], window, cx);
             }
-            PaneEvent::Chunk(
-                id,
-                TerminalChunk::Modes {
-                    alt_screen,
-                    mouse_reporting,
-                },
-            ) => {
+            PaneEvent::Chunk(id, TerminalChunk::Modes(modes)) => {
+                let selected = self.selected_id().as_ref() == Some(&id);
+                let pane_focused = self.focus.is_focused(window);
                 if let Some(resident) = self.residents.get_mut(&id) {
-                    resident.element.set_modes(alt_screen, mouse_reporting);
+                    let previously_reported_focus = resident.input_modes.focus_reporting;
+                    resident.element.set_modes(
+                        modes.alt_screen,
+                        modes.mouse_reporting,
+                        modes.alternate_scroll,
+                    );
+                    resident.input_modes = terminal_input_modes(modes);
+                    resident.mouse_modes = terminal_mouse_modes(modes);
+                    if !modes.mouse_reporting {
+                        resident.suppress_left_report = false;
+                        resident.reported_button_down = None;
+                        resident.last_reported_mouse = None;
+                    }
+                    if selected
+                        && pane_focused
+                        && !previously_reported_focus
+                        && modes.focus_reporting
+                    {
+                        resident.attachment.input(b"\x1b[I".to_vec());
+                    }
                 }
-                if self.selected_id().as_ref() == Some(&id) {
+                if selected {
                     cx.notify();
                 }
             }
@@ -1071,7 +1131,9 @@ impl TerminalPane {
             PaneEvent::ClipboardUploadFinished(id, result) => match result {
                 Ok(remote_path) => {
                     if let Some(resident) = self.residents.get(&id) {
-                        resident.attachment.input(paste(&remote_path, false));
+                        resident
+                            .attachment
+                            .input(paste(&remote_path, resident.input_modes.bracketed_paste));
                     }
                 }
                 Err(error) => eprintln!("zeus: clipboard image upload failed: {error}"),
@@ -1615,10 +1677,12 @@ impl TerminalPane {
         // An overflowing grid is bottom-anchored (see render_grid_and_overlays),
         // so its first row sits above the surface -- selection has to follow it
         // or clicks land on the wrong line while a resize is in flight.
-        let grid_rows = self
-            .selected_id()
-            .and_then(|id| self.residents.get(&id))
-            .map_or(0, |resident| resident.element.grid_rows());
+        let resident = self.selected_id().and_then(|id| self.residents.get(&id))?;
+        let grid_cols = resident.element.grid_cols();
+        let grid_rows = resident.element.grid_rows();
+        if grid_cols == 0 || grid_rows == 0 {
+            return None;
+        }
         let anchor = self
             .grid_row_overflow(grid_rows, font_size, window)
             .map_or(0.0, |grid_height| self.grid_inner_height() - grid_height);
@@ -1629,7 +1693,10 @@ impl TerminalPane {
         let row = ((f32::from(position.y) - grid_y) / f32::from(metrics.line_height))
             .floor()
             .max(0.0) as usize;
-        Some((col, row))
+        Some((
+            col.min(usize::from(grid_cols - 1)),
+            row.min(usize::from(grid_rows - 1)),
+        ))
     }
 
     /// The height the mirrored grid needs when the daemon's screen is taller
@@ -1713,7 +1780,7 @@ impl TerminalPane {
         let Some(id) = self.selected_id() else {
             return;
         };
-        let Some(resident) = self.residents.get(&id) else {
+        let Some(resident) = self.residents.get_mut(&id) else {
             return;
         };
         let text = resident.element.selected_text();
@@ -1771,7 +1838,9 @@ impl TerminalPane {
             } else {
                 let local_path = staged.path().to_string_lossy().into_owned();
                 if let Some(resident) = self.residents.get(&id) {
-                    resident.attachment.input(paste(&local_path, false));
+                    resident
+                        .attachment
+                        .input(paste(&local_path, resident.input_modes.bracketed_paste));
                 }
                 self.local_clipboard_images.push(staged);
                 if self.local_clipboard_images.len() > 32 {
@@ -1796,7 +1865,9 @@ impl TerminalPane {
             find.set_query(query, now);
             self.schedule_find(id, Duration::from_millis(200), window, cx);
         } else {
-            resident.attachment.input(paste(&text, false));
+            resident
+                .attachment
+                .input(paste(&text, resident.input_modes.bracketed_paste));
         }
         cx.stop_propagation();
         cx.notify();
@@ -1975,7 +2046,16 @@ impl TerminalPane {
             alt: event.keystroke.modifiers.alt,
             cmd: event.keystroke.modifiers.platform,
         };
-        let bytes = encode_key(&term_event, modifiers, TermInputModes::default());
+        let option_as_meta = self
+            .runtime
+            .store
+            .read()
+            .expect("session store lock poisoned")
+            .preferences()
+            .terminal_option_as_meta;
+        let mut input_modes = resident.input_modes;
+        input_modes.option_as_meta = option_as_meta;
+        let bytes = encode_key(&term_event, modifiers, input_modes);
         if bytes.is_empty() {
             cx.propagate();
         } else {
@@ -2044,6 +2124,54 @@ impl TerminalPane {
         });
     }
 
+    fn report_mouse_button(
+        &mut self,
+        position: gpui::Point<gpui::Pixels>,
+        modifiers: gpui::Modifiers,
+        button: TermMouseButton,
+        pressed: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(id) = self.selected_id() else {
+            return;
+        };
+        let Some((col, row)) = self.grid_cell_at(position, window) else {
+            return;
+        };
+        let Some(resident) = self.residents.get_mut(&id) else {
+            return;
+        };
+        let continuing_report = resident.reported_button_down == Some(button);
+        if !resident.mouse_modes.reporting || (modifiers.shift && !continuing_report) {
+            return;
+        }
+        let report = if pressed {
+            press_report(
+                col,
+                row,
+                button,
+                terminal_mouse_modifiers(modifiers),
+                resident.mouse_modes,
+            )
+        } else {
+            release_report(
+                col,
+                row,
+                button,
+                terminal_mouse_modifiers(modifiers),
+                resident.mouse_modes,
+            )
+        };
+        if let Some(bytes) = report {
+            resident.attachment.input(bytes);
+        }
+        resident.reported_button_down = pressed.then_some(button);
+        resident.last_reported_mouse = pressed.then_some((col, row, Some(button)));
+        window.focus(&self.focus, cx);
+        cx.stop_propagation();
+    }
+
     fn handle_scroll(
         &mut self,
         event: &ScrollWheelEvent,
@@ -2062,15 +2190,11 @@ impl TerminalPane {
             .terminal_font_size;
         let font = font(crate::fonts::mono_family());
         let metrics = CellMetrics::measure(window.text_system(), &font, px(font_size));
-        let viewport = self.viewport.unwrap_or_default();
-        let grid_x = viewport.x + GRID_HORIZONTAL_PADDING / 2.0;
-        let grid_y = viewport.y + Metrics::TITLE_BAR + self.lineage_chrome_height() + 2.0;
-        let col = ((f32::from(event.position.x) - grid_x) / f32::from(metrics.cell_width))
-            .floor()
-            .max(0.0) as u16;
-        let row = ((f32::from(event.position.y) - grid_y) / f32::from(metrics.line_height))
-            .floor()
-            .max(0.0) as u16;
+        let Some((col, row)) = self.grid_cell_at(event.position, window) else {
+            return;
+        };
+        let col = u16::try_from(col).unwrap_or(u16::MAX);
+        let row = u16::try_from(row).unwrap_or(u16::MAX);
         let delta = match event.delta {
             ScrollDelta::Pixels(point) => WheelDelta::PrecisePoints(f32::from(point.y)),
             ScrollDelta::Lines(point) => WheelDelta::Lines(point.y),
@@ -2087,12 +2211,29 @@ impl TerminalPane {
             line_height: f32::from(metrics.line_height),
         });
         match route {
-            Some(WheelRoute::Daemon {
-                direction,
+            Some(WheelRoute::Mouse {
+                up,
                 lines,
                 col,
                 row,
-            }) => resident.attachment.scroll(direction, lines, col, row),
+            }) => {
+                let reports = wheel_reports(
+                    usize::from(col),
+                    usize::from(row),
+                    up,
+                    usize::from(lines),
+                    terminal_mouse_modifiers(event.modifiers),
+                    resident.mouse_modes,
+                );
+                if let Some(reports) = reports {
+                    resident.attachment.input(reports.flatten().collect());
+                }
+            }
+            Some(WheelRoute::AlternateScroll { up, lines }) => {
+                resident
+                    .attachment
+                    .input(alternate_scroll(up, usize::from(lines)));
+            }
             Some(WheelRoute::Local { .. }) => {
                 self.pump_scrollback_fetch(&id, usize::from(visible_rows));
             }
@@ -2114,12 +2255,12 @@ impl TerminalPane {
             .preferences()
             .terminal_font_size;
         let viewport = self.viewport.unwrap_or_else(|| {
-            let bounds = window.inner_window_bounds().get_bounds();
+            let size = window.viewport_size();
             TerminalViewport {
                 x: 0.0,
                 y: 0.0,
-                width: f32::from(bounds.size.width),
-                height: f32::from(bounds.size.height),
+                width: f32::from(size.width),
+                height: f32::from(size.height),
             }
         });
         let metrics = CellMetrics::measure(
@@ -2171,9 +2312,6 @@ impl TerminalPane {
             self.reflow_preview_grid(window, cx);
             return;
         }
-        let Some(session) = self.selected_session() else {
-            return;
-        };
         let font_size = self
             .runtime
             .store
@@ -2182,12 +2320,12 @@ impl TerminalPane {
             .preferences()
             .terminal_font_size;
         let viewport = self.viewport.unwrap_or_else(|| {
-            let bounds = window.inner_window_bounds().get_bounds();
+            let size = window.viewport_size();
             TerminalViewport {
                 x: 0.0,
                 y: 0.0,
-                width: f32::from(bounds.size.width),
-                height: f32::from(bounds.size.height),
+                width: f32::from(size.width),
+                height: f32::from(size.height),
             }
         });
         let metrics = CellMetrics::measure(
@@ -2202,6 +2340,17 @@ impl TerminalPane {
             self.lineage_chrome_height(),
             metrics,
         );
+        self.apply_grid_size(size, window, cx);
+    }
+
+    /// Resize the selected session's PTY to `size`, coalesced by the existing
+    /// drag cadence. The settled viewport estimate is the only source: measuring
+    /// the painted box as well disagreed by a few chrome pixels and ping-ponged
+    /// the PTY, which flickered the grid with full snapshots.
+    fn apply_grid_size(&mut self, size: (u16, u16), window: &mut Window, cx: &mut Context<Self>) {
+        let Some(session) = self.selected_session() else {
+            return;
+        };
         if let Some(resident) = self.residents.get_mut(&session.id)
             && resident.last_size != size
         {
@@ -3118,36 +3267,69 @@ impl TerminalPane {
                     let Some((col, row)) = this.grid_cell_at(event.position, window) else {
                         return;
                     };
-                    let Some(resident) = this.residents.get(&id) else {
+                    if event.modifiers.platform {
+                        let reference = this
+                            .residents
+                            .get(&id)
+                            .and_then(|resident| resident.element.reference_at(col, row));
+                        if let Some(reference) = reference {
+                            if let Some(resident) = this.residents.get_mut(&id) {
+                                resident.suppress_left_report =
+                                    resident.mouse_modes.reporting && !event.modifiers.shift;
+                                resident.reported_button_down = None;
+                                resident.last_reported_mouse = None;
+                            }
+                            match reference {
+                                TerminalReference::Url(url) => cx.open_url(&url),
+                                TerminalReference::File(reference) => {
+                                    let Some(session) = this.selected_session() else {
+                                        return;
+                                    };
+                                    cx.emit(TerminalPaneEvent::OpenFileReference {
+                                        reference,
+                                        cwd: session.cwd.clone(),
+                                        session_id: session.id.clone(),
+                                    });
+                                }
+                            }
+                            cx.stop_propagation();
+                            return;
+                        }
+                    }
+                    let Some(resident) = this.residents.get_mut(&id) else {
                         return;
                     };
-                    if event.modifiers.platform {
-                        match resident.element.reference_at(col, row) {
-                            Some(TerminalReference::Url(url)) => cx.open_url(&url),
-                            Some(TerminalReference::File(reference)) => {
-                                let Some(session) = this.selected_session() else {
-                                    return;
-                                };
-                                cx.emit(TerminalPaneEvent::OpenFileReference {
-                                    reference,
-                                    cwd: session.cwd.clone(),
-                                    session_id: session.id.clone(),
-                                });
-                            }
-                            None => {}
+                    if resident.mouse_modes.reporting && !event.modifiers.shift {
+                        resident.suppress_left_report = false;
+                        resident.reported_button_down = Some(TermMouseButton::Left);
+                        resident.last_reported_mouse =
+                            Some((col, row, Some(TermMouseButton::Left)));
+                        if let Some(bytes) = press_report(
+                            col,
+                            row,
+                            TermMouseButton::Left,
+                            terminal_mouse_modifiers(event.modifiers),
+                            resident.mouse_modes,
+                        ) {
+                            resident.attachment.input(bytes);
                         }
+                        cx.stop_propagation();
                         return;
                     }
-                    // Mouse-reporting programs (Claude Code, vim) would
-                    // normally own the pointer, but clicks are not forwarded
-                    // to the PTY yet -- suppressing local selection here
-                    // bought nothing and made text un-copyable. Revisit when
-                    // click forwarding lands (then: plain drag to the app,
-                    // option-drag for local selection, per terminal
-                    // convention).
-                    match event.click_count {
-                        1 => resident.element.begin_selection(col, row),
-                        _ => resident.element.select_word(col, row),
+                    resident.suppress_left_report = false;
+                    resident.reported_button_down = None;
+                    resident.last_reported_mouse = None;
+                    // Shift is the same local-selection escape hatch Zed uses
+                    // while a full-screen program owns ordinary mouse input.
+                    if event.modifiers.shift && event.click_count == 1 {
+                        resident.element.extend_selection(col, row);
+                    } else {
+                        match event.click_count {
+                            1 => resident.element.begin_selection(col, row),
+                            2 => resident.element.select_word(col, row),
+                            3 => resident.element.select_line(row),
+                            _ => {}
+                        }
                     }
                     // notify, never window.refresh(): refresh() flags the
                     // whole frame as caching-disabled, repainting every cached
@@ -3157,20 +3339,154 @@ impl TerminalPane {
             )
             .on_mouse_move(
                 cx.listener(|this, event: &gpui::MouseMoveEvent, window, cx| {
-                    if event.pressed_button != Some(MouseButton::Left) {
-                        return;
-                    }
                     let Some(id) = this.selected_id() else {
                         return;
                     };
                     let Some((col, row)) = this.grid_cell_at(event.position, window) else {
                         return;
                     };
-                    let Some(resident) = this.residents.get(&id) else {
+                    let Some(resident) = this.residents.get_mut(&id) else {
                         return;
                     };
+                    if resident.mouse_modes.reporting
+                        && (!event.modifiers.shift || resident.reported_button_down.is_some())
+                    {
+                        let pressed_button = resident
+                            .reported_button_down
+                            .or_else(|| event.pressed_button.and_then(terminal_mouse_button));
+                        if resident.suppress_left_report
+                            && pressed_button == Some(TermMouseButton::Left)
+                        {
+                            cx.stop_propagation();
+                            return;
+                        }
+                        let position = (col, row, pressed_button);
+                        if resident.last_reported_mouse == Some(position) {
+                            return;
+                        }
+                        resident.last_reported_mouse = Some(position);
+                        if let Some(bytes) = motion_report(
+                            col,
+                            row,
+                            pressed_button,
+                            terminal_mouse_modifiers(event.modifiers),
+                            resident.mouse_modes,
+                        ) {
+                            resident.attachment.input(bytes);
+                            cx.stop_propagation();
+                        }
+                        return;
+                    }
+                    if event.pressed_button != Some(MouseButton::Left) {
+                        return;
+                    }
                     resident.element.drag_selection(col, row);
                     cx.notify();
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, event: &gpui::MouseUpEvent, window, cx| {
+                    let Some(id) = this.selected_id() else {
+                        return;
+                    };
+                    let Some((col, row)) = this.grid_cell_at(event.position, window) else {
+                        return;
+                    };
+                    let Some(resident) = this.residents.get_mut(&id) else {
+                        return;
+                    };
+                    if resident.mouse_modes.reporting
+                        && (!event.modifiers.shift
+                            || resident.reported_button_down == Some(TermMouseButton::Left))
+                    {
+                        resident.last_reported_mouse = None;
+                        if std::mem::take(&mut resident.suppress_left_report) {
+                            resident.reported_button_down = None;
+                            cx.stop_propagation();
+                            return;
+                        }
+                        if let Some(bytes) = release_report(
+                            col,
+                            row,
+                            TermMouseButton::Left,
+                            terminal_mouse_modifiers(event.modifiers),
+                            resident.mouse_modes,
+                        ) {
+                            resident.attachment.input(bytes);
+                        }
+                        resident.reported_button_down = None;
+                        cx.stop_propagation();
+                        return;
+                    }
+                    resident.suppress_left_report = false;
+                    resident.reported_button_down = None;
+                    resident.last_reported_mouse = None;
+                    let copy_on_select = this
+                        .runtime
+                        .store
+                        .read()
+                        .expect("session store lock poisoned")
+                        .preferences()
+                        .terminal_copy_on_select;
+                    if copy_on_select {
+                        let text = resident.element.selected_text();
+                        if !text.is_empty() {
+                            cx.write_to_clipboard(ClipboardItem::new_string(text));
+                        }
+                    }
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Middle,
+                cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
+                    this.report_mouse_button(
+                        event.position,
+                        event.modifiers,
+                        TermMouseButton::Middle,
+                        true,
+                        window,
+                        cx,
+                    );
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Middle,
+                cx.listener(|this, event: &gpui::MouseUpEvent, window, cx| {
+                    this.report_mouse_button(
+                        event.position,
+                        event.modifiers,
+                        TermMouseButton::Middle,
+                        false,
+                        window,
+                        cx,
+                    );
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
+                    this.report_mouse_button(
+                        event.position,
+                        event.modifiers,
+                        TermMouseButton::Right,
+                        true,
+                        window,
+                        cx,
+                    );
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Right,
+                cx.listener(|this, event: &gpui::MouseUpEvent, window, cx| {
+                    this.report_mouse_button(
+                        event.position,
+                        event.modifiers,
+                        TermMouseButton::Right,
+                        false,
+                        window,
+                        cx,
+                    );
                 }),
             )
             .on_scroll_wheel(cx.listener(Self::handle_scroll))
@@ -4029,6 +4345,43 @@ fn chip_tint_color(tint: ChipTint) -> gpui::Rgba {
     }
 }
 
+fn terminal_input_modes(modes: WireTerminalModes) -> TermInputModes {
+    TermInputModes {
+        application_cursor_keys: modes.application_cursor_keys,
+        bracketed_paste: modes.bracketed_paste,
+        alternate_scroll: modes.alternate_scroll,
+        focus_reporting: modes.focus_reporting,
+        ..TermInputModes::default()
+    }
+}
+
+fn terminal_mouse_modes(modes: WireTerminalModes) -> MouseModes {
+    MouseModes {
+        reporting: modes.mouse_reporting,
+        sgr: modes.mouse_sgr,
+        utf8: modes.mouse_utf8,
+        drag: modes.mouse_drag,
+        motion: modes.mouse_motion,
+    }
+}
+
+fn terminal_mouse_button(button: MouseButton) -> Option<TermMouseButton> {
+    match button {
+        MouseButton::Left => Some(TermMouseButton::Left),
+        MouseButton::Middle => Some(TermMouseButton::Middle),
+        MouseButton::Right => Some(TermMouseButton::Right),
+        MouseButton::Navigate(_) => None,
+    }
+}
+
+fn terminal_mouse_modifiers(modifiers: gpui::Modifiers) -> MouseModifiers {
+    MouseModifiers {
+        shift: modifiers.shift,
+        alt: modifiers.alt,
+        control: modifiers.control,
+    }
+}
+
 fn terminal_key_event(event: &KeyDownEvent) -> Option<TermKeyEvent> {
     let named = match event.keystroke.key.as_str() {
         "up" => Some(NamedKey::ArrowUp),
@@ -4057,6 +4410,14 @@ fn terminal_key_event(event: &KeyDownEvent) -> Option<TermKeyEvent> {
         "f10" => Some(NamedKey::F10),
         "f11" => Some(NamedKey::F11),
         "f12" => Some(NamedKey::F12),
+        "f13" => Some(NamedKey::F13),
+        "f14" => Some(NamedKey::F14),
+        "f15" => Some(NamedKey::F15),
+        "f16" => Some(NamedKey::F16),
+        "f17" => Some(NamedKey::F17),
+        "f18" => Some(NamedKey::F18),
+        "f19" => Some(NamedKey::F19),
+        "f20" => Some(NamedKey::F20),
         _ => None,
     };
     if let Some(named) = named {
@@ -4133,9 +4494,6 @@ fn spawn_attachment(
                                 last_resize = Some((cols, rows));
                                 let _ = writer.resize(cols, rows);
                             }
-                            Some(AttachmentCommand::Scroll { direction, lines, col, row }) => {
-                                let _ = writer.scroll(direction, lines, col, row);
-                            }
                             Some(AttachmentCommand::Close) | None => break true,
                         }
                     }
@@ -4169,7 +4527,7 @@ async fn wait_for_retry(
             command = commands.recv() => match command {
                 Some(AttachmentCommand::Resize(cols, rows)) => *last_resize = Some((cols, rows)),
                 Some(AttachmentCommand::Close) | None => return true,
-                Some(AttachmentCommand::Input(_)) | Some(AttachmentCommand::Scroll { .. }) => {}
+                Some(AttachmentCommand::Input(_)) => {}
             }
         }
     }
@@ -5012,6 +5370,15 @@ mod tests {
             TOOLBAR_MAX_VISIBLE_LINKS
         );
         assert_eq!(toolbar_visible_chip_count(&chips, 700.0, false), 0);
+        assert_eq!(
+            toolbar_visible_chip_count(&chips, crate::workbench::MIN_TERMINAL_WIDTH, true),
+            0,
+            "the reserved terminal minimum collapses chips rather than clipping them"
+        );
+        let compact_plain = toolbar_visible_chip_count(&chips, 780.0, true);
+        let compact_chrome = toolbar_visible_chip_count(&chips, 780.0, false);
+        assert!(compact_plain >= compact_chrome);
+        assert!(compact_plain <= TOOLBAR_MAX_VISIBLE_LINKS);
     }
 
     #[test]
@@ -5513,6 +5880,152 @@ mod tests {
             ),
             [0x15]
         );
+
+        let live_modes = terminal_input_modes(WireTerminalModes {
+            application_cursor_keys: true,
+            bracketed_paste: true,
+            alternate_scroll: true,
+            focus_reporting: true,
+            ..WireTerminalModes::default()
+        });
+        assert!(live_modes.alternate_scroll);
+        assert!(live_modes.focus_reporting);
+        assert_eq!(
+            encode_key(
+                &terminal_key_event(&event).unwrap(),
+                TermModifiers::default(),
+                live_modes
+            ),
+            b"\x1bOA",
+            "the pane must pass live DECCKM to the encoder"
+        );
+        assert_eq!(
+            paste("two\nlines", live_modes.bracketed_paste),
+            b"\x1b[200~two\nlines\x1b[201~",
+            "the pane must pass live bracketed-paste mode"
+        );
+
+        let modifier_backspaces = [
+            (Modifiers::default(), b"\x7f".as_slice()),
+            (
+                Modifiers {
+                    control: true,
+                    ..Modifiers::default()
+                },
+                b"\x08".as_slice(),
+            ),
+            (
+                Modifiers {
+                    alt: true,
+                    ..Modifiers::default()
+                },
+                b"\x1b\x7f".as_slice(),
+            ),
+            (
+                Modifiers {
+                    platform: true,
+                    ..Modifiers::default()
+                },
+                b"\x15".as_slice(),
+            ),
+        ];
+        for (gpui_modifiers, expected) in modifier_backspaces {
+            let event = KeyDownEvent {
+                keystroke: Keystroke {
+                    modifiers: gpui_modifiers,
+                    key: "backspace".to_owned(),
+                    key_char: None,
+                },
+                is_held: true,
+                prefer_character_input: false,
+            };
+            let mapped = terminal_key_event(&event).unwrap();
+            let modifiers = TermModifiers {
+                shift: gpui_modifiers.shift,
+                ctrl: gpui_modifiers.control,
+                alt: gpui_modifiers.alt,
+                cmd: gpui_modifiers.platform,
+            };
+            assert_eq!(encode_key(&mapped, modifiers, live_modes), expected);
+        }
+
+        let f20 = KeyDownEvent {
+            keystroke: Keystroke::parse("f20").unwrap(),
+            is_held: false,
+            prefer_character_input: false,
+        };
+        assert_eq!(
+            encode_key(
+                &terminal_key_event(&f20).expect("F20 adapter"),
+                TermModifiers::default(),
+                live_modes,
+            ),
+            b"\x1b[34~"
+        );
+
+        let composed = KeyDownEvent {
+            keystroke: Keystroke {
+                modifiers: Modifiers {
+                    alt: true,
+                    ..Modifiers::default()
+                },
+                key: "a".to_owned(),
+                key_char: Some("å".to_owned()),
+            },
+            is_held: false,
+            prefer_character_input: true,
+        };
+        let mapped = terminal_key_event(&composed).expect("Option-composed adapter");
+        let option = TermModifiers {
+            alt: true,
+            ..TermModifiers::default()
+        };
+        assert_eq!(encode_key(&mapped, option, live_modes), "å".as_bytes());
+        assert_eq!(
+            encode_key(
+                &mapped,
+                option,
+                TermInputModes {
+                    option_as_meta: true,
+                    ..live_modes
+                },
+            ),
+            b"\x1ba"
+        );
+    }
+
+    #[test]
+    fn wire_mouse_modes_drive_zed_compatible_reports() {
+        let modes = terminal_mouse_modes(WireTerminalModes {
+            mouse_reporting: true,
+            mouse_sgr: true,
+            mouse_drag: true,
+            ..WireTerminalModes::default()
+        });
+        assert_eq!(
+            press_report(
+                3,
+                7,
+                TermMouseButton::Left,
+                MouseModifiers {
+                    alt: true,
+                    control: true,
+                    ..MouseModifiers::default()
+                },
+                modes,
+            ),
+            Some(b"\x1b[<24;4;8M".to_vec())
+        );
+        assert_eq!(
+            motion_report(
+                3,
+                7,
+                Some(TermMouseButton::Left),
+                MouseModifiers::default(),
+                modes,
+            ),
+            Some(b"\x1b[<32;4;8M".to_vec())
+        );
     }
 
     #[test]
@@ -5570,6 +6083,64 @@ mod tests {
             reported.0 <= painted,
             "reported {} columns but only {painted} fit",
             reported.0
+        );
+    }
+
+    #[test]
+    fn painted_content_box_and_settled_estimate_can_disagree_by_one_cell() {
+        let metrics =
+            CellMetrics::from_measurements(px(8.0), px(16.0), px(0.0), px(0.0), gpui::FontId(7));
+        // 14px into a 16px row: subtracting the 2px layout chrome changes the
+        // row count. Driving the PTY from both this estimate and a painted-box
+        // measurement therefore ping-pongs by one row every frame.
+        let viewport_height = Metrics::TITLE_BAR
+            + GRID_VERTICAL_PADDING
+            + GRID_LAYOUT_VERTICAL_CHROME
+            + 16.0 * 29.0
+            + 14.0;
+        let estimated = estimated_grid_size(800.0, viewport_height, 0.0, 0.0, metrics);
+        let painted_rows = metrics
+            .rows_for_height(px((viewport_height
+                - Metrics::TITLE_BAR
+                - GRID_VERTICAL_PADDING)
+                .max(1.0)))
+            .max(2);
+        assert_eq!(estimated.1, 29);
+        assert_eq!(painted_rows, 30);
+    }
+
+    #[test]
+    fn pty_columns_are_derived_from_the_solver_terminal_width() {
+        use crate::workbench::{
+            HorizontalLayoutInput, MIN_TERMINAL_WIDTH, solve_horizontal_layout,
+        };
+
+        let metrics =
+            CellMetrics::from_measurements(px(8.0), px(16.0), px(3.0), px(1.0), gpui::FontId(7));
+        let layout = solve_horizontal_layout(HorizontalLayoutInput {
+            window_width: 1_400.0,
+            sidebar_visible: true,
+            sidebar_width: 220.0,
+            inspector_visible: true,
+            requested_inspector_width: 400.0,
+            inspector_min_width: crate::inspector::min_width(),
+            terminal_min_width: MIN_TERMINAL_WIDTH,
+            mirrored: false,
+        });
+        let from_terminal = estimated_grid_size(layout.terminal_width, 720.0, 0.0, 0.0, metrics);
+        let from_window = estimated_grid_size(1_400.0, 720.0, 0.0, 0.0, metrics);
+        assert!(
+            from_terminal.0 < from_window.0,
+            "PTY columns must follow the settled terminal card, not the window"
+        );
+        assert_eq!(
+            from_terminal.0,
+            metrics
+                .cols_for_width(px((layout.terminal_width
+                    - GRID_HORIZONTAL_PADDING
+                    - GRID_LAYOUT_HORIZONTAL_CHROME)
+                    .max(1.0)))
+                .max(2)
         );
     }
 }

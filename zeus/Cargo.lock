@@ -7411,6 +7411,7 @@ dependencies = [
  "gpui",
  "gpui_platform",
  "zeus-proto",
+ "zeus-pty",
 ]
 
 [[package]]

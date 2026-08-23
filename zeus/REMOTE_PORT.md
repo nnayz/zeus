@@ -427,9 +427,16 @@ are a future enhancement and are not part of the completed baseline.
 
 ## Wire protocol
 
-`zeus-proto::remote_pty` is the versioned protocol authority. Protocol 1.2
+`zeus-proto::remote_pty` is the versioned protocol authority. Protocol 1.5
 declares terminal, session management, environment capture, directory listing,
-persistence probing, and atomic activation as required capabilities.
+persistence probing, atomic activation, and complete terminal input modes as
+required capabilities. Full Snapshots and grid deltas carry application-cursor,
+bracketed-paste, alternate-screen, alternate-scroll, focus-reporting, and
+detailed mouse-reporting state (click, drag, motion, SGR, and UTF-8 formats) so
+local and remote attachments encode the same input after initial attach and
+reconnect. The 1.5 extended-mode byte is appended after the grid payload, which
+keeps the 1.4 grid offset stable and lets older readers ignore the additive
+state while current readers continue attaching to live 1.4 Holders.
 
 The protocol includes:
 

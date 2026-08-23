@@ -89,7 +89,7 @@ impl AttachHub {
             if write_frame(&writer, &grid_frame).is_err() {
                 return;
             }
-            let _ = write_frame(&writer, &Frame::modes(seed.modes.0, seed.modes.1));
+            let _ = write_frame(&writer, &Frame::modes(seed.modes));
             seed
         };
 
@@ -277,7 +277,7 @@ impl AttachHub {
                 if let Some(previous) = last_modes
                     && previous != modes
                 {
-                    frames.push(Frame::modes(modes.0, modes.1));
+                    frames.push(Frame::modes(modes));
                 }
                 last_modes = Some(modes);
             }

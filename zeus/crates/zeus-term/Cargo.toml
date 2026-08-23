@@ -11,3 +11,4 @@ gpui.workspace = true
 
 [dev-dependencies]
 gpui_platform.workspace = true
+zeus-pty.workspace = true

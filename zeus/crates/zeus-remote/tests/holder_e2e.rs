@@ -248,7 +248,7 @@ fn detach_reconnect_preserves_pid_snapshot_and_input() {
         argv: vec![
             "/bin/sh".into(),
             "-c".into(),
-            "printf 'ready>'; IFS= read -r first; printf 'got:%s\\nnext>' \"$first\"; IFS= read -r second; printf 'bye:%s\\n' \"$second\"".into(),
+            "printf '\\033[?1h\\033[?2004h\\033[?1002h\\033[?1006hready>'; IFS= read -r first; printf '\\033[?1002l\\033[?1006l\\033[?1003h\\033[?1005hgot:%s\\nnext>' \"$first\"; IFS= read -r second; printf 'bye:%s\\n' \"$second\"".into(),
         ],
         cwd: "/".into(),
         environment: vec![zeus_proto::remote_pty::EnvironmentVariable {
@@ -275,6 +275,23 @@ fn detach_reconnect_preserves_pid_snapshot_and_input() {
             _ => None,
         })
         .expect("HelloAck");
+    assert!(initial.iter().any(|message| match message {
+        RemoteMessage::FullSnapshot(snapshot) => {
+            snapshot.application_cursor_keys
+                && snapshot.bracketed_paste
+                && snapshot.mouse_reporting
+                && snapshot.mouse_sgr
+                && snapshot.mouse_drag
+        }
+        RemoteMessage::GridDelta(delta) => {
+            delta.application_cursor_keys
+                && delta.bracketed_paste
+                && delta.mouse_reporting
+                && delta.mouse_sgr
+                && delta.mouse_drag
+        }
+        _ => false,
+    }));
     first.send(RemoteMessage::Terminal(Frame::input(b"alpha\n".to_vec())));
     let output = first.receive_until(Duration::from_secs(2), |message| match message {
         RemoteMessage::Terminal(frame) => frame
@@ -335,6 +352,13 @@ fn detach_reconnect_preserves_pid_snapshot_and_input() {
         })
         .expect("reconnect snapshot");
     assert!(grid_text(&snapshot.grid).contains("next>"));
+    assert!(snapshot.application_cursor_keys);
+    assert!(snapshot.bracketed_paste);
+    assert!(snapshot.mouse_reporting);
+    assert!(snapshot.mouse_utf8);
+    assert!(snapshot.mouse_motion);
+    assert!(!snapshot.mouse_sgr);
+    assert!(!snapshot.mouse_drag);
 
     first.receive_until(Duration::from_secs(2), |message| {
         matches!(

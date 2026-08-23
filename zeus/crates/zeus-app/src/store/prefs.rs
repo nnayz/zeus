@@ -102,6 +102,11 @@ pub struct Prefs {
     pub memory_hard_limit_gb: u64,
     pub terminal_theme: String,
     pub terminal_font_size: f32,
+    /// Treat Option plus a printable key as Meta (ESC prefix) instead of
+    /// preserving the character produced by the macOS keyboard layout.
+    pub terminal_option_as_meta: bool,
+    /// Copy a completed local terminal selection to the clipboard.
+    pub terminal_copy_on_select: bool,
     /// Last size, position, and presentation mode of the main window.
     pub window_placement: Option<WindowPlacement>,
     /// Whether the leading sidebar was mounted when the app last ran.
@@ -155,6 +160,8 @@ impl Default for Prefs {
             memory_hard_limit_gb: 6,
             terminal_theme: DEFAULT_THEME.to_owned(),
             terminal_font_size: 16.0,
+            terminal_option_as_meta: false,
+            terminal_copy_on_select: false,
             window_placement: None,
             sidebar_visible: true,
             sidebar_width: 220.0,

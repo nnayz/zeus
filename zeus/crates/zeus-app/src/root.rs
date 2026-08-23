@@ -25,7 +25,10 @@ use crate::store::SpawnOptions;
 use crate::surface_shell::UtilitySurfaces;
 use crate::terminal_pane::{ShellChrome, TerminalPane, TerminalPaneEvent, TerminalViewport};
 use crate::updates::UpdatePhase;
-use crate::workbench::WorkbenchLayout;
+use crate::workbench::{
+    HorizontalLayout, HorizontalLayoutInput, MAX_INSPECTOR_WIDTH, MIN_TERMINAL_WIDTH,
+    WorkbenchLayout, solve_horizontal_layout,
+};
 
 const WINDOW_BOUNDS_SAVE_DELAY: Duration = Duration::from_millis(150);
 
@@ -159,7 +162,6 @@ pub struct RootView {
     terminal_available_height: f32,
     inspector_open: bool,
     inspector_width: f32,
-    inspector_max_width: f32,
     inspector_resize_origin: Option<(f32, f32)>,
     /// The inspector's mirror of `sidebar_slide` / `sidebar_seam`.
     inspector_slide: Option<SeamSlide>,
@@ -630,7 +632,6 @@ impl RootView {
             terminal_available_height: 0.0,
             inspector_open,
             inspector_width,
-            inspector_max_width: 720.0,
             inspector_slide: None,
             inspector_seam,
             inspector_toggled_at: None,
@@ -701,11 +702,11 @@ impl RootView {
         crate::app_theme::colors(&store.preferences().terminal_theme)
     }
 
-    /// Narrowest useful inspector. A mirrored panel also carries the macOS
-    /// window-button lane in its toolbar, so it needs that much more before the
-    /// tab strip starts clipping.
+    /// Narrowest useful inspector in either orientation. The shared horizontal
+    /// solver uses the conservative mirrored width for both arrangements so a
+    /// flip changes placement, never the terminal allocation.
     fn inspector_min_width(&self) -> f32 {
-        crate::inspector::min_width(self.sidebar_on_right()).min(self.inspector_max_width)
+        crate::inspector::min_width()
     }
 
     /// Mirrored workbench: sidebar trailing, inspector leading. Read from
@@ -1191,7 +1192,8 @@ impl RootView {
     /// terminal is told about, so a slide costs no PTY resizes.
     fn settled_inspector_seam(&self) -> f32 {
         if self.inspector_open {
-            self.inspector_width.min(self.inspector_max_width)
+            self.inspector_width
+                .clamp(self.inspector_min_width(), MAX_INSPECTOR_WIDTH)
         } else {
             0.0
         }
@@ -1437,7 +1439,7 @@ impl RootView {
                             if event.click_count == 2 {
                                 this.inspector_width = 400.0_f32
                                     .max(this.inspector_min_width())
-                                    .min(this.inspector_max_width);
+                                    .min(MAX_INSPECTOR_WIDTH);
                             }
                             this.finish_inspector_resize(cx);
                         }),
@@ -1455,7 +1457,7 @@ impl RootView {
             return;
         };
         let width = dragged_panel_width(base_width, pointer_x - origin_x, self.sidebar_on_right());
-        self.inspector_width = width.clamp(self.inspector_min_width(), self.inspector_max_width);
+        self.inspector_width = width.clamp(self.inspector_min_width(), MAX_INSPECTOR_WIDTH);
         if let Some(inspector) = &self.inspector {
             inspector.update(cx, |inspector, cx| {
                 inspector.set_panel_width(self.inspector_width, cx)
@@ -1522,38 +1524,26 @@ impl RootView {
         .into_any_element()
     }
 
-    /// `visible_sidebar` and `inspector_width` are the settled layout and drive
-    /// everything the terminal is *told* -- viewport geometry, and whether its
-    /// chrome offers a "show sidebar" button. The two `*_seam` widths are what
-    /// is being painted this frame and drive only the card's own top corners,
-    /// so each radius appears the moment its panel finishes clearing rather
-    /// than at the start of the slide. Keeping the two apart is what stops a
-    /// 260ms slide from firing a PTY resize on every frame of it.
+    /// `layout` is the settled allocation and drives everything the terminal is
+    /// *told* -- viewport geometry and resolved panel visibility. The two
+    /// `*_seam` widths are what is being painted this frame and drive only the
+    /// card's own top corners, so each radius appears the moment its panel
+    /// finishes clearing rather than at the start of the slide. Keeping the two
+    /// apart is what stops a 260ms slide from firing a PTY resize on every frame.
     fn terminal_card(
         &mut self,
         visible_sidebar: bool,
+        layout: HorizontalLayout,
         seam: f32,
-        inspector_width: f32,
         inspector_seam: f32,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let terminal = self.colors();
-        let bounds = window.inner_window_bounds().get_bounds();
-        let sidebar_width = if visible_sidebar {
-            self.sidebar.read(cx).width()
-        } else {
-            0.0
-        };
-        let card_width = (f32::from(bounds.size.width) - sidebar_width - inspector_width).max(0.0);
-        let card_height = f32::from(bounds.size.height).max(0.0);
+        let card_width = layout.terminal_width;
+        let card_height = f32::from(window.viewport_size().height).max(0.0);
         let mirrored = self.sidebar_on_right();
-        // Window-space origin of the card: whichever panel sits to its left.
-        let card_x = if mirrored {
-            inspector_width
-        } else {
-            sidebar_width
-        };
+        let card_x = layout.terminal_x;
         // Corner radii follow the painted seams of whatever panel is on that
         // side this frame, so mirroring only has to swap which seam is which.
         let (leading_seam, trailing_seam) = if mirrored {
@@ -1563,7 +1553,7 @@ impl RootView {
         };
         let chrome = ShellChrome {
             sidebar_visible: visible_sidebar,
-            inspector_open: self.inspector_open,
+            inspector_open: layout.inspector_chrome_open(),
             // Nothing to the card's left means the macOS window buttons land
             // on its own toolbar.
             traffic_light_lane: card_x <= 0.0,
@@ -1933,35 +1923,68 @@ impl Render for RootView {
                 inspector.set_word_wrap(inspector_word_wrap, cx)
             });
         }
-        let window_width = f32::from(window.inner_window_bounds().get_bounds().size.width);
-        let occupied_sidebar_width = if sidebar_visible { sidebar_width } else { 0.0 };
-        self.inspector_max_width =
-            (window_width - occupied_sidebar_width - 320.0).clamp(0.0, 720.0);
-        // The inspector's own width, whether or not it is currently shown --
-        // the panel keeps painting at full width while it slides away.
-        let inspector_panel_width = self
-            .inspector_width
-            .max(self.inspector_min_width())
-            .min(self.inspector_max_width);
+        let window_width = f32::from(window.viewport_size().width);
+        let mirrored = self.sidebar_on_right();
         let inspector_has_standalone_destination = self
             .inspector
             .as_ref()
             .is_some_and(|inspector| inspector.read(cx).is_code_destination());
-        let inspector_width = if self.inspector_open
-            && (inspector_has_standalone_destination
-                || (!startup_welcome_visible && has_selected_session))
-        {
-            inspector_panel_width
+        let inspector_available = inspector_has_standalone_destination
+            || (!startup_welcome_visible && has_selected_session);
+        let requested_inspector_width = self
+            .inspector_width
+            .clamp(self.inspector_min_width(), MAX_INSPECTOR_WIDTH);
+        let layout_input = HorizontalLayoutInput {
+            window_width,
+            sidebar_visible,
+            sidebar_width,
+            inspector_visible: self.inspector_open && inspector_available,
+            requested_inspector_width,
+            inspector_min_width: self.inspector_min_width(),
+            terminal_min_width: MIN_TERMINAL_WIDTH,
+            mirrored,
+        };
+        let layout = solve_horizontal_layout(layout_input);
+        // Keep the panel's own wrapping/code viewport on the same resolved
+        // width as its wrapper. When the user closes it, solve the still-open
+        // panel as well so the fixed-width child can slide away without being
+        // squeezed by the shrinking seam.
+        let inspector_panel_width = if layout.inspector_width > 0.0 {
+            layout.inspector_width
+        } else if inspector_available {
+            // Keep the child at a useful width while the seam clips it, so a
+            // close or Narrow collapse slides the panel away instead of
+            // squeezing its contents. Re-solving as open recovers Compact's
+            // clamped width; Narrow has no visible width, so fall back to the
+            // user's requested size.
+            let open_width = solve_horizontal_layout(HorizontalLayoutInput {
+                inspector_visible: true,
+                ..layout_input
+            })
+            .inspector_width;
+            if open_width > 0.0 {
+                open_width
+            } else {
+                requested_inspector_width
+            }
         } else {
             0.0
         };
+        if inspector_panel_width > 0.0
+            && let Some(inspector) = &self.inspector
+        {
+            inspector.update(cx, |inspector, cx| {
+                inspector.set_panel_width(inspector_panel_width, cx)
+            });
+        }
+        let occupied_sidebar_width = layout.sidebar_width;
+        let inspector_width = layout.inspector_width;
         let now = Instant::now();
         self.sidebar_seam =
             advance_seam(&mut self.sidebar_slide, occupied_sidebar_width, now, window);
         self.inspector_seam = advance_seam(&mut self.inspector_slide, inspector_width, now, window);
         let seam = self.sidebar_seam;
         let inspector_seam = self.inspector_seam;
-        let mirrored = self.sidebar_on_right();
         // Each panel keeps its full width and is pinned to the window edge it
         // lives against -- so narrowing a wrapper slides its panel out under
         // the clip instead of squeezing every row's contents down with it.
@@ -2063,8 +2086,8 @@ impl Render for RootView {
             }
             root = root.child(self.terminal_card(
                 sidebar_visible,
+                layout,
                 seam,
-                inspector_width,
                 inspector_seam,
                 window,
                 cx,
@@ -2080,8 +2103,8 @@ impl Render for RootView {
             }
             root = root.child(self.terminal_card(
                 sidebar_visible,
+                layout,
                 seam,
-                inspector_width,
                 inspector_seam,
                 window,
                 cx,

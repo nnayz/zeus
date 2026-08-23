@@ -17,7 +17,7 @@ use crate::frames::{Frame, FrameType, MAX_FRAME_BYTES};
 use crate::grid::{GridCodecError, GridUpdate};
 
 pub const PROTOCOL_MAJOR: u16 = 1;
-pub const PROTOCOL_MINOR: u16 = 2;
+pub const PROTOCOL_MINOR: u16 = 5;
 pub const MAX_CONTROL_FRAME_BYTES: usize = 64 * 1024;
 pub const MAX_ARGUMENTS: usize = 512;
 pub const MAX_ENVIRONMENT_VARIABLES: usize = 4096;
@@ -31,7 +31,8 @@ pub const MAX_DIRECTORY_SCANNED_ENTRIES: usize = 16_384;
 pub const MAX_DIRECTORY_RESPONSE_BYTES: usize = 512 * 1024;
 
 const HEADER_BYTES: usize = 5;
-const FULL_SNAPSHOT_FIXED_BYTES: usize = 9;
+const LEGACY_SNAPSHOT_FIXED_BYTES: usize = 9;
+const EXTENDED_INPUT_MODES_MINOR: u16 = 5;
 const KIND_HELLO: u8 = 32;
 const KIND_HELLO_ACK: u8 = 33;
 const KIND_FULL_SNAPSHOT: u8 = 34;
@@ -85,6 +86,10 @@ pub enum RemoteCapability {
     PersistenceProbe,
     /// Uploaded Helper can activate itself without replacing different bytes.
     AtomicActivation,
+    /// Snapshots and deltas carry every mode needed for correct key/paste input.
+    TerminalInputModes,
+    /// Snapshots and deltas distinguish mouse encoding, drag, and motion modes.
+    TerminalMouseModes,
     AgentEvents,
     McpStdio,
     ResourceInspect,
@@ -112,6 +117,8 @@ impl RemoteCapability {
             Self::DirectoryList => "directory-list",
             Self::PersistenceProbe => "persistence-probe",
             Self::AtomicActivation => "atomic-activation",
+            Self::TerminalInputModes => "terminal-input-modes",
+            Self::TerminalMouseModes => "terminal-mouse-modes",
             Self::AgentEvents => "agent-events",
             Self::McpStdio => "mcp-stdio",
             Self::ResourceInspect => "resource-inspect",
@@ -131,6 +138,8 @@ pub const PHASE_ONE_HOLDER_CAPABILITIES: &[RemoteCapability] = &[
     RemoteCapability::Signal,
     RemoteCapability::ControllerLease,
     RemoteCapability::Scrollback,
+    RemoteCapability::TerminalInputModes,
+    RemoteCapability::TerminalMouseModes,
 ];
 
 /// Complete phase-one Helper command surface required before the Engine may
@@ -148,6 +157,8 @@ pub const PHASE_ONE_HELPER_CAPABILITIES: &[RemoteCapability] = &[
     RemoteCapability::DirectoryList,
     RemoteCapability::PersistenceProbe,
     RemoteCapability::AtomicActivation,
+    RemoteCapability::TerminalInputModes,
+    RemoteCapability::TerminalMouseModes,
 ];
 
 /// Authentication bearer shared only by the local Engine and one Holder.
@@ -257,8 +268,15 @@ impl HelloAck {
 pub struct FullSnapshot {
     pub sequence: u64,
     pub alt_screen: bool,
+    pub application_cursor_keys: bool,
     pub bracketed_paste: bool,
     pub mouse_reporting: bool,
+    pub mouse_sgr: bool,
+    pub mouse_utf8: bool,
+    pub mouse_drag: bool,
+    pub mouse_motion: bool,
+    pub alternate_scroll: bool,
+    pub focus_reporting: bool,
     pub grid: GridUpdate,
 }
 
@@ -266,8 +284,15 @@ pub struct FullSnapshot {
 pub struct GridDelta {
     pub sequence: u64,
     pub alt_screen: bool,
+    pub application_cursor_keys: bool,
     pub bracketed_paste: bool,
     pub mouse_reporting: bool,
+    pub mouse_sgr: bool,
+    pub mouse_utf8: bool,
+    pub mouse_drag: bool,
+    pub mouse_motion: bool,
+    pub alternate_scroll: bool,
+    pub focus_reporting: bool,
     pub grid: GridUpdate,
 }
 
@@ -698,6 +723,7 @@ impl From<GridCodecError> for RemoteCodecError {
 #[derive(Clone, Debug, Default)]
 pub struct RemoteCodec {
     buffer: Vec<u8>,
+    peer_protocol_minor: Option<u16>,
 }
 
 impl RemoteCodec {
@@ -743,8 +769,15 @@ impl RemoteCodec {
                 output.extend_from_slice(&value.sequence.to_be_bytes());
                 let modes = u8::from(value.alt_screen)
                     | (u8::from(value.bracketed_paste) << 1)
-                    | (u8::from(value.mouse_reporting) << 2);
+                    | (u8::from(value.mouse_reporting) << 2)
+                    | (u8::from(value.application_cursor_keys) << 3)
+                    | (u8::from(value.mouse_sgr) << 4)
+                    | (u8::from(value.mouse_utf8) << 5)
+                    | (u8::from(value.mouse_drag) << 6)
+                    | (u8::from(value.mouse_motion) << 7);
                 output.push(modes);
+                let extended_modes =
+                    u8::from(value.alternate_scroll) | (u8::from(value.focus_reporting) << 1);
                 if !value.grid.is_full_snapshot {
                     return rollback(
                         output,
@@ -755,6 +788,10 @@ impl RemoteCodec {
                     );
                 }
                 output.extend_from_slice(&value.grid.encode()?);
+                // Appending keeps the 1.4 grid offset stable. Older readers
+                // already ignore trailing grid bytes, so live holders remain
+                // attachable across the minor upgrade.
+                output.push(extended_modes);
                 Ok(())
             }
             RemoteMessage::GridDelta(value) => {
@@ -763,8 +800,15 @@ impl RemoteCodec {
                 output.extend_from_slice(&value.sequence.to_be_bytes());
                 let modes = u8::from(value.alt_screen)
                     | (u8::from(value.bracketed_paste) << 1)
-                    | (u8::from(value.mouse_reporting) << 2);
+                    | (u8::from(value.mouse_reporting) << 2)
+                    | (u8::from(value.application_cursor_keys) << 3)
+                    | (u8::from(value.mouse_sgr) << 4)
+                    | (u8::from(value.mouse_utf8) << 5)
+                    | (u8::from(value.mouse_drag) << 6)
+                    | (u8::from(value.mouse_motion) << 7);
                 output.push(modes);
+                let extended_modes =
+                    u8::from(value.alternate_scroll) | (u8::from(value.focus_reporting) << 1);
                 if value.grid.is_full_snapshot {
                     return rollback(
                         output,
@@ -775,6 +819,7 @@ impl RemoteCodec {
                     );
                 }
                 output.extend_from_slice(&value.grid.encode()?);
+                output.push(extended_modes);
                 Ok(())
             }
             RemoteMessage::ProcessExit(value) => {
@@ -877,10 +922,21 @@ impl RemoteCodec {
             if self.buffer.len() < frame_end {
                 break;
             }
-            messages.push(decode_message(
+            let message = decode_message(
                 kind,
                 &self.buffer[consumed + HEADER_BYTES..frame_end],
-            )?);
+                self.peer_protocol_minor,
+            )?;
+            match &message {
+                RemoteMessage::Hello(hello) => {
+                    self.peer_protocol_minor = Some(hello.protocol.minor);
+                }
+                RemoteMessage::HelloAck(acknowledgement) => {
+                    self.peer_protocol_minor = Some(acknowledgement.protocol.minor);
+                }
+                _ => {}
+            }
+            messages.push(message);
             consumed = frame_end;
         }
 
@@ -916,7 +972,11 @@ fn decode_json<T: DeserializeOwned>(kind: u8, payload: &[u8]) -> Result<T, Remot
     })
 }
 
-fn decode_message(kind: u8, payload: &[u8]) -> Result<RemoteMessage, RemoteCodecError> {
+fn decode_message(
+    kind: u8,
+    payload: &[u8],
+    peer_protocol_minor: Option<u16>,
+) -> Result<RemoteMessage, RemoteCodecError> {
     if kind <= FrameType::Modes as u8 {
         return Ok(RemoteMessage::Terminal(Frame::new(
             FrameType::try_from(kind).map_err(|_| RemoteCodecError::UnknownMessageType(kind))?,
@@ -935,15 +995,24 @@ fn decode_message(kind: u8, payload: &[u8]) -> Result<RemoteMessage, RemoteCodec
             Ok(RemoteMessage::HelloAck(value))
         }
         KIND_FULL_SNAPSHOT => {
-            if payload.len() < FULL_SNAPSHOT_FIXED_BYTES {
+            let has_extended_modes =
+                peer_protocol_minor.unwrap_or(PROTOCOL_MINOR) >= EXTENDED_INPUT_MODES_MINOR;
+            let minimum_bytes = LEGACY_SNAPSHOT_FIXED_BYTES + usize::from(has_extended_modes);
+            if payload.len() < minimum_bytes {
                 return Err(RemoteCodecError::InvalidFullSnapshot(format!(
-                    "need at least {FULL_SNAPSHOT_FIXED_BYTES} bytes, got {}",
+                    "need at least {minimum_bytes} bytes, got {}",
                     payload.len()
                 )));
             }
             let sequence = u64::from_be_bytes(payload[..8].try_into().expect("length checked"));
             let modes = payload[8];
-            let grid = GridUpdate::decode(&payload[FULL_SNAPSHOT_FIXED_BYTES..])?;
+            let grid_end = payload.len() - usize::from(has_extended_modes);
+            let extended_modes = if has_extended_modes {
+                payload[grid_end]
+            } else {
+                0
+            };
+            let grid = GridUpdate::decode(&payload[LEGACY_SNAPSHOT_FIXED_BYTES..grid_end])?;
             validate_grid_update(&grid)?;
             if !grid.is_full_snapshot {
                 return Err(RemoteCodecError::InvalidFullSnapshot(
@@ -953,21 +1022,37 @@ fn decode_message(kind: u8, payload: &[u8]) -> Result<RemoteMessage, RemoteCodec
             Ok(RemoteMessage::FullSnapshot(FullSnapshot {
                 sequence,
                 alt_screen: modes & 1 != 0,
+                application_cursor_keys: modes & 8 != 0,
                 bracketed_paste: modes & 2 != 0,
                 mouse_reporting: modes & 4 != 0,
+                mouse_sgr: modes & 16 != 0,
+                mouse_utf8: modes & 32 != 0,
+                mouse_drag: modes & 64 != 0,
+                mouse_motion: modes & 128 != 0,
+                alternate_scroll: extended_modes & 1 != 0,
+                focus_reporting: extended_modes & 2 != 0,
                 grid,
             }))
         }
         KIND_GRID_DELTA => {
-            if payload.len() < 9 {
+            let has_extended_modes =
+                peer_protocol_minor.unwrap_or(PROTOCOL_MINOR) >= EXTENDED_INPUT_MODES_MINOR;
+            let minimum_bytes = LEGACY_SNAPSHOT_FIXED_BYTES + usize::from(has_extended_modes);
+            if payload.len() < minimum_bytes {
                 return Err(RemoteCodecError::InvalidFullSnapshot(format!(
-                    "grid delta needs at least 8 bytes, got {}",
+                    "grid delta needs at least {minimum_bytes} bytes, got {}",
                     payload.len()
                 )));
             }
             let sequence = u64::from_be_bytes(payload[..8].try_into().expect("length checked"));
             let modes = payload[8];
-            let grid = GridUpdate::decode(&payload[9..])?;
+            let grid_end = payload.len() - usize::from(has_extended_modes);
+            let extended_modes = if has_extended_modes {
+                payload[grid_end]
+            } else {
+                0
+            };
+            let grid = GridUpdate::decode(&payload[LEGACY_SNAPSHOT_FIXED_BYTES..grid_end])?;
             validate_grid_update(&grid)?;
             if grid.is_full_snapshot {
                 return Err(RemoteCodecError::InvalidFullSnapshot(
@@ -977,8 +1062,15 @@ fn decode_message(kind: u8, payload: &[u8]) -> Result<RemoteMessage, RemoteCodec
             Ok(RemoteMessage::GridDelta(GridDelta {
                 sequence,
                 alt_screen: modes & 1 != 0,
+                application_cursor_keys: modes & 8 != 0,
                 bracketed_paste: modes & 2 != 0,
                 mouse_reporting: modes & 4 != 0,
+                mouse_sgr: modes & 16 != 0,
+                mouse_utf8: modes & 32 != 0,
+                mouse_drag: modes & 64 != 0,
+                mouse_motion: modes & 128 != 0,
+                alternate_scroll: extended_modes & 1 != 0,
+                focus_reporting: extended_modes & 2 != 0,
                 grid,
             }))
         }
@@ -1087,6 +1179,31 @@ mod tests {
     }
 
     #[test]
+    fn phase_one_requires_complete_terminal_input_modes() {
+        assert_eq!(
+            ProtocolVersion::CURRENT,
+            ProtocolVersion {
+                major: PROTOCOL_MAJOR,
+                minor: PROTOCOL_MINOR,
+            }
+        );
+        assert_eq!(PROTOCOL_MINOR, 5);
+        for required in [
+            RemoteCapability::TerminalInputModes,
+            RemoteCapability::TerminalMouseModes,
+        ] {
+            assert!(
+                PHASE_ONE_HOLDER_CAPABILITIES.contains(&required),
+                "{required:?} must be required of every Holder attach"
+            );
+            assert!(
+                PHASE_ONE_HELPER_CAPABILITIES.contains(&required),
+                "{required:?} must be required of every Helper"
+            );
+        }
+    }
+
+    #[test]
     fn directory_requests_accept_only_normalized_absolute_or_home_paths() {
         for valid in ["/", "/srv/app", "~", "~/code"] {
             assert!(
@@ -1112,8 +1229,15 @@ mod tests {
         FullSnapshot {
             sequence: 42,
             alt_screen: true,
+            application_cursor_keys: true,
             bracketed_paste: true,
-            mouse_reporting: false,
+            mouse_reporting: true,
+            mouse_sgr: true,
+            mouse_utf8: false,
+            mouse_drag: true,
+            mouse_motion: false,
+            alternate_scroll: true,
+            focus_reporting: true,
             grid: GridUpdate {
                 cols: 2,
                 rows: 1,
@@ -1163,6 +1287,37 @@ mod tests {
     }
 
     #[test]
+    fn protocol_four_snapshots_remain_decodable_for_live_holders() {
+        let message = RemoteMessage::FullSnapshot(snapshot());
+        let mut encoded = RemoteCodec::encode(&message).expect("encode");
+        let payload_length =
+            u32::from_be_bytes(encoded[1..HEADER_BYTES].try_into().unwrap()) as usize;
+        let payload = &encoded[HEADER_BYTES..HEADER_BYTES + payload_length];
+        assert_eq!(
+            GridUpdate::decode(&payload[LEGACY_SNAPSHOT_FIXED_BYTES..])
+                .expect("a 1.4 reader ignores the trailing extension"),
+            snapshot().grid
+        );
+        // Protocol 1.4 carried only the primary mode byte. Keep the message
+        // kind/sequence/grid identical while removing the 1.5 extension.
+        assert_eq!(encoded.pop(), Some(3));
+        let payload_length = u32::try_from(payload_length - 1).unwrap();
+        encoded[1..HEADER_BYTES].copy_from_slice(&payload_length.to_be_bytes());
+
+        let mut expected = snapshot();
+        expected.alternate_scroll = false;
+        expected.focus_reporting = false;
+        let mut codec = RemoteCodec {
+            peer_protocol_minor: Some(4),
+            ..RemoteCodec::default()
+        };
+        assert_eq!(
+            codec.feed(&encoded).expect("decode legacy snapshot"),
+            vec![RemoteMessage::FullSnapshot(expected)]
+        );
+    }
+
+    #[test]
     fn grid_delta_round_trips_with_its_sequence() {
         let mut grid = snapshot().grid;
         grid.is_full_snapshot = false;
@@ -1170,8 +1325,15 @@ mod tests {
         let message = RemoteMessage::GridDelta(GridDelta {
             sequence: 43,
             alt_screen: true,
+            application_cursor_keys: true,
             bracketed_paste: true,
-            mouse_reporting: false,
+            mouse_reporting: true,
+            mouse_sgr: false,
+            mouse_utf8: true,
+            mouse_drag: false,
+            mouse_motion: true,
+            alternate_scroll: false,
+            focus_reporting: true,
             grid,
         });
         let encoded = RemoteCodec::encode(&message).expect("encode");
@@ -1232,6 +1394,7 @@ mod tests {
         payload.extend_from_slice(&oversized.sequence.to_be_bytes());
         payload.push(0);
         payload.extend_from_slice(&oversized.grid.encode().expect("raw grid encoding"));
+        payload.push(0);
         let mut frame = vec![KIND_FULL_SNAPSHOT];
         frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
         frame.extend_from_slice(&payload);

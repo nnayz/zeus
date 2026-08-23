@@ -974,7 +974,7 @@ mod tests {
         let target = RemoteTarget::MacosAarch64;
         let artifact_path = temporary.path().join("zeus-remote-fixture");
         let artifact_script = format!(
-            "#!/bin/sh\ncase \"$1\" in\nprobe) printf '%s\\n' '{{\"protocol\":{{\"major\":1,\"minor\":2}},\"buildId\":\"test-build\",\"artifactSha256\":\"'$TEST_ARTIFACT_SHA'\",\"target\":\"{}\",\"os\":\"test\",\"arch\":\"test\",\"supported\":true,\"holderAvailable\":true,\"capabilities\":[\"full-snapshot\",\"incremental-grid\",\"process-exit\",\"signal\",\"controller-lease\",\"scrollback\",\"session-management\",\"environment-capture\",\"directory-list\",\"persistence-probe\",\"atomic-activation\"]}}';;\nactivate) final=$(dirname \"$0\")/zeus-remote; ln \"$0\" \"$final\" 2>/dev/null || true; rm -f \"$0\"; exec \"$final\" probe --format=json;;\n*) exit 64;;\nesac\n",
+            "#!/bin/sh\ncase \"$1\" in\nprobe) printf '%s\\n' '{{\"protocol\":{{\"major\":1,\"minor\":5}},\"buildId\":\"test-build\",\"artifactSha256\":\"'$TEST_ARTIFACT_SHA'\",\"target\":\"{}\",\"os\":\"test\",\"arch\":\"test\",\"supported\":true,\"holderAvailable\":true,\"capabilities\":[\"full-snapshot\",\"incremental-grid\",\"process-exit\",\"signal\",\"controller-lease\",\"scrollback\",\"session-management\",\"environment-capture\",\"directory-list\",\"persistence-probe\",\"atomic-activation\",\"terminal-input-modes\",\"terminal-mouse-modes\"]}}';;\nactivate) final=$(dirname \"$0\")/zeus-remote; ln \"$0\" \"$final\" 2>/dev/null || true; rm -f \"$0\"; exec \"$final\" probe --format=json;;\n*) exit 64;;\nesac\n",
             target.artifact_name()
         );
         fs::write(&artifact_path, artifact_script).expect("artifact");

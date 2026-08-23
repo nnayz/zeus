@@ -1024,16 +1024,30 @@ impl Holder {
             self.queue(RemoteMessage::FullSnapshot(FullSnapshot {
                 sequence: self.state.snapshot_sequence,
                 alt_screen: self.screen.is_alt_screen(),
+                application_cursor_keys: self.screen.application_cursor_keys(),
                 bracketed_paste: self.screen.bracketed_paste(),
                 mouse_reporting: self.screen.mouse_reporting(),
+                mouse_sgr: self.screen.mouse_sgr(),
+                mouse_utf8: self.screen.mouse_utf8(),
+                mouse_drag: self.screen.mouse_drag(),
+                mouse_motion: self.screen.mouse_motion(),
+                alternate_scroll: self.screen.alternate_scroll(),
+                focus_reporting: self.screen.focus_reporting(),
                 grid,
             }))?;
         } else {
             self.queue(RemoteMessage::GridDelta(GridDelta {
                 sequence: self.state.snapshot_sequence,
                 alt_screen: self.screen.is_alt_screen(),
+                application_cursor_keys: self.screen.application_cursor_keys(),
                 bracketed_paste: self.screen.bracketed_paste(),
                 mouse_reporting: self.screen.mouse_reporting(),
+                mouse_sgr: self.screen.mouse_sgr(),
+                mouse_utf8: self.screen.mouse_utf8(),
+                mouse_drag: self.screen.mouse_drag(),
+                mouse_motion: self.screen.mouse_motion(),
+                alternate_scroll: self.screen.alternate_scroll(),
+                focus_reporting: self.screen.focus_reporting(),
                 grid,
             }))?;
         }
@@ -1091,8 +1105,15 @@ impl Holder {
         connection.queue(RemoteMessage::FullSnapshot(FullSnapshot {
             sequence: self.state.snapshot_sequence,
             alt_screen: self.screen.is_alt_screen(),
+            application_cursor_keys: self.screen.application_cursor_keys(),
             bracketed_paste: self.screen.bracketed_paste(),
             mouse_reporting: self.screen.mouse_reporting(),
+            mouse_sgr: self.screen.mouse_sgr(),
+            mouse_utf8: self.screen.mouse_utf8(),
+            mouse_drag: self.screen.mouse_drag(),
+            mouse_motion: self.screen.mouse_motion(),
+            alternate_scroll: self.screen.alternate_scroll(),
+            focus_reporting: self.screen.focus_reporting(),
             grid: self.screen.full_snapshot(),
         }))
     }
@@ -1432,8 +1453,15 @@ mod tests {
             .queue(RemoteMessage::GridDelta(GridDelta {
                 sequence: 7,
                 alt_screen: false,
+                application_cursor_keys: false,
                 bracketed_paste: false,
                 mouse_reporting: false,
+                mouse_sgr: false,
+                mouse_utf8: false,
+                mouse_drag: false,
+                mouse_motion: false,
+                alternate_scroll: false,
+                focus_reporting: false,
                 grid: GridUpdate {
                     cols: 1,
                     rows: 1,

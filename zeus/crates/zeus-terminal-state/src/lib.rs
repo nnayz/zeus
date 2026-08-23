@@ -21,6 +21,7 @@ use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::{Cell, Flags};
 use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor, Rgb};
+use zeus_proto::frames::TerminalModes;
 use zeus_proto::grid::{ChangedRow, GridCell, GridRowCodec, GridUpdate, TermColor, TermStyle};
 
 /// Receiver-side authority for a remote terminal stream. A mirror accepts a
@@ -36,9 +37,7 @@ pub struct GridMirror {
     cursor_row: u16,
     cursor_visible: bool,
     sequence: Option<u64>,
-    alt_screen: bool,
-    bracketed_paste: bool,
-    mouse_reporting: bool,
+    modes: TerminalModes,
 }
 
 impl GridMirror {
@@ -51,9 +50,7 @@ impl GridMirror {
         &mut self,
         sequence: u64,
         grid: &GridUpdate,
-        alt_screen: bool,
-        bracketed_paste: bool,
-        mouse_reporting: bool,
+        modes: TerminalModes,
     ) -> Result<(), MirrorError> {
         if !grid.is_full_snapshot {
             return Err(MirrorError::SnapshotRequired);
@@ -62,9 +59,7 @@ impl GridMirror {
         grid.apply(&mut self.cells);
         self.update_metadata(grid);
         self.sequence = Some(sequence);
-        self.alt_screen = alt_screen;
-        self.bracketed_paste = bracketed_paste;
-        self.mouse_reporting = mouse_reporting;
+        self.modes = modes;
         Ok(())
     }
 
@@ -72,9 +67,7 @@ impl GridMirror {
         &mut self,
         sequence: u64,
         grid: &GridUpdate,
-        alt_screen: bool,
-        bracketed_paste: bool,
-        mouse_reporting: bool,
+        modes: TerminalModes,
     ) -> Result<(), MirrorError> {
         let Some(previous) = self.sequence else {
             return Err(MirrorError::SnapshotRequired);
@@ -95,9 +88,7 @@ impl GridMirror {
         grid.apply(&mut self.cells);
         self.update_metadata(grid);
         self.sequence = Some(sequence);
-        self.alt_screen = alt_screen;
-        self.bracketed_paste = bracketed_paste;
-        self.mouse_reporting = mouse_reporting;
+        self.modes = modes;
         Ok(())
     }
 
@@ -130,8 +121,8 @@ impl GridMirror {
     }
 
     #[must_use]
-    pub const fn modes(&self) -> (bool, bool, bool) {
-        (self.alt_screen, self.bracketed_paste, self.mouse_reporting)
+    pub const fn modes(&self) -> TerminalModes {
+        self.modes
     }
 
     #[must_use]
@@ -395,6 +386,24 @@ impl HeadlessScreen {
             .contains(alacritty_terminal::term::TermMode::BRACKETED_PASTE)
     }
 
+    /// Whether the child enabled DEC application cursor keys (DECCKM).
+    /// Unmodified arrows, Home, and End must use SS3 while this is active.
+    pub fn application_cursor_keys(&self) -> bool {
+        self.term.mode().contains(TermMode::APP_CURSOR)
+    }
+
+    /// Whether wheel input on the alternate screen is translated into
+    /// application-cursor up/down keys (DEC private mode 1007).
+    pub fn alternate_scroll(&self) -> bool {
+        self.term.mode().contains(TermMode::ALTERNATE_SCROLL)
+    }
+
+    /// Whether the child requested focus-in/focus-out reports (DEC private
+    /// mode 1004).
+    pub fn focus_reporting(&self) -> bool {
+        self.term.mode().contains(TermMode::FOCUS_IN_OUT)
+    }
+
     /// The current grid geometry.
     pub fn size(&self) -> (usize, usize) {
         (self.geometry.cols, self.geometry.rows)
@@ -403,6 +412,26 @@ impl HeadlessScreen {
     /// Whether the child asked for mouse reporting (any flavor).
     pub fn mouse_reporting(&self) -> bool {
         self.term.mode().intersects(TermMode::MOUSE_MODE)
+    }
+
+    /// Whether mouse reports use the modern SGR coordinate format.
+    pub fn mouse_sgr(&self) -> bool {
+        self.term.mode().contains(TermMode::SGR_MOUSE)
+    }
+
+    /// Whether legacy mouse reports use UTF-8 extended coordinates.
+    pub fn mouse_utf8(&self) -> bool {
+        self.term.mode().contains(TermMode::UTF8_MOUSE)
+    }
+
+    /// Whether the child requested button-drag motion reports.
+    pub fn mouse_drag(&self) -> bool {
+        self.term.mode().contains(TermMode::MOUSE_DRAG)
+    }
+
+    /// Whether the child requested all pointer motion reports.
+    pub fn mouse_motion(&self) -> bool {
+        self.term.mode().contains(TermMode::MOUSE_MOTION)
     }
 
     /// Cursor (col, row, visible) without touching cell data.
@@ -519,9 +548,7 @@ impl HeadlessScreen {
         &mut self,
         history: &[Vec<GridCell>],
         update: &GridUpdate,
-        alt_screen: bool,
-        bracketed_paste: bool,
-        mouse_reporting: bool,
+        modes: TerminalModes,
     ) -> bool {
         let cols = self.geometry.cols;
         let rows = self.geometry.rows;
@@ -554,7 +581,7 @@ impl HeadlessScreen {
         }
 
         let mut bytes = Vec::with_capacity(cols * rows * 2);
-        if alt_screen {
+        if modes.alt_screen {
             bytes.extend_from_slice(b"\x1b[?1049h");
         }
         bytes.extend_from_slice(b"\x1b[H\x1b[2J");
@@ -590,11 +617,22 @@ impl HeadlessScreen {
         }
 
         bytes.extend_from_slice(b"\x1b[0m");
-        if bracketed_paste {
+        if modes.application_cursor_keys {
+            bytes.extend_from_slice(b"\x1b[?1h");
+        }
+        if modes.bracketed_paste {
             bytes.extend_from_slice(b"\x1b[?2004h");
         }
-        if mouse_reporting {
+        if modes.mouse_reporting {
             bytes.extend_from_slice(b"\x1b[?1000h\x1b[?1006h");
+        }
+        bytes.extend_from_slice(if modes.alternate_scroll {
+            b"\x1b[?1007h"
+        } else {
+            b"\x1b[?1007l"
+        });
+        if modes.focus_reporting {
+            bytes.extend_from_slice(b"\x1b[?1004h");
         }
         bytes.extend_from_slice(if update.cursor_visible {
             b"\x1b[?25h"
@@ -1069,19 +1107,36 @@ mod tests {
     #[test]
     fn a_restored_snapshot_reproduces_the_screen_and_modes() {
         let mut original = HeadlessScreen::new(40, 10);
-        original.feed(b"\x1b[?2004h\x1b[?1000h\x1b[?1006h");
+        original.feed(b"\x1b[?1h\x1b[?2004h\x1b[?1000h\x1b[?1006h\x1b[?1007h\x1b[?1004h");
         original.feed(b"\x1b[1;31mred alert\x1b[0m\r\nplain line\r\n");
         original.feed("wide: ▶ done\r\n".as_bytes());
         let snapshot = original.full_snapshot();
 
         let mut restored = HeadlessScreen::new(40, 10);
         assert!(
-            restored.restore(&[], &snapshot, false, true, true),
+            restored.restore(
+                &[],
+                &snapshot,
+                TerminalModes {
+                    application_cursor_keys: true,
+                    bracketed_paste: true,
+                    mouse_reporting: true,
+                    alternate_scroll: true,
+                    focus_reporting: true,
+                    ..TerminalModes::default()
+                }
+            ),
             "restorable"
         );
         assert_eq!(restored.lines(), original.lines());
         assert!(restored.bracketed_paste(), "bracketed paste mode carried");
+        assert!(
+            restored.application_cursor_keys(),
+            "application cursor mode carried"
+        );
         assert!(restored.mouse_reporting(), "mouse mode carried");
+        assert!(restored.alternate_scroll(), "alternate scroll mode carried");
+        assert!(restored.focus_reporting(), "focus reporting mode carried");
         assert!(!restored.is_alt_screen());
         assert_eq!(restored.cursor(), original.cursor());
         // Attribute fidelity, not just text: the restored grid's cells match.
@@ -1096,7 +1151,7 @@ mod tests {
 
         let mut smaller = HeadlessScreen::new(39, 10);
         assert!(
-            !smaller.restore(&[], &snapshot, false, false, false),
+            !smaller.restore(&[], &snapshot, TerminalModes::default()),
             "a checkpoint from another geometry is a cache miss"
         );
     }
@@ -1114,7 +1169,7 @@ mod tests {
 
         let mut restored = HeadlessScreen::new(12, 2);
         assert!(
-            restored.restore(&history, &snapshot, false, false, false),
+            restored.restore(&history, &snapshot, TerminalModes::default()),
             "restorable"
         );
         assert_eq!(restored.scrollback(), original.scrollback());
@@ -1142,11 +1197,32 @@ mod tests {
         let snapshot = screen.full_snapshot();
         let mut mirror = GridMirror::new();
         mirror
-            .apply_snapshot(9, &snapshot, false, true, false)
+            .apply_snapshot(
+                9,
+                &snapshot,
+                TerminalModes {
+                    application_cursor_keys: true,
+                    bracketed_paste: true,
+                    mouse_reporting: true,
+                    mouse_sgr: true,
+                    mouse_drag: true,
+                    ..TerminalModes::default()
+                },
+            )
             .expect("snapshot");
         assert_eq!(mirror.sequence(), Some(9));
         assert_eq!(mirror.size(), (8, 2));
-        assert_eq!(mirror.modes(), (false, true, false));
+        assert_eq!(
+            mirror.modes(),
+            TerminalModes {
+                application_cursor_keys: true,
+                bracketed_paste: true,
+                mouse_reporting: true,
+                mouse_sgr: true,
+                mouse_drag: true,
+                ..TerminalModes::default()
+            }
+        );
 
         let mut delta_source = HeadlessScreen::new(8, 2);
         delta_source.feed(b"one");
@@ -1154,11 +1230,30 @@ mod tests {
         delta_source.feed(b" two");
         let delta = delta_source.grid_update(false);
         mirror
-            .apply_delta(10, &delta, true, false, true)
+            .apply_delta(
+                10,
+                &delta,
+                TerminalModes {
+                    alt_screen: true,
+                    mouse_reporting: true,
+                    mouse_utf8: true,
+                    mouse_motion: true,
+                    ..TerminalModes::default()
+                },
+            )
             .expect("contiguous delta");
-        assert_eq!(mirror.modes(), (true, false, true));
+        assert_eq!(
+            mirror.modes(),
+            TerminalModes {
+                alt_screen: true,
+                mouse_reporting: true,
+                mouse_utf8: true,
+                mouse_motion: true,
+                ..TerminalModes::default()
+            }
+        );
         assert!(matches!(
-            mirror.apply_delta(12, &delta, false, false, false),
+            mirror.apply_delta(12, &delta, TerminalModes::default()),
             Err(MirrorError::SequenceGap {
                 expected: 11,
                 actual: 12

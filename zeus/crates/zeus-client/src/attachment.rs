@@ -17,7 +17,7 @@ use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, MissedTickBehavior};
-use zeus_proto::frames::{Frame, FrameCodec, FrameType};
+use zeus_proto::frames::{Frame, FrameCodec, FrameType, TerminalModes};
 use zeus_proto::grid::GridUpdate;
 use zeus_proto::methods::{AttachRequest, ClientRole};
 use zeus_proto::model::SessionId;
@@ -31,10 +31,7 @@ const DEAD_AFTER: Duration = Duration::from_secs(30);
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TerminalChunk {
     Grid(GridUpdate),
-    Modes {
-        alt_screen: bool,
-        mouse_reporting: bool,
-    },
+    Modes(TerminalModes),
     Pong,
 }
 
@@ -306,13 +303,8 @@ async fn process_incoming(
             chunks.send(TerminalChunk::Grid(update)).map_err(|_| ())?;
         }
         FrameType::Modes => {
-            let (alt_screen, mouse_reporting) = frame.modes_payload().ok_or(())?;
-            chunks
-                .send(TerminalChunk::Modes {
-                    alt_screen,
-                    mouse_reporting,
-                })
-                .map_err(|_| ())?;
+            let modes = frame.modes_payload().ok_or(())?;
+            chunks.send(TerminalChunk::Modes(modes)).map_err(|_| ())?;
         }
         FrameType::Ping => write_frame(stream, &Frame::pong()).await.map_err(|_| ())?,
         FrameType::Pong => chunks.send(TerminalChunk::Pong).map_err(|_| ())?,

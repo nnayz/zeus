@@ -65,6 +65,19 @@ impl TerminalSelection {
         }
     }
 
+    /// Extends a simple selection without moving its existing anchor.
+    ///
+    /// Shift-click with no selection starts an empty selection at the clicked
+    /// point, matching the escape-hatch behavior used by terminals while an
+    /// application owns mouse reporting. A following drag can then extend it.
+    pub fn extend_to(&mut self, point: SelectionPoint) {
+        if self.anchor.is_some() {
+            self.head = Some(point);
+        } else {
+            self.begin(point);
+        }
+    }
+
     pub fn set_from_window(
         &mut self,
         viewport: &ScrollbackViewport,
@@ -115,6 +128,30 @@ impl TerminalSelection {
         self.head = Some(SelectionPoint {
             row: absolute_row,
             col: end,
+        });
+    }
+
+    /// Selects one complete terminal row. The head is the exclusive column
+    /// after the final cell, so extraction and paint spans share exact bounds.
+    pub fn select_line(
+        &mut self,
+        viewport: &ScrollbackViewport,
+        buffer: &GridBuffer,
+        window_row: usize,
+    ) {
+        let cols = usize::from(buffer.cols);
+        if cols == 0 {
+            self.clear();
+            return;
+        }
+        let absolute_row = viewport.absolute_row(window_row);
+        self.anchor = Some(SelectionPoint {
+            row: absolute_row,
+            col: 0,
+        });
+        self.head = Some(SelectionPoint {
+            row: absolute_row,
+            col: cols,
         });
     }
 
@@ -308,5 +345,95 @@ mod tests {
         selection.select_word(&viewport, &buffer, 0, 6);
 
         assert_eq!(selection.selected_text(&viewport, &buffer), "two_three");
+    }
+
+    #[test]
+    fn shift_extension_moves_only_the_head_in_both_directions() {
+        let viewport = ScrollbackViewport::default();
+        let mut buffer = GridBuffer::new(8, 2);
+        buffer.cells = [row("abcdefgh", 8), row("ijklmnop", 8)].concat();
+
+        let forward_anchor = SelectionPoint { row: 0, col: 2 };
+        let mut forward = TerminalSelection::default();
+        forward.begin(forward_anchor);
+        forward.extend_to(SelectionPoint { row: 1, col: 3 });
+        assert_eq!(forward.anchor(), Some(forward_anchor));
+        assert_eq!(forward.head(), Some(SelectionPoint { row: 1, col: 3 }));
+        assert_eq!(forward.selected_text(&viewport, &buffer), "cdefgh\nijk");
+        assert_eq!(
+            forward.visible_spans(&viewport, 2, 8),
+            vec![
+                SelectionSpan {
+                    row: 0,
+                    start_col: 2,
+                    end_col_exclusive: 8,
+                },
+                SelectionSpan {
+                    row: 1,
+                    start_col: 0,
+                    end_col_exclusive: 3,
+                },
+            ]
+        );
+
+        let reverse_anchor = SelectionPoint { row: 1, col: 6 };
+        let mut reverse = TerminalSelection::default();
+        reverse.begin(reverse_anchor);
+        reverse.extend_to(SelectionPoint { row: 0, col: 4 });
+        assert_eq!(reverse.anchor(), Some(reverse_anchor));
+        assert_eq!(reverse.head(), Some(SelectionPoint { row: 0, col: 4 }));
+        assert_eq!(reverse.selected_text(&viewport, &buffer), "efgh\nijklmn");
+        assert_eq!(
+            reverse.visible_spans(&viewport, 2, 8),
+            vec![
+                SelectionSpan {
+                    row: 0,
+                    start_col: 4,
+                    end_col_exclusive: 8,
+                },
+                SelectionSpan {
+                    row: 1,
+                    start_col: 0,
+                    end_col_exclusive: 6,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn shift_extension_without_an_anchor_starts_a_drag_anchor() {
+        let point = SelectionPoint { row: 3, col: 5 };
+        let mut selection = TerminalSelection::default();
+        selection.extend_to(point);
+
+        assert_eq!(selection.anchor(), Some(point));
+        assert_eq!(selection.head(), Some(point));
+        assert_eq!(selection.range(), None);
+    }
+
+    #[test]
+    fn triple_click_selects_one_whole_row_with_an_exclusive_endpoint() {
+        let viewport = ScrollbackViewport::default();
+        let mut buffer = GridBuffer::new(8, 3);
+        buffer.cells = [row("first", 8), row("middle", 8), row("last", 8)].concat();
+        let mut selection = TerminalSelection::default();
+        selection.select_line(&viewport, &buffer, 1);
+
+        assert_eq!(
+            selection.range(),
+            Some(SelectionRange {
+                start: SelectionPoint { row: 1, col: 0 },
+                end: SelectionPoint { row: 1, col: 8 },
+            })
+        );
+        assert_eq!(selection.selected_text(&viewport, &buffer), "middle");
+        assert_eq!(
+            selection.visible_spans(&viewport, 3, 8),
+            vec![SelectionSpan {
+                row: 1,
+                start_col: 0,
+                end_col_exclusive: 8,
+            }]
+        );
     }
 }

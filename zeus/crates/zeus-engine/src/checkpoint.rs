@@ -20,7 +20,7 @@ use zeus_proto::grid::{GridCell, GridRowCodec, GridUpdate};
 // Version 1 persisted only the visible grid. Restoring it silently collapsed
 // every adopted session to at most one line of history, so it is deliberately
 // treated as a cache miss and rebuilt from the authoritative raw log.
-const CURRENT_VERSION: u64 = 2;
+const CURRENT_VERSION: u64 = 4;
 
 /// A decoded checkpoint, grid already validated.
 pub struct ScreenCheckpoint {
@@ -33,8 +33,11 @@ pub struct ScreenCheckpoint {
     /// checkpoint boundary is still recognized.
     pub marker_buffer: Vec<u8>,
     pub alt_screen: bool,
+    pub application_cursor_keys: bool,
     pub bracketed_paste: bool,
     pub mouse_reporting: bool,
+    pub alternate_scroll: bool,
+    pub focus_reporting: bool,
 }
 
 impl ScreenCheckpoint {
@@ -74,8 +77,11 @@ impl ScreenCheckpoint {
             grid,
             marker_buffer: as_data(dict.get("markerBuffer")?)?.to_vec(),
             alt_screen: dict.get("altScreen")?.as_boolean()?,
+            application_cursor_keys: dict.get("applicationCursorKeys")?.as_boolean()?,
             bracketed_paste: dict.get("bracketedPaste")?.as_boolean()?,
             mouse_reporting: dict.get("mouseReporting")?.as_boolean()?,
+            alternate_scroll: dict.get("alternateScroll")?.as_boolean()?,
+            focus_reporting: dict.get("focusReporting")?.as_boolean()?,
         })
     }
 
@@ -115,12 +121,24 @@ impl ScreenCheckpoint {
         );
         dict.insert("altScreen".into(), plist::Value::Boolean(self.alt_screen));
         dict.insert(
+            "applicationCursorKeys".into(),
+            plist::Value::Boolean(self.application_cursor_keys),
+        );
+        dict.insert(
             "bracketedPaste".into(),
             plist::Value::Boolean(self.bracketed_paste),
         );
         dict.insert(
             "mouseReporting".into(),
             plist::Value::Boolean(self.mouse_reporting),
+        );
+        dict.insert(
+            "alternateScroll".into(),
+            plist::Value::Boolean(self.alternate_scroll),
+        );
+        dict.insert(
+            "focusReporting".into(),
+            plist::Value::Boolean(self.focus_reporting),
         );
 
         let temp = path.with_extension("plist.tmp");
@@ -159,8 +177,11 @@ mod tests {
             },
             marker_buffer: vec![0x1b, b']'],
             alt_screen: true,
+            application_cursor_keys: true,
             bracketed_paste: false,
             mouse_reporting: true,
+            alternate_scroll: true,
+            focus_reporting: true,
         }
     }
 
@@ -176,8 +197,11 @@ mod tests {
         assert_eq!(loaded.grid, sample().grid);
         assert_eq!(loaded.marker_buffer, vec![0x1b, b']']);
         assert!(loaded.alt_screen);
+        assert!(loaded.application_cursor_keys);
         assert!(!loaded.bracketed_paste);
         assert!(loaded.mouse_reporting);
+        assert!(loaded.alternate_scroll);
+        assert!(loaded.focus_reporting);
     }
 
     #[test]
@@ -223,15 +247,18 @@ mod tests {
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>version</key><integer>2</integer>
+    <key>version</key><integer>4</integer>
     <key>logOffset</key><integer>777</integer>
     <key>gridPayload</key><data>{base64}</data>
     <key>historyRowCount</key><integer>1</integer>
     <key>historyPayload</key><data>{history_base64}</data>
     <key>markerBuffer</key><data></data>
     <key>altScreen</key><false/>
+    <key>applicationCursorKeys</key><true/>
     <key>bracketedPaste</key><true/>
     <key>mouseReporting</key><false/>
+    <key>alternateScroll</key><true/>
+    <key>focusReporting</key><true/>
 </dict>
 </plist>"#
         );
@@ -252,6 +279,9 @@ mod tests {
         assert_eq!(loaded.history, sample().history);
         assert_eq!(loaded.grid, sample().grid);
         assert!(loaded.bracketed_paste);
+        assert!(loaded.application_cursor_keys);
+        assert!(loaded.alternate_scroll);
+        assert!(loaded.focus_reporting);
     }
 
     #[test]
@@ -274,7 +304,7 @@ mod tests {
             .expect("read back")
             .into_dictionary()
             .expect("dict");
-        dict.insert("version".into(), plist::Value::Integer(3.into()));
+        dict.insert("version".into(), plist::Value::Integer(5.into()));
         plist::Value::Dictionary(dict)
             .to_file_binary(&path)
             .expect("rewrite");
@@ -287,15 +317,18 @@ mod tests {
         future.grid.changed_rows.clear();
         future.grid.is_full_snapshot = true;
         let mut dict = plist::Dictionary::new();
-        dict.insert("version".into(), plist::Value::Integer(2.into()));
+        dict.insert("version".into(), plist::Value::Integer(4.into()));
         dict.insert("logOffset".into(), plist::Value::Integer(1.into()));
         dict.insert("gridPayload".into(), plist::Value::Data(vec![0xde, 0xad]));
         dict.insert("historyRowCount".into(), plist::Value::Integer(0.into()));
         dict.insert("historyPayload".into(), plist::Value::Data(Vec::new()));
         dict.insert("markerBuffer".into(), plist::Value::Data(Vec::new()));
         dict.insert("altScreen".into(), plist::Value::Boolean(false));
+        dict.insert("applicationCursorKeys".into(), plist::Value::Boolean(false));
         dict.insert("bracketedPaste".into(), plist::Value::Boolean(false));
         dict.insert("mouseReporting".into(), plist::Value::Boolean(false));
+        dict.insert("alternateScroll".into(), plist::Value::Boolean(false));
+        dict.insert("focusReporting".into(), plist::Value::Boolean(false));
         plist::Value::Dictionary(dict)
             .to_file_binary(&path)
             .expect("write");

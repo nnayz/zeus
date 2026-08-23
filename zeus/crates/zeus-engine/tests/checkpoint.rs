@@ -238,8 +238,11 @@ fn adoption_seeds_from_the_checkpoint_not_the_raw_tail() {
         grid: synthetic_grid("PAINTED-FROM-CHECKPOINT"),
         marker_buffer: Vec::new(),
         alt_screen: false,
+        application_cursor_keys: false,
         bracketed_paste: false,
         mouse_reporting: false,
+        alternate_scroll: false,
+        focus_reporting: false,
     }
     .write_atomically(&checkpoint_path(&logs, "s_ad"))
     .expect("plant checkpoint");
@@ -311,8 +314,11 @@ fn a_stale_checkpoint_falls_back_to_tail_replay() {
         grid,
         marker_buffer: Vec::new(),
         alt_screen: false,
+        application_cursor_keys: false,
         bracketed_paste: false,
         mouse_reporting: false,
+        alternate_scroll: false,
+        focus_reporting: false,
     }
     .write_atomically(&checkpoint_path(&logs, "s_fb"))
     .expect("plant checkpoint");

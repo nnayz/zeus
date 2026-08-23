@@ -52,6 +52,25 @@ pub struct Frame {
     pub payload: Vec<u8>,
 }
 
+/// Terminal state that changes how an attached client encodes input.
+///
+/// The first byte preserves the original local data-channel layout. Extended
+/// modes use a second byte so older readers can continue decoding the flags
+/// they understand.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TerminalModes {
+    pub alt_screen: bool,
+    pub mouse_reporting: bool,
+    pub application_cursor_keys: bool,
+    pub bracketed_paste: bool,
+    pub mouse_sgr: bool,
+    pub mouse_utf8: bool,
+    pub mouse_drag: bool,
+    pub mouse_motion: bool,
+    pub alternate_scroll: bool,
+    pub focus_reporting: bool,
+}
+
 impl Frame {
     #[must_use]
     pub fn new(frame_type: FrameType, payload: Vec<u8>) -> Self {
@@ -118,9 +137,17 @@ impl Frame {
     }
 
     #[must_use]
-    pub fn modes(alt_screen: bool, mouse_reporting: bool) -> Self {
-        let bits = u8::from(alt_screen) | (u8::from(mouse_reporting) << 1);
-        Self::new(FrameType::Modes, vec![bits])
+    pub fn modes(modes: TerminalModes) -> Self {
+        let primary = u8::from(modes.alt_screen)
+            | (u8::from(modes.mouse_reporting) << 1)
+            | (u8::from(modes.application_cursor_keys) << 2)
+            | (u8::from(modes.bracketed_paste) << 3)
+            | (u8::from(modes.mouse_sgr) << 4)
+            | (u8::from(modes.mouse_utf8) << 5)
+            | (u8::from(modes.mouse_drag) << 6)
+            | (u8::from(modes.mouse_motion) << 7);
+        let extended = u8::from(modes.alternate_scroll) | (u8::from(modes.focus_reporting) << 1);
+        Self::new(FrameType::Modes, vec![primary, extended])
     }
 
     pub fn grid_payload(&self) -> Result<Option<GridUpdate>, GridCodecError> {
@@ -175,13 +202,25 @@ impl Frame {
     }
 
     #[must_use]
-    pub fn modes_payload(&self) -> Option<(bool, bool)> {
+    pub fn modes_payload(&self) -> Option<TerminalModes> {
         if self.frame_type != FrameType::Modes {
             return None;
         }
-        self.payload
-            .first()
-            .map(|bits| (bits & 1 != 0, bits & 2 != 0))
+        self.payload.first().map(|primary| {
+            let extended = self.payload.get(1).copied().unwrap_or_default();
+            TerminalModes {
+                alt_screen: primary & 1 != 0,
+                mouse_reporting: primary & 2 != 0,
+                application_cursor_keys: primary & 4 != 0,
+                bracketed_paste: primary & 8 != 0,
+                mouse_sgr: primary & 16 != 0,
+                mouse_utf8: primary & 32 != 0,
+                mouse_drag: primary & 64 != 0,
+                mouse_motion: primary & 128 != 0,
+                alternate_scroll: extended & 1 != 0,
+                focus_reporting: extended & 2 != 0,
+            }
+        })
     }
 
     fn offset_frame(frame_type: FrameType, offset: u64) -> Self {
@@ -357,11 +396,33 @@ mod tests {
         assert_eq!(scroll.payload, [1, 2, 3, 4, 5, 6, 7]);
         assert_eq!(scroll.scroll_payload(), Some((1, 0x0203, 0x0405, 0x0607)));
 
-        for alt_screen in [false, true] {
-            for mouse_reporting in [false, true] {
-                let modes = Frame::modes(alt_screen, mouse_reporting);
-                assert_eq!(modes.modes_payload(), Some((alt_screen, mouse_reporting)));
-            }
+        for primary in u8::MIN..=u8::MAX {
+            let extended = primary.rotate_left(3) & 3;
+            let expected = TerminalModes {
+                alt_screen: primary & 1 != 0,
+                mouse_reporting: primary & 2 != 0,
+                application_cursor_keys: primary & 4 != 0,
+                bracketed_paste: primary & 8 != 0,
+                mouse_sgr: primary & 16 != 0,
+                mouse_utf8: primary & 32 != 0,
+                mouse_drag: primary & 64 != 0,
+                mouse_motion: primary & 128 != 0,
+                alternate_scroll: extended & 1 != 0,
+                focus_reporting: extended & 2 != 0,
+            };
+            let modes = Frame::modes(expected);
+            assert_eq!(modes.payload, [primary, extended]);
+            assert_eq!(modes.modes_payload(), Some(expected));
+
+            let legacy = Frame::new(FrameType::Modes, vec![primary]);
+            assert_eq!(
+                legacy.modes_payload(),
+                Some(TerminalModes {
+                    alternate_scroll: false,
+                    focus_reporting: false,
+                    ..expected
+                })
+            );
         }
         assert_eq!(Frame::ping().payload, Vec::<u8>::new());
         assert_eq!(Frame::pong().payload, Vec::<u8>::new());

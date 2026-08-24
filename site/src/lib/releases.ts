@@ -16,6 +16,19 @@ export const SECURITY_EMAIL = 'hi@nasrul.info';
 
 export const releases: Release[] = [
   {
+    version: '0.2.0',
+    date: '2026-08-24',
+    summary: [
+      'Terminal interaction now carries complete mouse tracking and input-mode state through local sessions, remote sessions, and reconnects. Full-screen TUIs receive application-cursor keys, bracketed paste, focus events, alternate scrolling, and click, drag, motion, SGR, and UTF-8 mouse reports consistently.',
+      'Terminal geometry now settles from the viewport instead of competing paint measurements, eliminating resize ping-pong and the resulting grid flicker.',
+      'MCP session creation now honors the configured default agent, and protected working-directory handling is stricter and more predictable.'
+    ],
+    unsigned: true,
+    github: `${GITHUB}/releases/tag/v0.2.0`,
+    dmg: `${GITHUB}/releases/download/v0.2.0/zeus-0.2.0-universal.dmg`,
+    zip: `${GITHUB}/releases/download/v0.2.0/zeus-0.2.0-universal.zip`
+  },
+  {
     version: '0.1.0',
     date: '2026-08-21',
     summary: [

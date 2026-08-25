@@ -5,6 +5,7 @@
 //! porcelain formats, literal pathspec rules, subprocess hardening, timeouts,
 //! and output limits stay local to this implementation.
 
+use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io::{self, Read, Write};
@@ -310,6 +311,54 @@ impl GitRepository {
         )?;
         ensure_success(output, "reading status")
             .and_then(|output| parse_status(&self.root, &output.stdout))
+    }
+
+    /// Returns the repository-relative paths Git currently ignores.
+    ///
+    /// File browsing batches a single directory through this seam so it uses
+    /// the same repository, subprocess hardening, literal path handling, and
+    /// ignore rules as Review. Tracked paths are intentionally not reported
+    /// by `check-ignore`, even if a later ignore rule happens to match them.
+    pub fn ignored_paths(&self, paths: &[PathBuf]) -> Result<HashSet<PathBuf>, GitReviewError> {
+        if paths.is_empty() {
+            return Ok(HashSet::new());
+        }
+        let paths = validate_paths(paths)?;
+        let mut input = Vec::new();
+        for path in paths {
+            // `check-ignore --stdin` does not accept Git's `literal`
+            // pathspec magic. A `./` prefix keeps a leading `:` or `!` in a
+            // filename from being interpreted as magic while remaining
+            // repository-relative and round-trippable below.
+            input.extend_from_slice(b"./");
+            #[cfg(unix)]
+            input.extend_from_slice(path.as_bytes());
+            #[cfg(not(unix))]
+            input.extend_from_slice(path.to_string_lossy().as_bytes());
+            input.push(0);
+        }
+        let output = run_git(
+            &self.root,
+            ["check-ignore", "-z", "--stdin"],
+            Some(&input),
+            "checking ignored paths",
+        )?;
+        // `check-ignore` exits 1 when none of the inputs are ignored. That is
+        // a successful empty answer, not a failed Git operation.
+        if !output.status.success() && output.status.code() != Some(1) {
+            return Err(output.failure("checking ignored paths"));
+        }
+        Ok(output
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter(|path| !path.is_empty())
+            .map(|path| path.strip_prefix(b"./").unwrap_or(path))
+            .map(path_from_bytes)
+            .collect())
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
     }
 
     /// Every requested path, plus the source of any staged rename whose

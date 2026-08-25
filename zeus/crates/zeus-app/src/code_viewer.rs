@@ -5,8 +5,9 @@
 //! line targeting, virtualization, and lightweight lexical color.
 
 use std::cell::Cell;
+use std::collections::HashSet;
 use std::ops::Range;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -23,6 +24,11 @@ use crate::code_intelligence::{
     CodeIntelligence, CodeIntelligenceError, SearchHit, SearchHitKind, SourceLine, SourceSnapshot,
     source_lines,
 };
+use crate::file_tree::{
+    ChangedSnapshot, FileTreeIntent, FileTreeMode, FileTreeModel, FileTreeWorkspace, TreeEntryKind,
+    VisibleTreeRow,
+};
+use crate::git_review::ChangeKind;
 use crate::macos::sf_symbols::{SymbolWeight, sf_symbol, sf_symbol_weighted};
 use crate::query_editor::{self, ClipboardEdit, Edit, LocalEdit, Motion, QueryEditor};
 use zeus_ui::{FloatingSurface, Ink, Metrics, Radius, SemanticColors, Typo};
@@ -32,12 +38,30 @@ use crate::code_intelligence::SourceTarget;
 
 const SOURCE_ROW_HEIGHT: f32 = 20.0;
 const SOURCE_GUTTER_WIDTH: f32 = 52.0;
+const FILE_TREE_HEIGHT: f32 = 226.0;
+const FILE_TREE_ROW_HEIGHT: f32 = 23.0;
+const MAX_DIRECTORY_LOADS: usize = 2;
 
 enum ViewerState {
     Empty,
     Loading { reference: String },
     Ready(Box<SourceDocument>),
     Error { reference: String, message: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum TreeWorkspaceState {
+    NoWorkspace,
+    Loading,
+    Ready,
+    Error(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ChangedTreeState {
+    Loading,
+    Ready { truncated: bool },
+    Unavailable(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -366,12 +390,29 @@ pub struct CodeViewer {
     focus: FocusHandle,
     workspace_cwd: Option<PathBuf>,
     intelligence: Option<Arc<CodeIntelligence>>,
+    tree_workspace: Option<Arc<FileTreeWorkspace>>,
+    tree_workspace_state: TreeWorkspaceState,
+    changed_tree_state: ChangedTreeState,
+    tree_model: FileTreeModel,
+    tree_focused: bool,
+    tree_query: QueryEditor,
+    tree_scroll: UniformListScrollHandle,
+    tree_generation: u64,
+    tree_directory_loads: usize,
+    tree_loading_directories: HashSet<PathBuf>,
+    tree_notice: Option<String>,
+    pending_tree_reference: Option<String>,
+    pending_tree_path: Option<PathBuf>,
+    pending_changed_snapshot: Option<ChangedSnapshot>,
+    pending_changed_message: Option<String>,
     state: ViewerState,
     scroll: UniformListScrollHandle,
     generation: u64,
     _load_task: Option<Task<()>>,
     _search_task: Option<Task<()>>,
     _save_task: Option<Task<()>>,
+    _tree_workspace_task: Option<Task<()>>,
+    _tree_reveal_task: Option<Task<()>>,
     search_generation: u64,
     picker_open: bool,
     query: QueryEditor,
@@ -401,12 +442,29 @@ impl CodeViewer {
             focus: cx.focus_handle(),
             workspace_cwd: None,
             intelligence: None,
+            tree_workspace: None,
+            tree_workspace_state: TreeWorkspaceState::NoWorkspace,
+            changed_tree_state: ChangedTreeState::Loading,
+            tree_model: FileTreeModel::default(),
+            tree_focused: false,
+            tree_query: QueryEditor::default(),
+            tree_scroll: UniformListScrollHandle::new(),
+            tree_generation: 0,
+            tree_directory_loads: 0,
+            tree_loading_directories: HashSet::new(),
+            tree_notice: None,
+            pending_tree_reference: None,
+            pending_tree_path: None,
+            pending_changed_snapshot: None,
+            pending_changed_message: None,
             state: ViewerState::Empty,
             scroll: UniformListScrollHandle::new(),
             generation: 0,
             _load_task: None,
             _search_task: None,
             _save_task: None,
+            _tree_workspace_task: None,
+            _tree_reveal_task: None,
             search_generation: 0,
             picker_open: false,
             query: QueryEditor::default(),
@@ -470,6 +528,7 @@ impl CodeViewer {
     fn toggle_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.picker_open = !self.picker_open;
         if self.picker_open {
+            self.tree_focused = false;
             window.focus(&self.focus, cx);
             self.schedule_search(cx);
         } else {
@@ -537,8 +596,28 @@ impl CodeViewer {
     }
 
     fn apply_workspace(&mut self, cwd: Option<PathBuf>, cx: &mut Context<Self>) {
-        self.workspace_cwd = cwd;
+        let pending_changed_snapshot = self.pending_changed_snapshot.take();
+        let pending_changed_message = self.pending_changed_message.take();
+        self.workspace_cwd = cwd.clone();
         self.intelligence = None;
+        self.tree_workspace = None;
+        self.tree_workspace_state = if cwd.is_some() {
+            TreeWorkspaceState::Loading
+        } else {
+            TreeWorkspaceState::NoWorkspace
+        };
+        self.changed_tree_state = ChangedTreeState::Loading;
+        self.tree_model.reset();
+        self.tree_focused = false;
+        self.tree_query.clear();
+        self.tree_scroll = UniformListScrollHandle::new();
+        self.tree_generation = self.tree_generation.wrapping_add(1);
+        self.tree_directory_loads = 0;
+        self.tree_loading_directories.clear();
+        self.tree_notice = None;
+        self.pending_tree_reference = None;
+        self.pending_tree_path = None;
+        self._tree_reveal_task = None;
         self.state = ViewerState::Empty;
         self.scroll = UniformListScrollHandle::new();
         self.generation = self.generation.wrapping_add(1);
@@ -550,7 +629,265 @@ impl CodeViewer {
         self.history.clear();
         self.history_index = 0;
         self.pending_transition = None;
+        if let Some(snapshot) = pending_changed_snapshot {
+            let truncated = snapshot.truncated;
+            self.tree_model.set_changed(snapshot);
+            self.changed_tree_state = ChangedTreeState::Ready { truncated };
+        } else if let Some(message) = pending_changed_message {
+            self.changed_tree_state = ChangedTreeState::Unavailable(message);
+        }
+        if let Some(cwd) = cwd {
+            self.load_tree_workspace(cwd, cx);
+        } else {
+            self._tree_workspace_task = None;
+        }
         cx.notify();
+    }
+
+    /// Review owns Git refresh cadence; Code consumes the exact same parsed
+    /// snapshot rather than invoking or interpreting a second status format.
+    pub fn set_changed_loading(&mut self, cx: &mut Context<Self>) {
+        if self.workspace_transition_pending() {
+            return;
+        }
+        if !matches!(self.changed_tree_state, ChangedTreeState::Ready { .. }) {
+            self.changed_tree_state = ChangedTreeState::Loading;
+            cx.notify();
+        }
+    }
+
+    pub fn set_changed_snapshot(&mut self, snapshot: ChangedSnapshot, cx: &mut Context<Self>) {
+        if self.workspace_transition_pending() {
+            self.pending_changed_snapshot = Some(snapshot);
+            self.pending_changed_message = None;
+            return;
+        }
+        let truncated = snapshot.truncated;
+        self.tree_model.set_changed(snapshot);
+        self.changed_tree_state = ChangedTreeState::Ready { truncated };
+        if let Some(reference) = self.pending_tree_reference.take()
+            && let Some(path) = self.tree_model.changed_reference(&reference)
+        {
+            self.reveal_tree_path(path, cx);
+        }
+        self.scroll_tree_selection();
+        cx.notify();
+    }
+
+    pub fn set_changed_unavailable(&mut self, message: impl Into<String>, cx: &mut Context<Self>) {
+        let message = message.into();
+        if self.workspace_transition_pending() {
+            self.pending_changed_snapshot = None;
+            self.pending_changed_message = Some(message);
+            return;
+        }
+        self.changed_tree_state = ChangedTreeState::Unavailable(message);
+        cx.notify();
+    }
+
+    pub fn focus_file_tree(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.tree_focused = true;
+        self.picker_open = false;
+        window.focus(&self.focus, cx);
+        self.scroll_tree_selection();
+        cx.notify();
+    }
+
+    fn load_tree_workspace(&mut self, cwd: PathBuf, cx: &mut Context<Self>) {
+        let generation = self.tree_generation;
+        self._tree_workspace_task = Some(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    FileTreeWorkspace::for_session(cwd)
+                        .map(Arc::new)
+                        .map_err(|error| error.to_string())
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.tree_generation != generation {
+                    return;
+                }
+                match result {
+                    Ok(workspace) => {
+                        if matches!(this.changed_tree_state, ChangedTreeState::Loading)
+                            && let Some(message) = workspace.changed_unavailable_message()
+                        {
+                            this.changed_tree_state = ChangedTreeState::Unavailable(message);
+                        }
+                        this.tree_workspace = Some(workspace);
+                        this.tree_workspace_state = TreeWorkspaceState::Ready;
+                        if this.tree_model.mode() == FileTreeMode::All {
+                            this.ensure_tree_root(cx);
+                        }
+                        if let Some(path) = this.pending_tree_path.take() {
+                            this.schedule_tree_reveal(path, cx);
+                        }
+                    }
+                    Err(message) => {
+                        this.tree_workspace_state = TreeWorkspaceState::Error(message);
+                    }
+                }
+                cx.notify();
+            });
+        }));
+    }
+
+    fn set_tree_mode(&mut self, mode: FileTreeMode, cx: &mut Context<Self>) {
+        if self.tree_model.mode() == mode {
+            return;
+        }
+        self.tree_model.set_mode(mode);
+        self.tree_scroll = UniformListScrollHandle::new();
+        self.tree_notice = None;
+        if mode == FileTreeMode::All {
+            self.ensure_tree_root(cx);
+        }
+        self.scroll_tree_selection();
+        cx.notify();
+    }
+
+    fn ensure_tree_root(&mut self, cx: &mut Context<Self>) {
+        if !self.tree_model.has_listing(Path::new("")) {
+            self.load_tree_directory(PathBuf::new(), cx);
+        }
+    }
+
+    fn load_tree_directory(&mut self, directory: PathBuf, cx: &mut Context<Self>) {
+        if self.tree_model.has_listing(&directory)
+            || self.tree_loading_directories.contains(&directory)
+            || self.tree_directory_loads >= MAX_DIRECTORY_LOADS
+        {
+            return;
+        }
+        let Some(workspace) = self.tree_workspace.clone() else {
+            if matches!(self.tree_workspace_state, TreeWorkspaceState::Ready) {
+                self.tree_notice = Some("The workspace is unavailable".to_owned());
+            }
+            return;
+        };
+        self.tree_directory_loads += 1;
+        self.tree_loading_directories.insert(directory.clone());
+        self.tree_notice = None;
+        let generation = self.tree_generation;
+        cx.spawn(async move |this, cx| {
+            let task_directory = directory.clone();
+            let result = cx
+                .background_spawn(async move {
+                    workspace
+                        .load_directory(&task_directory)
+                        .map_err(|error| error.to_string())
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.tree_generation != generation {
+                    return;
+                }
+                this.tree_directory_loads = this.tree_directory_loads.saturating_sub(1);
+                this.tree_loading_directories.remove(&directory);
+                match result {
+                    Ok(listing) => {
+                        if listing.truncated {
+                            this.tree_notice = Some(format!(
+                                "{} is capped at {} entries",
+                                if directory.as_os_str().is_empty() {
+                                    ".".to_owned()
+                                } else {
+                                    directory.to_string_lossy().into_owned()
+                                },
+                                crate::file_tree::MAX_DIRECTORY_ENTRIES
+                            ));
+                        }
+                        this.tree_model.insert_listing(listing);
+                        this.scroll_tree_selection();
+                    }
+                    Err(message) => this.tree_notice = Some(message),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn reveal_tree_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.tree_query.clear();
+        self.tree_model.clear_filter();
+        if self.tree_model.changed_contains(&path) {
+            self.tree_model.set_mode(FileTreeMode::Changed);
+            self.tree_model.select_path(path);
+            self.pending_tree_path = None;
+            self.scroll_tree_selection();
+            cx.notify();
+            return;
+        }
+        self.tree_model.set_mode(FileTreeMode::All);
+        self.schedule_tree_reveal(path, cx);
+    }
+
+    fn schedule_tree_reveal(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let Some(workspace) = self.tree_workspace.clone() else {
+            self.pending_tree_path = Some(path);
+            return;
+        };
+        self.pending_tree_path = Some(path.clone());
+        self.tree_notice = None;
+        let generation = self.tree_generation;
+        self._tree_reveal_task = Some(cx.spawn(async move |this, cx| {
+            let reveal_path = path.clone();
+            let result = cx
+                .background_spawn(async move {
+                    workspace
+                        .reveal(&reveal_path)
+                        .map_err(|error| error.to_string())
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.tree_generation != generation
+                    || this.pending_tree_path.as_ref() != Some(&path)
+                {
+                    return;
+                }
+                this.pending_tree_path = None;
+                match result {
+                    Ok(listings) => {
+                        for listing in listings {
+                            this.tree_model.insert_listing(listing);
+                        }
+                        this.tree_model.expand_ancestors(&path);
+                        this.tree_model.select_path(path);
+                        this.scroll_tree_selection();
+                    }
+                    Err(message) => this.tree_notice = Some(message),
+                }
+                cx.notify();
+            });
+        }));
+    }
+
+    fn process_tree_intent(&mut self, intent: FileTreeIntent, cx: &mut Context<Self>) {
+        match intent {
+            FileTreeIntent::None => {}
+            FileTreeIntent::OpenFile(path) => {
+                let Some(cwd) = self.workspace_cwd.clone() else {
+                    return;
+                };
+                let reference = path.to_string_lossy().into_owned();
+                self.pending_tree_reference = Some(reference.clone());
+                self.open_reference_inner(cwd, reference, true, cx);
+            }
+            FileTreeIntent::LoadDirectory(directory) => {
+                self.load_tree_directory(directory, cx);
+            }
+        }
+        self.scroll_tree_selection();
+        cx.notify();
+    }
+
+    fn scroll_tree_selection(&self) {
+        if let Some(index) = self.tree_model.selected_index() {
+            self.tree_scroll
+                .scroll_to_item(index, ScrollStrategy::Nearest);
+        }
     }
 
     fn must_preserve_document(&self) -> bool {
@@ -559,6 +896,14 @@ impl CodeViewer {
             ViewerState::Ready(document)
                 if document.is_dirty() || document.save_status == SaveStatus::Saving
         )
+    }
+
+    fn workspace_transition_pending(&self) -> bool {
+        match &self.pending_transition {
+            Some(PendingTransition::Workspace(cwd)) => self.workspace_cwd != *cwd,
+            Some(PendingTransition::Open { cwd, .. }) => self.workspace_cwd.as_ref() != Some(cwd),
+            None => false,
+        }
     }
 
     fn open_highlighted(&mut self, cx: &mut Context<Self>) {
@@ -580,17 +925,80 @@ impl CodeViewer {
         self.open_reference_inner(cwd, reference, true, cx);
     }
 
+    fn handle_tree_key_down(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
+        match event.keystroke.key.as_str() {
+            "escape" => {
+                if self.tree_query.is_empty() {
+                    self.tree_focused = false;
+                } else {
+                    self.tree_query.clear();
+                    self.tree_model.clear_filter();
+                }
+            }
+            "tab" => self.tree_focused = false,
+            "up" => self.tree_model.move_selection(-1),
+            "down" => self.tree_model.move_selection(1),
+            "left" => self.tree_model.collapse_selected(),
+            "right" => {
+                let intent = self.tree_model.expand_selected();
+                self.process_tree_intent(intent, cx);
+            }
+            "enter" => {
+                let intent = self.tree_model.activate_selected();
+                self.process_tree_intent(intent, cx);
+            }
+            _ => {
+                let Some(edit) = query_editor::edit_for(&event.keystroke) else {
+                    return false;
+                };
+                let changed = match edit {
+                    Edit::Local(local) => self.tree_query.apply(local),
+                    Edit::Clipboard(ClipboardEdit::Copy) => {
+                        query_editor::copy_selection(&self.tree_query, cx);
+                        false
+                    }
+                    Edit::Clipboard(ClipboardEdit::Cut) => {
+                        query_editor::cut_selection(&mut self.tree_query, cx)
+                    }
+                    Edit::Clipboard(ClipboardEdit::Paste) => cx
+                        .read_from_clipboard()
+                        .and_then(|item| item.text())
+                        .is_some_and(|text| self.tree_query.insert(&text)),
+                };
+                if changed {
+                    self.tree_model.set_filter(self.tree_query.text());
+                }
+            }
+        }
+        self.scroll_tree_selection();
+        cx.notify();
+        true
+    }
+
     fn handle_key_down(
         &mut self,
         event: &KeyDownEvent,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if event.keystroke.modifiers.platform
+            && event.keystroke.modifiers.shift
+            && event.keystroke.key == "e"
+        {
+            self.focus_file_tree(_window, cx);
+            cx.stop_propagation();
+            return;
+        }
         if event.keystroke.modifiers.platform && event.keystroke.key == "s" {
             if matches!(self.state, ViewerState::Ready(_)) {
                 self.save_document(cx);
                 cx.stop_propagation();
             }
+            return;
+        }
+
+        if self.tree_focused && self.handle_tree_key_down(event, cx) {
+            cx.stop_propagation();
             return;
         }
 
@@ -821,6 +1229,10 @@ impl CodeViewer {
         if self.workspace_cwd.as_ref() != Some(&cwd) {
             self.set_workspace(Some(cwd.clone()), cx);
         }
+        self.pending_tree_reference = Some(reference.clone());
+        if let Some(path) = self.tree_model.changed_reference(&reference) {
+            self.reveal_tree_path(path, cx);
+        }
         self.open_reference_inner(cwd, reference, true, cx);
     }
 
@@ -883,6 +1295,7 @@ impl CodeViewer {
                     Ok((intelligence, snapshot)) => {
                         this.workspace_cwd = Some(history_cwd.clone());
                         this.intelligence = Some(Arc::new(intelligence));
+                        let revealed_path = snapshot.relative_path.clone();
                         let target_line = snapshot.target.map(|target| target.line);
                         if record_history {
                             if this.history_index + 1 < this.history.len() {
@@ -908,6 +1321,7 @@ impl CodeViewer {
                             this.scroll.scroll_to_item(item, ScrollStrategy::Center);
                         }
                         this.state = ViewerState::Ready(Box::new(document));
+                        this.reveal_tree_path(revealed_path, cx);
                     }
                     Err(message) => {
                         this.state = ViewerState::Error { reference, message };
@@ -928,7 +1342,12 @@ impl CodeViewer {
                 cwd,
                 reference,
                 record_history,
-            } => self.begin_open_reference(cwd, reference, record_history, cx),
+            } => {
+                if self.workspace_cwd.as_ref() != Some(&cwd) {
+                    self.apply_workspace(Some(cwd.clone()), cx);
+                }
+                self.begin_open_reference(cwd, reference, record_history, cx);
+            }
         }
     }
 
@@ -946,6 +1365,242 @@ impl CodeViewer {
         self.history_index = next;
         let (cwd, reference) = self.history[next].clone();
         self.open_reference_inner(cwd, reference, false, cx);
+    }
+
+    fn render_tree_mode_option(
+        &self,
+        mode: FileTreeMode,
+        label: String,
+        colors: SemanticColors,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let selected = self.tree_model.mode() == mode;
+        div()
+            .id(match mode {
+                FileTreeMode::Changed => "code-tree-changed",
+                FileTreeMode::All => "code-tree-all",
+            })
+            .h(px(23.0))
+            .px(px(7.0))
+            .flex()
+            .items_center()
+            .rounded(px(Radius::CHIP))
+            .bg(if selected {
+                colors.primary.alpha(0.10)
+            } else {
+                colors.primary.alpha(0.0)
+            })
+            .cursor_pointer()
+            .hover(move |button| button.bg(colors.primary.alpha(0.08)))
+            .text_size(px(9.5))
+            .font_weight(if selected {
+                FontWeight::SEMIBOLD
+            } else {
+                FontWeight::MEDIUM
+            })
+            .text_color(if selected {
+                colors.primary
+            } else {
+                colors.tertiary
+            })
+            .child(label)
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.focus_file_tree(window, cx);
+                this.set_tree_mode(mode, cx);
+                cx.stop_propagation();
+            }))
+            .into_any_element()
+    }
+
+    fn render_file_tree(
+        &self,
+        colors: SemanticColors,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let rows = self.tree_model.rows_arc();
+        let selected = self.tree_model.selected_path().map(Path::to_path_buf);
+        let tree = cx.entity();
+        let row_count = rows.len();
+        let body = if rows.is_empty() {
+            let filtering = !self.tree_query.is_empty();
+            let message = if filtering {
+                "No loaded files match this filter".to_owned()
+            } else {
+                match self.tree_model.mode() {
+                    FileTreeMode::Changed => match &self.changed_tree_state {
+                        ChangedTreeState::Loading => "Reading Git status…".to_owned(),
+                        ChangedTreeState::Ready { .. } => "No changed files".to_owned(),
+                        ChangedTreeState::Unavailable(message) => message.clone(),
+                    },
+                    FileTreeMode::All => match &self.tree_workspace_state {
+                        TreeWorkspaceState::NoWorkspace => "Select a local session".to_owned(),
+                        TreeWorkspaceState::Loading => "Locating the workspace…".to_owned(),
+                        TreeWorkspaceState::Error(message) => message.clone(),
+                        TreeWorkspaceState::Ready
+                            if self.tree_loading_directories.contains(Path::new("")) =>
+                        {
+                            "Loading repository root…".to_owned()
+                        }
+                        TreeWorkspaceState::Ready => "This directory is empty".to_owned(),
+                    },
+                }
+            };
+            div()
+                .size_full()
+                .px(px(18.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_center()
+                .text_size(px(10.0))
+                .text_color(colors.tertiary)
+                .child(message)
+                .into_any_element()
+        } else {
+            let visible_rows = Arc::clone(&rows);
+            uniform_list("code-file-tree-rows", row_count, move |range, _, cx| {
+                range
+                    .map(|index| {
+                        let row = visible_rows[index].clone();
+                        let expanded = row.kind == TreeEntryKind::Directory
+                            && tree.read(cx).tree_model.is_expanded(&row.relative_path);
+                        render_file_tree_row(
+                            row,
+                            index,
+                            selected.as_ref(),
+                            expanded,
+                            colors,
+                            tree.clone(),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .track_scroll(&self.tree_scroll)
+            .size_full()
+            .into_any_element()
+        };
+        let changed_label = format!("Changed {}", self.tree_model.changed_count());
+        let query = if self.tree_query.is_empty() {
+            div()
+                .text_color(colors.tertiary)
+                .child("Filter files  ·  ⌘⇧E")
+                .into_any_element()
+        } else {
+            crate::navigation::query_label(&self.tree_query)
+        };
+        let root = self
+            .tree_workspace
+            .as_ref()
+            .and_then(|workspace| workspace.root().file_name())
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "Workspace".to_owned());
+        let notice = self.tree_notice.clone().or_else(|| {
+            matches!(
+                self.changed_tree_state,
+                ChangedTreeState::Ready { truncated: true }
+            )
+            .then(|| {
+                format!(
+                    "Changed files capped at {}",
+                    crate::file_tree::MAX_VISIBLE_ROWS
+                )
+            })
+        });
+        let focused = self.tree_focused && self.focus.is_focused(window);
+
+        div()
+            .h(px(FILE_TREE_HEIGHT))
+            .flex_none()
+            .flex()
+            .flex_col()
+            .border_b_1()
+            .border_color(colors.primary.alpha(0.09))
+            .bg(colors.background)
+            .child(
+                div()
+                    .h(px(32.0))
+                    .flex_none()
+                    .px(px(8.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(2.0))
+                    .child(self.render_tree_mode_option(
+                        FileTreeMode::Changed,
+                        changed_label,
+                        colors,
+                        cx,
+                    ))
+                    .child(self.render_tree_mode_option(
+                        FileTreeMode::All,
+                        "All files".to_owned(),
+                        colors,
+                        cx,
+                    ))
+                    .child(
+                        div()
+                            .ml(px(4.0))
+                            .min_w(px(0.0))
+                            .flex_1()
+                            .truncate()
+                            .text_right()
+                            .text_size(px(9.0))
+                            .text_color(colors.primary.alpha(0.28))
+                            .child(root),
+                    ),
+            )
+            .child(
+                div()
+                    .id("code-tree-filter")
+                    .h(px(30.0))
+                    .mx(px(8.0))
+                    .mb(px(4.0))
+                    .px(px(8.0))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .rounded(px(Radius::CHIP))
+                    .bg(colors.primary.alpha(if focused { 0.065 } else { 0.035 }))
+                    .border_1()
+                    .border_color(colors.primary.alpha(if focused { 0.16 } else { 0.055 }))
+                    .cursor_text()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| {
+                            this.focus_file_tree(window, cx);
+                            cx.stop_propagation();
+                        }),
+                    )
+                    .child(sf_symbol("magnifyingglass", 9.5, colors.tertiary))
+                    .child(
+                        div()
+                            .min_w(px(0.0))
+                            .flex_1()
+                            .font_family(crate::fonts::mono_family())
+                            .text_size(px(10.0))
+                            .text_color(colors.primary)
+                            .child(query),
+                    ),
+            )
+            .child(div().min_h(px(0.0)).flex_1().overflow_hidden().child(body))
+            .when_some(notice, |tree, notice| {
+                tree.child(
+                    div()
+                        .h(px(22.0))
+                        .flex_none()
+                        .px(px(9.0))
+                        .flex()
+                        .items_center()
+                        .truncate()
+                        .border_t_1()
+                        .border_color(colors.primary.alpha(0.055))
+                        .text_size(px(8.5))
+                        .text_color(Ink::ATTENTION)
+                        .child(notice),
+                )
+            })
+            .into_any_element()
     }
 
     fn render_toolbar(
@@ -1501,6 +2156,113 @@ impl Focusable for CodeViewer {
     }
 }
 
+fn render_file_tree_row(
+    row: VisibleTreeRow,
+    index: usize,
+    selected: Option<&PathBuf>,
+    expanded: bool,
+    colors: SemanticColors,
+    tree: gpui::Entity<CodeViewer>,
+) -> AnyElement {
+    let is_selected = selected == Some(&row.relative_path);
+    let path = row.relative_path.clone();
+    let kind = row.kind;
+    let status = row.status.clone();
+    let status_badge = status.as_ref().map(|status| {
+        let color = file_status_color(status.primary_kind());
+        div()
+            .flex_none()
+            .font_family(crate::fonts::mono_family())
+            .text_size(px(8.5))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(color)
+            .child(status.decoration())
+            .into_any_element()
+    });
+    div()
+        .id(("code-file-tree-row", index))
+        .h(px(FILE_TREE_ROW_HEIGHT))
+        .w_full()
+        .pl(px(7.0 + row.depth as f32 * 13.0))
+        .pr(px(8.0))
+        .flex()
+        .items_center()
+        .gap(px(5.0))
+        .bg(if is_selected {
+            colors.primary.alpha(0.085)
+        } else {
+            colors.primary.alpha(0.0)
+        })
+        .cursor_pointer()
+        .hover(move |item| item.bg(colors.primary.alpha(0.065)))
+        .child(
+            div()
+                .w(px(10.0))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .when(kind == TreeEntryKind::Directory, |slot| {
+                    slot.child(sf_symbol(
+                        if expanded {
+                            "chevron.down"
+                        } else {
+                            "chevron.right"
+                        },
+                        7.5,
+                        colors.tertiary,
+                    ))
+                }),
+        )
+        .child(sf_symbol(
+            if kind == TreeEntryKind::Directory {
+                if expanded { "folder.fill" } else { "folder" }
+            } else {
+                "doc.text"
+            },
+            10.5,
+            if kind == TreeEntryKind::Directory {
+                colors.secondary
+            } else {
+                colors.tertiary
+            },
+        ))
+        .child(
+            div()
+                .min_w(px(0.0))
+                .flex_1()
+                .truncate()
+                .font_family(crate::fonts::mono_family())
+                .text_size(px(9.5))
+                .text_color(if is_selected {
+                    colors.primary
+                } else {
+                    colors.secondary
+                })
+                .child(row.label),
+        )
+        .when_some(status_badge, |item, badge| item.child(badge))
+        .on_click(move |_, window, cx| {
+            tree.update(cx, |this, cx| {
+                this.focus_file_tree(window, cx);
+                this.tree_model.select_path(path.clone());
+                let intent = this.tree_model.activate_selected();
+                this.process_tree_intent(intent, cx);
+            });
+            cx.stop_propagation();
+        })
+        .into_any_element()
+}
+
+fn file_status_color(kind: ChangeKind) -> gpui::Rgba {
+    match kind {
+        ChangeKind::Added => Ink::FRESH,
+        ChangeKind::Deleted | ChangeKind::Unmerged => Ink::DANGER,
+        ChangeKind::Renamed | ChangeKind::Copied => rgba(0xc792eaff),
+        ChangeKind::Modified | ChangeKind::TypeChanged | ChangeKind::Unknown(_) => Ink::ATTENTION,
+    }
+}
+
 impl Render for CodeViewer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = SemanticColors::dark();
@@ -1547,6 +2309,7 @@ impl Render for CodeViewer {
                 MouseButton::Left,
                 cx.listener(|this, _, _, _| this.selection_dragging = false),
             )
+            .child(self.render_file_tree(colors, window, cx))
             .child(self.render_toolbar(document, colors, cx))
             .child(div().min_h(px(0.0)).flex_1().overflow_hidden().child(body))
             .when_some(picker, |viewer, picker| viewer.child(picker))
@@ -1760,6 +2523,7 @@ fn source_row(
                     click_range.start + source_offset_at_x(&source, x, colors.primary, window);
                 click_editor.update(cx, |this, cx| {
                     window.focus(&this.focus, cx);
+                    this.tree_focused = false;
                     this.selection_dragging = true;
                     this.place_cursor(
                         line_index,

@@ -31,6 +31,7 @@ use crate::diff::{
     DiffFile, DiffHunk, DiffLayer, DiffRow, DiffRowKind, DiffSnapshot, load_local_diff,
     preview_diff_snapshot, snapshot_from_read_diff,
 };
+use crate::file_tree::ChangedSnapshot;
 use crate::git_review::{
     GitRepository, GitReviewError, PatchMutation, ReviewStatus, preview_review_status,
 };
@@ -307,6 +308,7 @@ pub struct WorkbenchInspector {
     review_state: ReviewLoadState,
     review_generation: u64,
     review_task: Option<Task<()>>,
+    review_loading: bool,
     review_action_task: Option<Task<()>>,
     review_action_busy: bool,
     review_feedback: Option<(bool, String)>,
@@ -398,6 +400,7 @@ impl WorkbenchInspector {
             review_state: ReviewLoadState::NoSession,
             review_generation: 0,
             review_task: None,
+            review_loading: false,
             review_action_task: None,
             review_action_busy: false,
             review_feedback: None,
@@ -482,7 +485,11 @@ impl WorkbenchInspector {
     }
 
     fn reconcile_diff_polling(&mut self, cx: &mut Context<Self>) {
-        let should_poll = self.visible && self.selected_tab == InspectorTab::Changes;
+        let should_poll = self.visible
+            && matches!(
+                self.selected_tab,
+                InspectorTab::Changes | InspectorTab::Code
+            );
         if !should_poll {
             // Dropping a GPUI Task cancels its timer/future. Info and Artifacts
             // therefore perform no periodic Git work and have no idle wakeup.
@@ -497,8 +504,17 @@ impl WorkbenchInspector {
                 cx.background_executor().timer(REFRESH_INTERVAL).await;
                 if this
                     .update(cx, |this, cx| {
-                        if this.visible && this.selected_tab == InspectorTab::Changes {
-                            this.refresh(false, cx);
+                        if !this.visible {
+                            return;
+                        }
+                        match this.selected_tab {
+                            InspectorTab::Changes => this.refresh(false, cx),
+                            InspectorTab::Code => {
+                                if let Some(context) = this.context.clone() {
+                                    this.refresh_review(&context, false, cx);
+                                }
+                            }
+                            InspectorTab::Info | InspectorTab::Artifacts => {}
                         }
                     })
                     .is_err()
@@ -531,6 +547,12 @@ impl WorkbenchInspector {
     /// without weakening the normal session gate for Info/Review/Artifacts.
     pub const fn is_code_destination(&self) -> bool {
         matches!(self.selected_tab, InspectorTab::Code)
+    }
+
+    pub fn focus_code_tree(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.select_tab(InspectorTab::Code, cx);
+        self.code_viewer
+            .update(cx, |viewer, cx| viewer.focus_file_tree(window, cx));
     }
 
     fn selected_context(&self) -> Option<DiffContext> {
@@ -585,8 +607,14 @@ impl WorkbenchInspector {
         }
         self.comparison_menu_open = false;
         self.tab_transition_generation = self.tab_transition_generation.wrapping_add(1);
-        if tab == InspectorTab::Changes {
-            self.refresh(true, cx);
+        match tab {
+            InspectorTab::Changes => self.refresh(true, cx),
+            InspectorTab::Code => {
+                if let Some(context) = self.context.clone() {
+                    self.refresh_review(&context, true, cx);
+                }
+            }
+            InspectorTab::Info | InspectorTab::Artifacts => {}
         }
         self.reconcile_diff_polling(cx);
         cx.notify();
@@ -670,8 +698,13 @@ impl WorkbenchInspector {
             self.context = None;
             self.state = LoadState::NoSession;
             self.review_state = ReviewLoadState::NoSession;
-            self.code_viewer
-                .update(cx, |viewer, cx| viewer.set_workspace(None, cx));
+            self.review_generation = self.review_generation.wrapping_add(1);
+            self.review_task = None;
+            self.review_loading = false;
+            self.code_viewer.update(cx, |viewer, cx| {
+                viewer.set_workspace(None, cx);
+                viewer.set_changed_unavailable("Select a local session", cx);
+            });
             cx.notify();
             return;
         };
@@ -693,8 +726,15 @@ impl WorkbenchInspector {
         self.context = Some(context.clone());
         if self.preview_account {
             self.loading = false;
+            self.review_generation = self.review_generation.wrapping_add(1);
+            self.review_task = None;
+            self.review_loading = false;
             self.state = LoadState::Ready(Arc::new(preview_diff_snapshot(context.cwd)));
-            self.review_state = ReviewLoadState::Ready(Arc::new(preview_review_status()));
+            let status = Arc::new(preview_review_status());
+            let tree = ChangedSnapshot::from(status.as_ref());
+            self.review_state = ReviewLoadState::Ready(Arc::clone(&status));
+            self.code_viewer
+                .update(cx, |viewer, cx| viewer.set_changed_snapshot(tree, cx));
             self.refresh_task = None;
             cx.notify();
             return;
@@ -756,23 +796,40 @@ impl WorkbenchInspector {
     fn refresh_review(&mut self, context: &DiffContext, force: bool, cx: &mut Context<Self>) {
         if context.remote {
             self.review_state = ReviewLoadState::Remote;
+            self.review_generation = self.review_generation.wrapping_add(1);
+            self.review_task = None;
+            self.review_loading = false;
+            self.code_viewer.update(cx, |viewer, cx| {
+                viewer.set_changed_unavailable(
+                    "Remote file browsing is unavailable in this local Code inspector",
+                    cx,
+                );
+            });
             return;
         }
         if self.review_action_busy && !force {
             return;
         }
+        if self.review_loading && !force {
+            return;
+        }
+        self.review_loading = true;
         self.review_generation = self.review_generation.wrapping_add(1);
         let generation = self.review_generation;
         let cwd = context.cwd.clone();
         if !matches!(self.review_state, ReviewLoadState::Ready(_)) {
             self.review_state = ReviewLoadState::Loading;
+            self.code_viewer
+                .update(cx, |viewer, cx| viewer.set_changed_loading(cx));
         }
         let tokio = self.tokio.clone();
         self.review_task = Some(cx.spawn(async move |this, cx| {
             let result = tokio
                 .spawn_blocking(move || {
                     let repository = GitRepository::discover(&cwd)?;
-                    repository.status()
+                    let status = repository.status()?;
+                    let tree = ChangedSnapshot::from(&status);
+                    Ok::<_, GitReviewError>((status, tree))
                 })
                 .await
                 .map_err(|error| format!("Git status worker stopped: {error}"))
@@ -781,10 +838,22 @@ impl WorkbenchInspector {
                 if this.review_generation != generation {
                     return;
                 }
-                this.review_state = match result {
-                    Ok(status) => ReviewLoadState::Ready(Arc::new(status)),
-                    Err(error) => ReviewLoadState::Error(error),
-                };
+                this.review_loading = false;
+                match result {
+                    Ok((status, tree)) => {
+                        let status = Arc::new(status);
+                        this.review_state = ReviewLoadState::Ready(Arc::clone(&status));
+                        this.code_viewer.update(cx, |viewer, cx| {
+                            viewer.set_changed_snapshot(tree, cx);
+                        });
+                    }
+                    Err(error) => {
+                        this.review_state = ReviewLoadState::Error(error.clone());
+                        this.code_viewer.update(cx, |viewer, cx| {
+                            viewer.set_changed_unavailable(error, cx);
+                        });
+                    }
+                }
                 cx.notify();
             });
         }));

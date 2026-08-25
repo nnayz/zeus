@@ -61,11 +61,22 @@ conducting.
 |-----|-----|
 | **Info** | Session briefing: identity, attention, location, lifecycle, lineage, and runtime |
 | **Review** | Live git diff for this worktree. Stage, commit, and open a PR from here when the repo allows it |
-| **Code** | File viewer bound to the same tree. Word wrap is a Settings toggle |
+| **Code** | Worktree-scoped Changed / All files tree and the existing file viewer. Word wrap is a Settings toggle |
 | **Artifacts** | Ports the session opened, pull requests it mentioned, and other finds |
 
 Review is how Zeus earns the "accept the work" claim. Let the agent finish,
 then read the diff in the same window you used to watch it.
+
+Code opens on **Changed**, using the same staged, working-tree, rename,
+conflict, and untracked status data as Review. Switch to **All files** to browse
+the selected local session's repository; directories load only when expanded,
+and Git-ignored entries stay out of the tree. Opening a path from Review,
+Quick Open, or a terminal reference reveals it in the tree and reuses the same
+viewer below it. `⌘⇧E` opens Code and focuses the tree. Type to filter, use
+`↑` / `↓` to move, `→` / `←` to expand or collapse, Return to open, and Esc
+or Tab to return focus to the viewer. Non-repository sessions can still use
+All files, while Changed explains that Git status is unavailable. Remote
+sessions remain view-only and are not browsed through the local filesystem.
 
 Info answers the quick briefing questions for the selected session: what kind
 of agent it is, where it runs, whether it needs you, when it last completed a

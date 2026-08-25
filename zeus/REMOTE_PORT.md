@@ -536,6 +536,16 @@ comparison values sent separately. Response markers isolate login-shell noise.
 A non-Git directory or a host without Git is a compatible unavailable state,
 not a recurring UI error.
 
+Repository navigation and Review mutations also remain local-Engine
+orchestration. The desktop sends structured Git workspace requests to the
+Engine; for a remote session the Engine runs one fixed no-PTY script through
+the host seam, with cwd, argv, and optional patch or commit input carried as
+bounded stdin data. Git and GitHub subprocesses have time and output limits,
+refresh concurrency is bounded, and mutations are serialized per execution
+location. Branch switching rechecks dirty, conflicted, linked-worktree, and
+live-owner gates and never uses force checkout, reset, or automatic stash.
+This does not add Git behavior or product state to the Remote Helper protocol.
+
 The Engine's `Hello` includes an explicit Rust daemon identity and executable
 hash. The app and client reject missing, old, or unknown daemon identities. A
 confirmed Rust Engine whose hash differs from the bundled executable is upgraded

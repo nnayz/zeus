@@ -8,19 +8,30 @@
 //! bounded before it reaches GPUI.
 
 use std::collections::{BTreeMap, HashSet};
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs;
-use std::io;
+use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
+use std::process::{Command, ExitStatus, Stdio};
 use std::sync::Arc;
+use std::thread;
+use std::time::{Duration, Instant};
 
-use crate::git_review::{ChangeKind, GitRepository, GitReviewError, ReviewStatus};
+#[cfg(unix)]
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+use crate::git_review::{ChangeKind, ReviewStatus};
 
 pub const MAX_DIRECTORY_ENTRIES: usize = 2_000;
 pub const MAX_DIRECTORY_SCAN: usize = 10_000;
 pub const MAX_VISIBLE_ROWS: usize = 20_000;
 pub const MAX_REVEAL_DEPTH: usize = 64;
+const GIT_TIMEOUT: Duration = Duration::from_secs(5);
+const GIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const MAX_GIT_INPUT_BYTES: usize = 4 * 1024 * 1024;
+const MAX_GIT_STDOUT_BYTES: usize = 4 * 1024 * 1024;
+const MAX_GIT_STDERR_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum FileTreeMode {
@@ -35,10 +46,116 @@ pub enum TreeEntryKind {
     File,
 }
 
+/// Minimal, read-only Git seam for the local Code tree.
+///
+/// Review status and every repository mutation remain Engine-owned. The file
+/// tree only needs the local worktree root and `check-ignore` while lazily
+/// browsing a local session, so keeping that fixed operation here avoids
+/// resurrecting the app-side Review implementation.
+#[derive(Clone, Debug)]
+struct IgnoreRepository {
+    root: PathBuf,
+}
+
+#[derive(Debug)]
+enum IgnoreRepositoryError {
+    NotRepository,
+    Failed(String),
+}
+
+impl IgnoreRepository {
+    fn discover(cwd: &Path) -> Result<Self, IgnoreRepositoryError> {
+        let output = run_read_only_git(
+            cwd,
+            ["rev-parse", "--show-toplevel"],
+            None,
+            "discovering the Git repository",
+        )
+        .map_err(IgnoreRepositoryError::Failed)?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if stderr.contains("not a git repository") || stderr.contains("not a git work tree") {
+                return Err(IgnoreRepositoryError::NotRepository);
+            }
+            return Err(IgnoreRepositoryError::Failed(format!(
+                "Could not discover the Git repository (exit {:?})",
+                output.status.code()
+            )));
+        }
+
+        let root = path_from_git_bytes(trim_line_ending(&output.stdout));
+        if root.as_os_str().is_empty() {
+            return Err(IgnoreRepositoryError::NotRepository);
+        }
+        let root = fs::canonicalize(&root).map_err(|error| {
+            IgnoreRepositoryError::Failed(format!(
+                "Could not resolve Git worktree root {}: {error}",
+                root.display()
+            ))
+        })?;
+        if !root.is_dir() {
+            return Err(IgnoreRepositoryError::Failed(format!(
+                "Git worktree root is not a directory: {}",
+                root.display()
+            )));
+        }
+        Ok(Self { root })
+    }
+
+    fn root(&self) -> &Path {
+        &self.root
+    }
+
+    fn ignored_paths(&self, paths: &[PathBuf]) -> Result<HashSet<PathBuf>, FileTreeError> {
+        if paths.is_empty() {
+            return Ok(HashSet::new());
+        }
+
+        let mut input = Vec::new();
+        for path in paths {
+            validate_relative(path, false)?;
+            input.extend_from_slice(b"./");
+            #[cfg(unix)]
+            input.extend_from_slice(path.as_os_str().as_bytes());
+            #[cfg(not(unix))]
+            input.extend_from_slice(path.to_string_lossy().as_bytes());
+            input.push(0);
+            if input.len() > MAX_GIT_INPUT_BYTES {
+                return Err(FileTreeError::Git(format!(
+                    "Cannot check ignored files: input exceeds the {}-byte limit",
+                    MAX_GIT_INPUT_BYTES
+                )));
+            }
+        }
+
+        let output = run_read_only_git(
+            &self.root,
+            ["check-ignore", "-z", "--stdin"],
+            Some(&input),
+            "checking ignored files",
+        )
+        .map_err(FileTreeError::Git)?;
+        if !output.status.success() && output.status.code() != Some(1) {
+            return Err(FileTreeError::Git(format!(
+                "Could not check ignored files (exit {:?})",
+                output.status.code()
+            )));
+        }
+
+        Ok(output
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter(|path| !path.is_empty())
+            .map(|path| path.strip_prefix(b"./").unwrap_or(path))
+            .map(path_from_git_bytes)
+            .collect())
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct FileTreeWorkspace {
     root: PathBuf,
-    repository: Option<GitRepository>,
+    repository: Option<IgnoreRepository>,
     repository_error: Option<String>,
 }
 
@@ -67,21 +184,21 @@ impl FileTreeWorkspace {
             });
         };
 
-        match GitRepository::discover(&session_cwd) {
+        match IgnoreRepository::discover(&session_cwd) {
             Ok(repository) => Ok(Self {
                 root: repository.root().to_path_buf(),
                 repository: Some(repository),
                 repository_error: None,
             }),
-            Err(GitReviewError::NotRepository(_)) => Ok(Self {
+            Err(IgnoreRepositoryError::NotRepository) => Ok(Self {
                 root: session_cwd,
                 repository: None,
                 repository_error: None,
             }),
-            Err(error) => Ok(Self {
+            Err(IgnoreRepositoryError::Failed(error)) => Ok(Self {
                 root: session_cwd,
                 repository: None,
-                repository_error: Some(error.to_string()),
+                repository_error: Some(error),
             }),
         }
     }
@@ -681,7 +798,7 @@ pub enum FileTreeError {
         operation: &'static str,
         message: String,
     },
-    Git(GitReviewError),
+    Git(String),
     RevealTooDeep {
         path: PathBuf,
         limit: usize,
@@ -728,7 +845,7 @@ impl fmt::Display for FileTreeError {
                 }
                 .display()
             ),
-            Self::Git(error) => error.fmt(formatter),
+            Self::Git(error) => formatter.write_str(error),
             Self::RevealTooDeep { path, limit } => write!(
                 formatter,
                 "Cannot reveal {}: the path exceeds the {limit}-directory limit",
@@ -760,10 +877,161 @@ impl fmt::Display for FileTreeError {
 
 impl std::error::Error for FileTreeError {}
 
-impl From<GitReviewError> for FileTreeError {
-    fn from(error: GitReviewError) -> Self {
-        Self::Git(error)
+struct GitCommandOutput {
+    status: ExitStatus,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+fn run_read_only_git<I, S>(
+    cwd: &Path,
+    args: I,
+    input: Option<&[u8]>,
+    operation: &'static str,
+) -> Result<GitCommandOutput, String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let mut command = Command::new("git");
+    command
+        .current_dir(cwd)
+        .arg("--no-pager")
+        .arg("-c")
+        .arg("color.ui=false")
+        .arg("-c")
+        .arg("core.fsmonitor=false")
+        .args(args)
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_ASKPASS", "true")
+        .env("SSH_ASKPASS", "true")
+        .env("GCM_INTERACTIVE", "never")
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("LC_ALL", "C");
+
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("Could not run Git while {operation}: {error}"))?;
+    let stdout = child.stdout.take().expect("piped stdout");
+    let stderr = child.stderr.take().expect("piped stderr");
+    let stdout_reader = thread::spawn(move || read_bounded(stdout, MAX_GIT_STDOUT_BYTES));
+    let stderr_reader = thread::spawn(move || read_bounded(stderr, MAX_GIT_STDERR_BYTES));
+    let stdin_writer = input.map(|input| {
+        let input = input.to_vec();
+        let mut stdin = child.stdin.take().expect("piped stdin");
+        thread::spawn(move || {
+            let result = stdin.write_all(&input);
+            drop(stdin);
+            result
+        })
+    });
+
+    let deadline = Instant::now() + GIT_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) if Instant::now() < deadline => thread::sleep(GIT_POLL_INTERVAL),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break Err(format!(
+                    "Git timed out while {operation} after {} seconds",
+                    GIT_TIMEOUT.as_secs()
+                ));
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break Err(format!("Could not wait for Git while {operation}: {error}"));
+            }
+        }
+    };
+
+    if let Some(writer) = stdin_writer {
+        match writer.join() {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) if error.kind() == io::ErrorKind::BrokenPipe => {}
+            Ok(Err(error)) => {
+                return Err(format!(
+                    "Could not send paths to Git while {operation}: {error}"
+                ));
+            }
+            Err(_) => return Err(format!("Git input writer panicked while {operation}")),
+        }
     }
+
+    let (stdout, stdout_truncated) = join_reader(stdout_reader, operation)?;
+    let (stderr, _stderr_truncated) = join_reader(stderr_reader, operation)?;
+    let status = status?;
+    if stdout_truncated {
+        return Err(format!(
+            "Git output exceeded the {}-byte limit while {operation}",
+            MAX_GIT_STDOUT_BYTES
+        ));
+    }
+
+    Ok(GitCommandOutput {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+fn read_bounded<R: Read>(mut reader: R, limit: usize) -> io::Result<(Vec<u8>, bool)> {
+    let mut bytes = Vec::with_capacity(limit.min(64 * 1024));
+    let mut truncated = false;
+    let mut chunk = [0_u8; 16 * 1024];
+    loop {
+        let read = reader.read(&mut chunk)?;
+        if read == 0 {
+            break;
+        }
+        let remaining = limit.saturating_sub(bytes.len());
+        let keep = remaining.min(read);
+        bytes.extend_from_slice(&chunk[..keep]);
+        truncated |= keep < read;
+    }
+    Ok((bytes, truncated))
+}
+
+fn join_reader(
+    reader: thread::JoinHandle<io::Result<(Vec<u8>, bool)>>,
+    operation: &'static str,
+) -> Result<(Vec<u8>, bool), String> {
+    match reader.join() {
+        Ok(Ok(output)) => Ok(output),
+        Ok(Err(error)) => Err(format!(
+            "Could not read Git output while {operation}: {error}"
+        )),
+        Err(_) => Err(format!("Git output reader panicked while {operation}")),
+    }
+}
+
+#[cfg(unix)]
+fn path_from_git_bytes(bytes: &[u8]) -> PathBuf {
+    PathBuf::from(OsString::from_vec(bytes.to_vec()))
+}
+
+#[cfg(not(unix))]
+fn path_from_git_bytes(bytes: &[u8]) -> PathBuf {
+    PathBuf::from(String::from_utf8_lossy(bytes).into_owned())
+}
+
+fn trim_line_ending(mut bytes: &[u8]) -> &[u8] {
+    if bytes.ends_with(b"\n") {
+        bytes = &bytes[..bytes.len() - 1];
+    }
+    if bytes.ends_with(b"\r") {
+        bytes = &bytes[..bytes.len() - 1];
+    }
+    bytes
 }
 
 #[cfg(test)]

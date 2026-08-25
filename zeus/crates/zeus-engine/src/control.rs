@@ -28,6 +28,47 @@ use crate::registry::Registry;
 /// Identifies this engine in the handshake, so a client can tell which
 /// implementation it reached.
 pub const BUILD: &str = concat!("zeus-engine-", env!("CARGO_PKG_VERSION"));
+const MAX_CONCURRENT_GIT_REQUESTS: usize = 2;
+const MAX_QUEUED_GIT_REQUESTS: usize = 16;
+
+type GitRequestJob = Box<dyn FnOnce() + Send + 'static>;
+
+struct GitRequestPool {
+    sender: std::sync::mpsc::SyncSender<GitRequestJob>,
+}
+
+impl GitRequestPool {
+    fn new() -> Self {
+        let (sender, receiver) =
+            std::sync::mpsc::sync_channel::<GitRequestJob>(MAX_QUEUED_GIT_REQUESTS);
+        let receiver = Arc::new(Mutex::new(receiver));
+        for index in 0..MAX_CONCURRENT_GIT_REQUESTS {
+            let receiver = Arc::clone(&receiver);
+            std::thread::Builder::new()
+                .name(format!("zeus-git-request-{index}"))
+                .spawn(move || {
+                    loop {
+                        let job = {
+                            let Ok(receiver) = receiver.lock() else {
+                                return;
+                            };
+                            receiver.recv()
+                        };
+                        let Ok(job) = job else {
+                            return;
+                        };
+                        job();
+                    }
+                })
+                .expect("spawn Git request worker");
+        }
+        Self { sender }
+    }
+
+    fn try_send(&self, job: GitRequestJob) -> bool {
+        self.sender.try_send(job).is_ok()
+    }
+}
 
 pub struct ControlServer {
     registry: Arc<Mutex<Registry>>,
@@ -43,6 +84,8 @@ pub struct ControlServer {
     governor: std::sync::Arc<Mutex<crate::governor::GovernorConfig>>,
     browser: std::sync::OnceLock<crate::browser::BrowserPool>,
     active_connections: Arc<AtomicUsize>,
+    git: crate::git_workspace::GitTools,
+    git_requests: std::sync::OnceLock<GitRequestPool>,
 }
 
 /// Where injection files live and which CLI they point at. Present, spawns
@@ -80,7 +123,17 @@ impl ControlServer {
             governor: std::sync::Arc::new(Mutex::new(crate::governor::GovernorConfig::default())),
             browser: std::sync::OnceLock::new(),
             active_connections: Arc::new(AtomicUsize::new(0)),
+            git: crate::git_workspace::GitTools::new(),
+            git_requests: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Override Git and GitHub CLI executables. Tests inject fake binaries
+    /// this way; production always uses PATH `git` and `gh`.
+    pub fn with_git_tools(mut self, git: PathBuf, gh: PathBuf) -> Self {
+        self.git.git = git;
+        self.git.gh = gh;
+        self
     }
 
     /// Enables spawn-time hook/MCP injection: writes the shim files (like the
@@ -345,7 +398,7 @@ impl ControlServer {
     /// pushes event frames onto the same socket while this loop keeps
     /// answering requests — one connection carries both, as the Swift daemon's
     /// does.
-    pub fn serve(&self, stream: UnixStream) -> std::io::Result<()> {
+    pub fn serve(self: &Arc<Self>, stream: UnixStream) -> std::io::Result<()> {
         let _connection = ActiveConnectionGuard::new(Arc::clone(&self.active_connections));
         let mut reader = BufReader::new(stream.try_clone()?);
         let writer = Arc::new(Mutex::new(stream));
@@ -403,11 +456,49 @@ impl ControlServer {
                     "control line exceeded the protocol maximum",
                 ));
             }
+            if self.enqueue_git_request(&line, &writer) {
+                continue;
+            }
             let Some(response) = self.handle_line(&line, &writer, &mut subscription) else {
                 continue;
             };
             write_message(&writer, &response)?;
         }
+    }
+
+    fn enqueue_git_request(self: &Arc<Self>, line: &[u8], writer: &Arc<Mutex<UnixStream>>) -> bool {
+        let Ok(ControlMessage::Request { id, method, params }) =
+            serde_json::from_slice::<ControlMessage>(line)
+        else {
+            return false;
+        };
+        if !is_git_method(&method) {
+            return false;
+        }
+        let server = Arc::clone(self);
+        let response_writer = Arc::clone(writer);
+        let method_for_job = method.clone();
+        let queued = self
+            .git_requests
+            .get_or_init(GitRequestPool::new)
+            .try_send(Box::new(move || {
+                let response = ControlMessage::Response {
+                    id,
+                    result: server.dispatch(&method_for_job, params),
+                };
+                let _ = write_message(&response_writer, &response);
+            }));
+        if !queued {
+            let response = ControlMessage::Response {
+                id,
+                result: Err(ControlError::new(
+                    "busy",
+                    "Git workspace is busy; wait for the current requests and try again",
+                )),
+            };
+            let _ = write_message(writer, &response);
+        }
+        true
     }
 
     fn handle_line(
@@ -581,6 +672,20 @@ impl ControlServer {
             Method::WORKTREE_LIST => self.worktree_list(params),
             Method::WORKTREE_REMOVE => self.worktree_remove(params),
             Method::WORKTREE_OVERVIEW => self.worktree_overview(),
+            Method::GIT_WORKSPACE => self.git_workspace(params),
+            Method::GIT_STAGE => self.git_stage(params),
+            Method::GIT_UNSTAGE => self.git_unstage(params),
+            Method::GIT_DISCARD => self.git_discard(params),
+            Method::GIT_APPLY_PATCH => self.git_apply_patch(params),
+            Method::GIT_COMMIT => self.git_commit(params),
+            Method::GIT_LIST_REFS => self.git_list_refs(params),
+            Method::GIT_FETCH => self.git_fetch(params),
+            Method::GIT_COMPARE => self.git_compare(params),
+            Method::GIT_BRANCH_CREATE => self.git_branch_create(params),
+            Method::GIT_CHECKOUT_PLAN => self.git_checkout_plan(params),
+            Method::GIT_CHECKOUT => self.git_checkout(params),
+            Method::GIT_PR_RESOLVE => self.git_pr_resolve(params),
+            Method::GIT_PR_OPEN => self.git_pr_open(params),
             Method::TEST_RUN => self.browser_call("run", params),
             "browser.act" => self.browser_call("browser", params),
             Method::EVENTS_WAIT => self.events_wait(params),
@@ -2223,6 +2328,226 @@ impl ControlServer {
         encode(&zeus_proto::SessionHistoryResult { entries })
     }
 
+    fn git_workspace(&self, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
+        let p: zeus_proto::GitWorkspaceParams = decode(params)?;
+        let target = p.target.unwrap_or_default();
+        self.with_session_git(&p.session_id, |git| {
+            let pull_request = match &target {
+                zeus_proto::GitReviewTarget::PullRequest { url, .. } => git
+                    .session
+                    .pull_requests
+                    .as_deref()
+                    .unwrap_or_default()
+                    .iter()
+                    .find(|status| status.url == *url)
+                    .cloned(),
+                _ => None,
+            };
+            git.workspace(target, pull_request)
+        })
+    }
+
+    fn git_stage(&self, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
+        let p: zeus_proto::GitPathsParams = decode(params)?;
+        self.with_session_git(&p.session_id, |git| git.stage(&p.paths))
+    }
+
+    fn git_unstage(&self, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
+        let p: zeus_proto::GitPathsParams = decode(params)?;
+        self.with_session_git(&p.session_id, |git| git.unstage(&p.paths))
+    }
+
+    fn git_discard(&self, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
+        let p: zeus_proto::GitPathsParams = decode(params)?;
+        self.with_session_git(&p.session_id, |git| git.discard(&p.paths))
+    }
+
+    fn git_apply_patch(&self, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
+        let p: zeus_proto::GitPatchParams = decode(params)?;
+        self.with_session_git(&p.session_id, |git| git.apply_patch(&p.patch, p.mutation))
+    }
+
+    fn git_commit(&self, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
+        let p: zeus_proto::GitCommitParams = decode(params)?;
+        self.with_session_git(&p.session_id, |git| git.commit(&p.message))
+    }
+
+    fn git_list_refs(&self, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
+        let p: zeus_proto::GitListRefsParams = decode(params)?;
+        self.with_session_git(&p.session_id, |git| git.list_refs(p.query.as_deref()))
+    }
+
+    fn git_fetch(&self, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
+        let p: zeus_proto::GitFetchParams = decode(params)?;
+        self.with_session_git(&p.session_id, |git| git.fetch(p.remote.as_deref()))
+    }
+
+    fn git_compare(&self, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
+        let p: zeus_proto::GitCompareParams = decode(params)?;
+        self.with_session_git(&p.session_id, |git| git.compare(p.target))
+    }
+
+    fn git_branch_create(&self, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
+        let p: zeus_proto::GitBranchCreateParams = decode(params)?;
+        let result =
+            self.session_git(&p.session_id, |git| git.branch_create(&p.name, p.checkout))?;
+        self.publish_created_worktree(&result);
+        encode(&result)
+    }
+
+    fn git_checkout_plan(&self, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
+        let p: zeus_proto::GitCheckoutParams = decode(params)?;
+        self.with_session_git(&p.session_id, |git| git.checkout_plan(&p.ref_name))
+    }
+
+    fn git_checkout(&self, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
+        let p: zeus_proto::GitCheckoutParams = decode(params)?;
+        let result = self.session_git(&p.session_id, |git| git.checkout(&p.ref_name, p.mode))?;
+        self.publish_created_worktree(&result);
+        encode(&result)
+    }
+
+    fn git_pr_resolve(&self, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
+        let p: zeus_proto::GitPrResolveParams = decode(params)?;
+        let result = self.session_git(&p.session_id, |git| git.pr_resolve(&p.input))?;
+        self.remember_direct_pull_request(&p.session_id, &result.status)?;
+        encode(&result)
+    }
+
+    fn git_pr_open(&self, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
+        let p: zeus_proto::GitPrOpenParams = decode(params)?;
+        let (result, status) = self.session_git(&p.session_id, |git| {
+            let resolved = git.pr_resolve(&p.input)?;
+            let status = resolved.status.clone();
+            git.open_resolved_pr(resolved)
+                .map(|result| (result, status))
+        })?;
+        self.remember_direct_pull_request(&p.session_id, &status)?;
+        self.publish_created_worktree(&result);
+        encode(&result)
+    }
+
+    fn with_session_git<T: serde::Serialize>(
+        &self,
+        session_id: &zeus_proto::SessionId,
+        body: impl FnOnce(
+            crate::git_workspace::SessionGit<'_>,
+        ) -> Result<T, crate::git_workspace::GitWorkspaceError>,
+    ) -> Result<JsonValue, ControlError> {
+        encode(&self.session_git(session_id, body)?)
+    }
+
+    fn session_git<T>(
+        &self,
+        session_id: &zeus_proto::SessionId,
+        body: impl FnOnce(
+            crate::git_workspace::SessionGit<'_>,
+        ) -> Result<T, crate::git_workspace::GitWorkspaceError>,
+    ) -> Result<T, ControlError> {
+        let (session, records) = {
+            let registry = self.registry.lock().map_err(poisoned)?;
+            let records = registry.records();
+            let session = records
+                .iter()
+                .find(|record| record.id.0 == session_id.0)
+                .cloned()
+                .ok_or_else(|| ControlError::not_found(session_id.0.clone()))?;
+            (session, records)
+        };
+        let result = if let Some(host_id) = session.host.clone() {
+            let manager = self
+                .remote
+                .as_ref()
+                .ok_or_else(crate::remote::transport_unavailable)?;
+            let host = self.resolve_host(&host_id)?;
+            let executor = crate::git_workspace::RemoteGit {
+                manager,
+                host: &host,
+            };
+            let git = crate::git_workspace::SessionGit {
+                session: &session,
+                records: &records,
+                executor: &executor,
+                gh: crate::git_workspace::GhClient {
+                    program: self.git.gh.clone(),
+                },
+                locks: &self.git.locks,
+            };
+            body(git).map_err(crate::git_workspace::GitWorkspaceError::into_control)?
+        } else {
+            let executor = self.git.local();
+            let git = crate::git_workspace::SessionGit {
+                session: &session,
+                records: &records,
+                executor: &executor,
+                gh: crate::git_workspace::GhClient {
+                    program: self.git.gh.clone(),
+                },
+                locks: &self.git.locks,
+            };
+            body(git).map_err(crate::git_workspace::GitWorkspaceError::into_control)?
+        };
+        Ok(result)
+    }
+
+    fn publish_created_worktree(&self, result: &zeus_proto::GitCheckoutResult) {
+        if let zeus_proto::GitCheckoutDisposition::OpenNewWorktree { path } =
+            &result.plan.disposition
+        {
+            self.events.publish(
+                "worktree.created",
+                json!({
+                    "repoPath": result.workspace.repo_root,
+                    "path": path,
+                    "branch": result.plan.ref_name,
+                }),
+                None,
+            );
+        }
+    }
+
+    fn remember_direct_pull_request(
+        &self,
+        session_id: &zeus_proto::SessionId,
+        status: &zeus_proto::PullRequestStatus,
+    ) -> Result<(), ControlError> {
+        let record = {
+            let mut registry = self.registry.lock().map_err(poisoned)?;
+            registry.update_record(&session_id.0, |record| {
+                let artifacts = record.artifacts.get_or_insert_with(Vec::new);
+                if !artifacts.iter().any(|artifact| {
+                    artifact.kind == zeus_proto::ArtifactKind::PullRequest
+                        && artifact.url == status.url
+                }) {
+                    artifacts.push(zeus_proto::SessionArtifact {
+                        kind: zeus_proto::ArtifactKind::PullRequest,
+                        url: status.url.clone(),
+                        first_seen_at: std::time::SystemTime::now().into(),
+                    });
+                }
+                let statuses = record.pull_requests.get_or_insert_with(Vec::new);
+                if let Some(existing) = statuses.iter_mut().find(|item| item.url == status.url) {
+                    *existing = status.clone();
+                } else {
+                    statuses.push(status.clone());
+                }
+            });
+            registry.persist().map_err(io_control_error)?;
+            registry
+                .records()
+                .into_iter()
+                .find(|record| record.id == *session_id)
+                .ok_or_else(|| ControlError::not_found(session_id.0.clone()))?
+        };
+        self.events.publish_encoded(
+            zeus_proto::EventName::SESSION_UPDATED,
+            &record,
+            Some(&session_id.0),
+        );
+        self.pr_monitor_wake.wake_session(session_id.0.clone());
+        Ok(())
+    }
+
     fn worktree_create(&self, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
         let p: zeus_proto::WorktreeCreateParams = decode(params)?;
         crate::cwd::validate_directory(Path::new(&p.repo_path)).map_err(cwd_control_error)?;
@@ -2297,6 +2622,26 @@ fn process_executable_hash() -> Option<&'static str> {
         )
     })
     .as_deref()
+}
+
+fn is_git_method(method: &str) -> bool {
+    matches!(
+        method,
+        Method::GIT_WORKSPACE
+            | Method::GIT_STAGE
+            | Method::GIT_UNSTAGE
+            | Method::GIT_DISCARD
+            | Method::GIT_APPLY_PATCH
+            | Method::GIT_COMMIT
+            | Method::GIT_LIST_REFS
+            | Method::GIT_FETCH
+            | Method::GIT_COMPARE
+            | Method::GIT_BRANCH_CREATE
+            | Method::GIT_CHECKOUT_PLAN
+            | Method::GIT_CHECKOUT
+            | Method::GIT_PR_RESOLVE
+            | Method::GIT_PR_OPEN
+    )
 }
 
 /// A session id in the daemon's format: `s_` plus twelve hex digits.
@@ -3567,6 +3912,248 @@ mod tests {
             Some(json!({ "host": "forge" })),
         ));
 
+        assert_eq!(error.code, crate::remote::TRANSPORT_UNAVAILABLE_CODE);
+    }
+
+    #[test]
+    fn git_workspace_methods_round_trip_over_the_control_channel() {
+        let temp = tempfile::tempdir().expect("temp");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("mkdir");
+        for arguments in [
+            vec!["init", "-q", "-b", "main"],
+            vec!["commit", "--allow-empty", "-m", "root"],
+            vec!["branch", "feature"],
+        ] {
+            let status = std::process::Command::new("git")
+                .args(&arguments)
+                .current_dir(&repo)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .status()
+                .expect("git");
+            assert!(status.success(), "git {arguments:?}");
+        }
+        std::fs::write(repo.join("new.txt"), "hello\n").expect("write");
+        let registry = Arc::new(Mutex::new(Registry::new(
+            engine(),
+            temp.path().join("state.json"),
+        )));
+        let mut record = test_record("s_git");
+        record.cwd = repo.to_string_lossy().into_owned();
+        registry.lock().expect("registry").insert_record(record);
+        let server = ControlServer::new(registry, temp.path().join("daemon.sock"));
+
+        let workspace = ok_of(call(
+            &server,
+            Method::GIT_WORKSPACE,
+            Some(json!({ "sessionID": "s_git" })),
+        ));
+        assert_eq!(workspace["branch"]["name"], "main");
+        assert_eq!(workspace["dirty"], true);
+        assert_eq!(workspace["target"]["kind"], "workingTree");
+
+        let staged = ok_of(call(
+            &server,
+            Method::GIT_STAGE,
+            Some(json!({ "sessionID": "s_git", "paths": ["new.txt"] })),
+        ));
+        assert_eq!(staged["status"]["staged"].as_array().unwrap().len(), 1);
+
+        let plan = ok_of(call(
+            &server,
+            Method::GIT_CHECKOUT_PLAN,
+            Some(json!({ "sessionID": "s_git", "refName": "feature" })),
+        ));
+        assert_eq!(plan["disposition"]["kind"], "openNewWorktree");
+        assert!(
+            plan["reasons"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|reason| reason["code"] == "dirty")
+        );
+        assert!(
+            plan["reasons"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|reason| reason["code"] == "liveOwner")
+        );
+
+        let missing = err_of(call(
+            &server,
+            Method::GIT_WORKSPACE,
+            Some(json!({ "sessionID": "s_missing" })),
+        ));
+        assert_eq!(missing.code, "not_found");
+    }
+
+    #[test]
+    fn slow_git_request_does_not_block_control_heartbeats() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let temp = tempfile::tempdir().expect("temp");
+        let fake_git = temp.path().join("git");
+        std::fs::write(&fake_git, "#!/bin/sh\nexec /bin/sleep 1\n").expect("fake git");
+        std::fs::set_permissions(&fake_git, std::fs::Permissions::from_mode(0o700))
+            .expect("fake git permissions");
+        let registry = Arc::new(Mutex::new(Registry::new(
+            engine(),
+            temp.path().join("state.json"),
+        )));
+        let mut record = test_record("s_slow_git");
+        record.cwd = temp.path().to_string_lossy().into_owned();
+        registry.lock().expect("registry").insert_record(record);
+        let server = Arc::new(
+            ControlServer::new(registry, temp.path().join("daemon.sock"))
+                .with_git_tools(fake_git.clone(), fake_git),
+        );
+        let (mut client, server_stream) = UnixStream::pair().expect("socket pair");
+        let serving = {
+            let server = Arc::clone(&server);
+            std::thread::spawn(move || server.serve(server_stream))
+        };
+        for request in [
+            ControlMessage::Request {
+                id: 1,
+                method: Method::GIT_WORKSPACE.into(),
+                params: Some(json!({ "sessionID": "s_slow_git" })),
+            },
+            ControlMessage::Request {
+                id: 2,
+                method: Method::HELLO.into(),
+                params: Some(json!({ "proto": WIRE_VERSION, "build": "test" })),
+            },
+        ] {
+            let mut line = serde_json::to_vec(&request).unwrap();
+            line.push(b'\n');
+            client.write_all(&line).unwrap();
+        }
+        client
+            .set_read_timeout(Some(Duration::from_millis(500)))
+            .unwrap();
+        let mut reader = BufReader::new(client.try_clone().unwrap());
+        let mut line = String::new();
+        reader.read_line(&mut line).expect("heartbeat response");
+        assert!(matches!(
+            serde_json::from_str::<ControlMessage>(&line).unwrap(),
+            ControlMessage::Response {
+                id: 2,
+                result: Ok(_)
+            }
+        ));
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        line.clear();
+        reader.read_line(&mut line).expect("Git response");
+        assert!(matches!(
+            serde_json::from_str::<ControlMessage>(&line).unwrap(),
+            ControlMessage::Response {
+                id: 1,
+                result: Err(_)
+            }
+        ));
+        client.shutdown(std::net::Shutdown::Write).unwrap();
+        serving.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn direct_pull_request_round_trip_populates_the_existing_session_cache() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let temp = tempfile::tempdir().expect("temp");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        for arguments in [
+            vec!["init", "-q", "-b", "main"],
+            vec!["commit", "--allow-empty", "-m", "root"],
+            vec![
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/nnayz/zeus.git",
+            ],
+        ] {
+            let status = std::process::Command::new("git")
+                .args(&arguments)
+                .current_dir(&repo)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {arguments:?}");
+        }
+        let fake_gh = temp.path().join("gh");
+        std::fs::write(
+            &fake_gh,
+            r#"#!/bin/sh
+if [ "$1" = auth ]; then exit 0; fi
+if [ "$1" = pr ] && [ "$2" = view ]; then
+cat <<'JSON'
+{"number":7,"title":"Other repo","author":{"login":"n"},"body":"Body","baseRefName":"main","headRefName":"feature","state":"OPEN","isDraft":false,"reviewDecision":"","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","additions":1,"deletions":0,"changedFiles":1,"comments":[],"reviews":[],"statusCheckRollup":[],"headRefOid":"aaa","baseRefOid":"bbb","isCrossRepository":false,"headRepository":{"name":"other"},"headRepositoryOwner":{"login":"someone"},"url":"https://github.com/someone/other/pull/7"}
+JSON
+exit 0
+fi
+exit 1
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake_gh, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let registry = Arc::new(Mutex::new(Registry::new(
+            engine(),
+            temp.path().join("state.json"),
+        )));
+        let mut record = test_record("s_direct_pr");
+        record.cwd = repo.to_string_lossy().into_owned();
+        registry.lock().unwrap().insert_record(record);
+        let server = ControlServer::new(Arc::clone(&registry), temp.path().join("daemon.sock"))
+            .with_git_tools(PathBuf::from("git"), fake_gh);
+        let resolved = ok_of(call(
+            &server,
+            Method::GIT_PR_RESOLVE,
+            Some(json!({
+                "sessionID": "s_direct_pr",
+                "input": "https://github.com/someone/other/pull/7"
+            })),
+        ));
+        assert_eq!(resolved["status"]["number"], 7);
+        assert_eq!(resolved["sameRepository"], false);
+        let record = registry
+            .lock()
+            .unwrap()
+            .records()
+            .into_iter()
+            .find(|record| record.id.0 == "s_direct_pr")
+            .unwrap();
+        assert!(record.artifacts.as_deref().unwrap().iter().any(|artifact| {
+            artifact.kind == zeus_proto::ArtifactKind::PullRequest
+                && artifact.url == "https://github.com/someone/other/pull/7"
+        }));
+        assert_eq!(record.pull_requests.as_deref().unwrap()[0].number, 7);
+    }
+
+    #[test]
+    fn remote_git_workspace_fails_closed_without_the_helper_transport() {
+        let temp = tempfile::tempdir().expect("temp");
+        let registry = Arc::new(Mutex::new(Registry::new(
+            engine(),
+            temp.path().join("state.json"),
+        )));
+        let mut record = test_record("s_remote_git");
+        record.host = Some("forge".into());
+        registry.lock().expect("registry").insert_record(record);
+        let server = ControlServer::new(registry, temp.path().join("daemon.sock"));
+        let error = err_of(call(
+            &server,
+            Method::GIT_WORKSPACE,
+            Some(json!({ "sessionID": "s_remote_git" })),
+        ));
         assert_eq!(error.code, crate::remote::TRANSPORT_UNAVAILABLE_CODE);
     }
 

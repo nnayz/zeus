@@ -60,7 +60,7 @@ conducting.
 | Tab | Job |
 |-----|-----|
 | **Info** | Session briefing: identity, attention, location, lifecycle, lineage, and runtime |
-| **Review** | Live git diff for this worktree. Stage, commit, and open a PR from here when the repo allows it |
+| **Review** | Git workspace for this checkout: repository header, branch picker, pull-request navigation, and the live diff. Stage and commit stay on the working tree |
 | **Code** | Worktree-scoped Changed / All files tree and the existing file viewer. Word wrap is a Settings toggle |
 | **Artifacts** | Ports the session opened, pull requests it mentioned, and other finds |
 

@@ -97,6 +97,8 @@ pub enum NavigationEvent {
     ToggleSidebar,
     OpenOverview,
     OpenWorktrees,
+    OpenBranches,
+    GoToPullRequest,
     OpenSettings,
     CheckForUpdates,
     OpenFile { cwd: PathBuf, reference: String },
@@ -868,6 +870,14 @@ impl NavigationOverlay {
             }
             PaletteCommand::OpenWorktrees => {
                 cx.emit(NavigationEvent::OpenWorktrees);
+                self.close_overlay(cx);
+            }
+            PaletteCommand::OpenBranches => {
+                cx.emit(NavigationEvent::OpenBranches);
+                self.close_overlay(cx);
+            }
+            PaletteCommand::GoToPullRequest => {
+                cx.emit(NavigationEvent::GoToPullRequest);
                 self.close_overlay(cx);
             }
             PaletteCommand::OpenSettings => {

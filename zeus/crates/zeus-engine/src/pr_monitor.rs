@@ -38,6 +38,7 @@ const RECENTLY_SEEN: Duration = Duration::from_secs(600);
 /// only and does not imply a GitHub request when nothing is due.
 const IDLE_RECONCILE_INTERVAL: Duration = Duration::from_secs(30 * 60);
 const STOP_CHECK_INTERVAL: Duration = Duration::from_secs(1);
+const MAX_GH_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 
 fn initial_sweep_delay() -> Duration {
     Duration::ZERO
@@ -458,24 +459,44 @@ fn run_gh(gh: &str, args: &[&str], timeout: Duration) -> Option<Vec<u8>> {
         .stderr(std::process::Stdio::null())
         .spawn()
         .ok()?;
+    let stdout = child.stdout.take()?;
+    let output_reader = std::thread::spawn(move || {
+        use std::io::Read as _;
+
+        let mut stdout = stdout;
+        let mut output = Vec::with_capacity(64 * 1024);
+        let mut chunk = [0_u8; 16 * 1024];
+        let mut oversized = false;
+        loop {
+            let count = stdout.read(&mut chunk).ok()?;
+            if count == 0 {
+                break;
+            }
+            let remaining = MAX_GH_OUTPUT_BYTES.saturating_sub(output.len());
+            output.extend_from_slice(&chunk[..count.min(remaining)]);
+            oversized |= count > remaining;
+        }
+        (!oversized).then_some(output)
+    });
     let deadline = Instant::now() + timeout;
-    loop {
+    let succeeded = loop {
         match child.try_wait() {
-            Ok(Some(exit)) if exit.success() => break,
-            Ok(Some(_)) => return None,
+            Ok(Some(exit)) => break exit.success(),
             Ok(None) if Instant::now() >= deadline => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return None;
+                break false;
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(100)),
-            Err(_) => return None,
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break false;
+            }
         }
-    }
-    let mut output = Vec::new();
-    use std::io::Read;
-    child.stdout.take()?.read_to_end(&mut output).ok()?;
-    Some(output)
+    };
+    let output = output_reader.join().ok()??;
+    succeeded.then_some(output)
 }
 
 /// `github.com/owner/repo/pull/123` → (owner, repo, 123).

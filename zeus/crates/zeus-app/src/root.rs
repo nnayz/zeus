@@ -338,6 +338,19 @@ impl RootView {
                         surfaces.update(cx, |surfaces, cx| surfaces.open_worktrees(cx));
                     }
                 }
+                NavigationEvent::OpenBranches => {
+                    this.reveal_inspector(cx);
+                    if let Some(inspector) = &this.inspector {
+                        inspector.update(cx, |inspector, cx| inspector.open_branches_picker(cx));
+                    }
+                }
+                NavigationEvent::GoToPullRequest => {
+                    this.reveal_inspector(cx);
+                    if let Some(inspector) = &this.inspector {
+                        inspector
+                            .update(cx, |inspector, cx| inspector.open_pull_request_picker(cx));
+                    }
+                }
                 NavigationEvent::OpenSettings => {
                     if let Some(surfaces) = &this.utility_surfaces {
                         surfaces.update(cx, |surfaces, cx| surfaces.open_settings(cx));
@@ -378,6 +391,14 @@ impl RootView {
                     }
                     InspectorEvent::Update(command) => {
                         this.services.updates.send(command.clone());
+                    }
+                    InspectorEvent::FocusSession(session_id) => {
+                        this.services
+                            .store
+                            .store
+                            .write()
+                            .expect("session store lock poisoned")
+                            .select(session_id.clone());
                     }
                 },
             )

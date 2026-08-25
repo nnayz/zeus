@@ -29,6 +29,7 @@ pub mod detect;
 pub mod directories;
 pub mod events;
 pub mod git;
+pub mod git_workspace;
 pub mod governor;
 pub mod history;
 #[cfg(unix)]

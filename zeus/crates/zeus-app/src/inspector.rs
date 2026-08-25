@@ -18,8 +18,10 @@ use gpui::{
     px, rgba, uniform_list,
 };
 use zeus_proto::{
-    AgentKind as ProtoAgentKind, ArtifactKind, PrCheck, PrDiscussionItem, PullRequestStatus,
-    SessionArtifact, SessionDiffBase, SessionId, SessionRecord, SessionStatus,
+    AgentKind as ProtoAgentKind, ArtifactKind, GitCheckoutDisposition, GitCheckoutMode,
+    GitRefEntry, GitReviewTarget, GitWorkspaceResult, PrCheck, PrDiscussionItem, PullRequestStatus,
+    SessionArtifact, SessionDiffBase, SessionId, SessionReadDiffResult, SessionRecord,
+    SessionStatus,
 };
 use zeus_ui::{
     AgentKind, AgentLogo, Fill, FloatingSurface, Ink, LoadingIndicator, Metrics, Radius,
@@ -31,9 +33,7 @@ use crate::diff::{
     DiffFile, DiffHunk, DiffLayer, DiffRow, DiffRowKind, DiffSnapshot, load_local_diff,
     preview_diff_snapshot, snapshot_from_read_diff,
 };
-use crate::git_review::{
-    GitRepository, GitReviewError, PatchMutation, ReviewStatus, preview_review_status,
-};
+use crate::git_review::{PatchMutation, ReviewStatus, preview_workspace};
 use crate::macos::sf_symbols::{SymbolWeight, sf_symbol, sf_symbol_weighted};
 use crate::markdown::MarkdownDocument;
 use crate::markdown_view::render_markdown;
@@ -93,6 +93,7 @@ pub enum InspectorEvent {
     OpenSettings,
     AddRemoteHost,
     Update(UpdateCommand),
+    FocusSession(SessionId),
 }
 
 impl InspectorTab {
@@ -144,10 +145,16 @@ enum LoadState {
 #[derive(Clone, Debug)]
 enum ReviewLoadState {
     NoSession,
-    Remote,
     Loading,
-    Ready(Arc<ReviewStatus>),
+    Ready(Arc<GitWorkspaceResult>),
     Error(String),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReviewPicker {
+    None,
+    Branches,
+    PullRequest,
 }
 
 #[derive(Clone, Debug)]
@@ -185,10 +192,20 @@ pub struct WorkbenchInspector {
     state: LoadState,
     review_state: ReviewLoadState,
     review_generation: u64,
+    review_navigation_generation: u64,
+    review_action_generation: u64,
     review_task: Option<Task<()>>,
+    review_navigation_task: Option<Task<()>>,
     review_action_task: Option<Task<()>>,
     review_action_busy: bool,
     review_feedback: Option<(bool, String)>,
+    review_target: GitReviewTarget,
+    review_picker: ReviewPicker,
+    branch_query: QueryEditor,
+    pr_query: QueryEditor,
+    branch_refs: Vec<GitRefEntry>,
+    create_branch_open: bool,
+    review_pr: Option<Arc<PullRequestStatus>>,
     ask_draft: Option<AskDraft>,
     ask_query: QueryEditor,
     ask_task: Option<Task<()>>,
@@ -275,10 +292,20 @@ impl WorkbenchInspector {
             state: LoadState::NoSession,
             review_state: ReviewLoadState::NoSession,
             review_generation: 0,
+            review_navigation_generation: 0,
+            review_action_generation: 0,
             review_task: None,
+            review_navigation_task: None,
             review_action_task: None,
             review_action_busy: false,
             review_feedback: None,
+            review_target: GitReviewTarget::WorkingTree,
+            review_picker: ReviewPicker::None,
+            branch_query: QueryEditor::default(),
+            pr_query: QueryEditor::default(),
+            branch_refs: Vec::new(),
+            create_branch_open: false,
+            review_pr: None,
             ask_draft: None,
             ask_query: QueryEditor::default(),
             ask_task: None,
@@ -389,6 +416,22 @@ impl WorkbenchInspector {
     /// Opens a terminal or diff-shaped file reference in the native code tab.
     /// The viewer owns resolution and loading; the inspector only preserves
     /// the workbench's spatial context and selects the destination tab.
+    pub fn open_branches_picker(&mut self, cx: &mut Context<Self>) {
+        self.select_tab(InspectorTab::Changes, cx);
+        self.review_picker = ReviewPicker::Branches;
+        self.branch_query.clear();
+        self.create_branch_open = false;
+        self.load_branch_refs(cx);
+        cx.notify();
+    }
+
+    pub fn open_pull_request_picker(&mut self, cx: &mut Context<Self>) {
+        self.select_tab(InspectorTab::Changes, cx);
+        self.review_picker = ReviewPicker::PullRequest;
+        self.pr_query.clear();
+        cx.notify();
+    }
+
     pub fn open_file_reference(
         &mut self,
         cwd: impl Into<PathBuf>,
@@ -530,6 +573,9 @@ impl WorkbenchInspector {
             return;
         }
         let Some(context) = self.selected_context() else {
+            self.review_navigation_generation = self.review_navigation_generation.wrapping_add(1);
+            self.review_action_generation = self.review_action_generation.wrapping_add(1);
+            self.review_action_busy = false;
             self.context = None;
             self.state = LoadState::NoSession;
             self.review_state = ReviewLoadState::NoSession;
@@ -540,6 +586,9 @@ impl WorkbenchInspector {
         };
         let context_changed = self.context.as_ref() != Some(&context);
         if context_changed {
+            self.review_navigation_generation = self.review_navigation_generation.wrapping_add(1);
+            self.review_action_generation = self.review_action_generation.wrapping_add(1);
+            self.review_action_busy = false;
             self.scroll = UniformListScrollHandle::new();
             self.scrollbar_interaction = ScrollbarInteraction::default();
             self.scrollbar_layout_primed = false;
@@ -548,6 +597,10 @@ impl WorkbenchInspector {
             self.ask_draft = None;
             self.ask_feedback = None;
             self.ask_query.clear();
+            self.review_target = GitReviewTarget::WorkingTree;
+            self.review_picker = ReviewPicker::None;
+            self.branch_refs.clear();
+            self.review_pr = None;
             let workspace = (!context.remote).then(|| context.cwd.clone());
             self.code_viewer
                 .update(cx, |viewer, cx| viewer.set_workspace(workspace, cx));
@@ -556,7 +609,7 @@ impl WorkbenchInspector {
         if self.preview_account {
             self.loading = false;
             self.state = LoadState::Ready(Arc::new(preview_diff_snapshot(context.cwd)));
-            self.review_state = ReviewLoadState::Ready(Arc::new(preview_review_status()));
+            self.review_state = ReviewLoadState::Ready(Arc::new(preview_workspace()));
             self.refresh_task = None;
             cx.notify();
             return;
@@ -578,24 +631,41 @@ impl WorkbenchInspector {
         let remote = context.remote;
         let comparison = self.comparison;
         let layer = self.diff_layer;
+        let review_target = self.review_target.clone();
         let client = Arc::clone(self.runtime.client());
         let tokio = self.tokio.clone();
         self.refresh_task = Some(cx.spawn(async move |this, cx| {
-            let result = if remote {
-                tokio
-                    .spawn(async move { client.read_diff(&session_id, comparison).await })
-                    .await
-                    .map_err(|error| format!("Diff request stopped: {error}"))
-                    .and_then(|result| result.map_err(|error| error.to_string()))
-                    .map(snapshot_from_read_diff)
-                    .map(Arc::new)
-            } else {
-                tokio
+            let result = match review_target {
+                GitReviewTarget::WorkingTree if !remote => tokio
                     .spawn_blocking(move || load_local_diff(&cwd, layer))
                     .await
                     .map_err(|error| format!("Diff worker stopped: {error}"))
                     .and_then(|result| result.map_err(|error| error.to_string()))
-                    .map(Arc::new)
+                    .map(Arc::new),
+                GitReviewTarget::WorkingTree => tokio
+                    .spawn({
+                        let client = Arc::clone(&client);
+                        async move { client.read_diff(&session_id, comparison).await }
+                    })
+                    .await
+                    .map_err(|error| format!("Diff request stopped: {error}"))
+                    .and_then(|result| result.map_err(|error| error.to_string()))
+                    .map(snapshot_from_read_diff)
+                    .map(Arc::new),
+                target => tokio
+                    .spawn(async move { client.git_compare(session_id, target).await })
+                    .await
+                    .map_err(|error| format!("Compare request stopped: {error}"))
+                    .and_then(|result| result.map_err(|error| error.to_string()))
+                    .map(|compare| {
+                        snapshot_from_read_diff(SessionReadDiffResult {
+                            patch: compare.patch,
+                            repo_root: compare.repo_root,
+                            truncated: compare.truncated,
+                            base_ref: compare.base_ref,
+                        })
+                    })
+                    .map(Arc::new),
             };
             let _ = this.update(cx, |this, cx| {
                 if this.generation != generation {
@@ -616,35 +686,35 @@ impl WorkbenchInspector {
     }
 
     fn refresh_review(&mut self, context: &DiffContext, force: bool, cx: &mut Context<Self>) {
-        if context.remote {
-            self.review_state = ReviewLoadState::Remote;
-            return;
-        }
         if self.review_action_busy && !force {
             return;
         }
         self.review_generation = self.review_generation.wrapping_add(1);
         let generation = self.review_generation;
-        let cwd = context.cwd.clone();
         if !matches!(self.review_state, ReviewLoadState::Ready(_)) {
             self.review_state = ReviewLoadState::Loading;
         }
+        let client = Arc::clone(self.runtime.client());
+        let session_id = context.id.clone();
+        let target = self.review_target.clone();
         let tokio = self.tokio.clone();
         self.review_task = Some(cx.spawn(async move |this, cx| {
             let result = tokio
-                .spawn_blocking(move || {
-                    let repository = GitRepository::discover(&cwd)?;
-                    repository.status()
-                })
+                .spawn(async move { client.git_workspace(session_id, Some(target)).await })
                 .await
-                .map_err(|error| format!("Git status worker stopped: {error}"))
+                .map_err(|error| format!("Git workspace request stopped: {error}"))
                 .and_then(|result| result.map_err(|error| error.to_string()));
             let _ = this.update(cx, |this, cx| {
                 if this.review_generation != generation {
                     return;
                 }
                 this.review_state = match result {
-                    Ok(status) => ReviewLoadState::Ready(Arc::new(status)),
+                    Ok(workspace) => {
+                        if let Some(pull_request) = workspace.pull_request.clone() {
+                            this.review_pr = Some(Arc::new(pull_request));
+                        }
+                        ReviewLoadState::Ready(Arc::new(workspace))
+                    }
                     Err(error) => ReviewLoadState::Error(error),
                 };
                 cx.notify();
@@ -656,34 +726,46 @@ impl WorkbenchInspector {
         if self.review_action_busy {
             return;
         }
-        let Some(context) = self.context.clone().filter(|context| !context.remote) else {
+        let Some(context) = self.context.clone() else {
             return;
         };
         self.review_action_busy = true;
+        self.review_action_generation = self.review_action_generation.wrapping_add(1);
+        let action_generation = self.review_action_generation;
         self.review_feedback = None;
         self.discard_armed = false;
         self.armed_hunk = None;
         cx.notify();
+        let client = Arc::clone(self.runtime.client());
+        let session_id = context.id;
+        let result_session_id = session_id.clone();
         let tokio = self.tokio.clone();
         self.review_action_task = Some(cx.spawn(async move |this, cx| {
             let result = tokio
-                .spawn_blocking(move || -> Result<String, GitReviewError> {
-                    let repository = GitRepository::discover(&context.cwd)?;
+                .spawn(async move {
                     match action {
                         ReviewAction::Stage(paths) => {
-                            repository.stage_paths(&paths)?;
-                            Ok("Changes staged".to_owned())
+                            client
+                                .git_stage(session_id, paths_to_strings(&paths))
+                                .await?;
+                            Ok::<String, zeus_client::ClientError>("Changes staged".to_owned())
                         }
                         ReviewAction::Unstage(paths) => {
-                            repository.unstage_paths(&paths)?;
+                            client
+                                .git_unstage(session_id, paths_to_strings(&paths))
+                                .await?;
                             Ok("Changes moved back to the working tree".to_owned())
                         }
                         ReviewAction::Discard(paths) => {
-                            repository.discard_unstaged(&paths)?;
+                            client
+                                .git_discard(session_id, paths_to_strings(&paths))
+                                .await?;
                             Ok("Unstaged edits discarded".to_owned())
                         }
                         ReviewAction::Patch { patch, mutation } => {
-                            repository.apply_patch(&patch, mutation)?;
+                            client
+                                .git_apply_patch(session_id, patch, mutation.into_proto())
+                                .await?;
                             Ok(match mutation {
                                 PatchMutation::Stage => "Hunk staged",
                                 PatchMutation::Unstage => "Hunk moved back to the working tree",
@@ -692,15 +774,20 @@ impl WorkbenchInspector {
                             .to_owned())
                         }
                         ReviewAction::Commit(message) => {
-                            let commit = repository.commit(&message)?;
+                            let commit = client.git_commit(session_id, message).await?;
                             Ok(format!("Committed {} · {}", commit.oid, commit.summary))
                         }
                     }
                 })
                 .await
-                .map_err(|error| format!("Git action worker stopped: {error}"))
+                .map_err(|error| format!("Git action request stopped: {error}"))
                 .and_then(|result| result.map_err(|error| error.to_string()));
             let _ = this.update(cx, |this, cx| {
+                if this.review_action_generation != action_generation
+                    || this.context.as_ref().map(|context| &context.id) != Some(&result_session_id)
+                {
+                    return;
+                }
                 this.review_action_busy = false;
                 match result {
                     Ok(message) => {
@@ -711,6 +798,311 @@ impl WorkbenchInspector {
                     Err(message) => this.review_feedback = Some((false, message)),
                 }
                 this.refresh(true, cx);
+                cx.notify();
+            });
+        }));
+    }
+
+    fn set_review_target(&mut self, target: GitReviewTarget, cx: &mut Context<Self>) {
+        self.review_navigation_generation = self.review_navigation_generation.wrapping_add(1);
+        self.review_target = target;
+        self.review_picker = ReviewPicker::None;
+        if !matches!(self.review_target, GitReviewTarget::PullRequest { .. }) {
+            self.review_pr = None;
+        }
+        if !matches!(self.review_target, GitReviewTarget::WorkingTree) {
+            self.diff_layer = DiffLayer::Branch;
+        }
+        self.refresh(true, cx);
+    }
+
+    fn fetch_refs(&mut self, cx: &mut Context<Self>) {
+        let Some(context) = self.context.clone() else {
+            return;
+        };
+        self.review_navigation_generation = self.review_navigation_generation.wrapping_add(1);
+        let navigation_generation = self.review_navigation_generation;
+        let result_session_id = context.id.clone();
+        let client = Arc::clone(self.runtime.client());
+        let tokio = self.tokio.clone();
+        self.review_feedback = Some((true, "Fetching…".into()));
+        cx.notify();
+        self.review_navigation_task = Some(cx.spawn(async move |this, cx| {
+            let result = tokio
+                .spawn(async move { client.git_fetch(context.id, None).await })
+                .await
+                .map_err(|error| format!("Fetch stopped: {error}"))
+                .and_then(|result| result.map_err(|error| error.to_string()));
+            let _ = this.update(cx, |this, cx| {
+                if this.review_navigation_generation != navigation_generation
+                    || this.context.as_ref().map(|context| &context.id) != Some(&result_session_id)
+                {
+                    return;
+                }
+                match result {
+                    Ok(fetch) => {
+                        this.review_feedback = Some((true, fetch.summary));
+                        this.load_branch_refs(cx);
+                    }
+                    Err(message) => this.review_feedback = Some((false, message)),
+                }
+                this.refresh(true, cx);
+            });
+        }));
+    }
+
+    fn load_branch_refs(&mut self, cx: &mut Context<Self>) {
+        let Some(context) = self.context.clone() else {
+            return;
+        };
+        let query = self.branch_query.text().trim().to_owned();
+        let query = (!query.is_empty()).then_some(query);
+        self.review_navigation_generation = self.review_navigation_generation.wrapping_add(1);
+        let navigation_generation = self.review_navigation_generation;
+        let result_session_id = context.id.clone();
+        let client = Arc::clone(self.runtime.client());
+        let tokio = self.tokio.clone();
+        self.review_navigation_task = Some(cx.spawn(async move |this, cx| {
+            let result = tokio
+                .spawn(async move { client.git_list_refs(context.id, query).await })
+                .await
+                .map_err(|error| format!("Ref list stopped: {error}"))
+                .and_then(|result| result.map_err(|error| error.to_string()));
+            let _ = this.update(cx, |this, cx| {
+                if this.review_navigation_generation != navigation_generation
+                    || this.context.as_ref().map(|context| &context.id) != Some(&result_session_id)
+                {
+                    return;
+                }
+                match result {
+                    Ok(list) => this.branch_refs = list.refs,
+                    Err(message) => this.review_feedback = Some((false, message)),
+                }
+                cx.notify();
+            });
+        }));
+    }
+
+    fn compare_with_ref(&mut self, ref_name: String, cx: &mut Context<Self>) {
+        self.set_review_target(GitReviewTarget::Branch { ref_name }, cx);
+    }
+
+    fn checkout_ref(&mut self, ref_name: String, mode: GitCheckoutMode, cx: &mut Context<Self>) {
+        if self.review_action_busy {
+            return;
+        }
+        let Some(context) = self.context.clone() else {
+            return;
+        };
+        self.review_action_generation = self.review_action_generation.wrapping_add(1);
+        let action_generation = self.review_action_generation;
+        let result_session_id = context.id.clone();
+        let client = Arc::clone(self.runtime.client());
+        let tokio = self.tokio.clone();
+        self.review_action_busy = true;
+        cx.notify();
+        self.review_action_task = Some(cx.spawn(async move |this, cx| {
+            let result = tokio
+                .spawn(async move { client.git_checkout(context.id, ref_name, mode).await })
+                .await
+                .map_err(|error| format!("Checkout stopped: {error}"))
+                .and_then(|result| result.map_err(|error| error.to_string()));
+            let _ = this.update(cx, |this, cx| {
+                if this.review_action_generation != action_generation
+                    || this.context.as_ref().map(|context| &context.id) != Some(&result_session_id)
+                {
+                    return;
+                }
+                this.review_action_busy = false;
+                match result {
+                    Ok(result) => {
+                        this.review_picker = ReviewPicker::None;
+                        match result.plan.disposition {
+                            GitCheckoutDisposition::FocusExisting {
+                                session_id: Some(session_id),
+                                ..
+                            } => {
+                                this.review_feedback =
+                                    Some((true, "Focused the existing worktree".into()));
+                                cx.emit(InspectorEvent::FocusSession(session_id));
+                            }
+                            GitCheckoutDisposition::FocusExisting { path, .. } => {
+                                this.review_feedback = Some((
+                                    true,
+                                    format!("Branch is already checked out at {path}"),
+                                ));
+                            }
+                            GitCheckoutDisposition::OpenNewWorktree { path } => {
+                                this.review_feedback =
+                                    Some((true, format!("Opened worktree {path}")));
+                            }
+                            GitCheckoutDisposition::SwitchInPlace => {
+                                this.review_target = GitReviewTarget::WorkingTree;
+                                this.review_pr = None;
+                                this.review_feedback = Some((true, "Switched branch".into()));
+                            }
+                            GitCheckoutDisposition::Blocked => {
+                                let detail = result
+                                    .plan
+                                    .reasons
+                                    .iter()
+                                    .map(|reason| reason.message.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join("; ");
+                                this.review_feedback = Some((false, detail));
+                            }
+                        }
+                        this.refresh(true, cx);
+                    }
+                    Err(message) => this.review_feedback = Some((false, message)),
+                }
+                cx.notify();
+            });
+        }));
+    }
+
+    fn create_branch_from_header(&mut self, cx: &mut Context<Self>) {
+        if self.review_action_busy {
+            return;
+        }
+        let name = self.branch_query.text().trim().to_owned();
+        if name.is_empty() {
+            self.review_feedback = Some((false, "Name the new branch first".into()));
+            cx.notify();
+            return;
+        }
+        let Some(context) = self.context.clone() else {
+            return;
+        };
+        self.review_action_generation = self.review_action_generation.wrapping_add(1);
+        let action_generation = self.review_action_generation;
+        let result_session_id = context.id.clone();
+        let client = Arc::clone(self.runtime.client());
+        let tokio = self.tokio.clone();
+        self.review_action_busy = true;
+        cx.notify();
+        self.review_action_task = Some(cx.spawn(async move |this, cx| {
+            let result = tokio
+                .spawn(async move { client.git_branch_create(context.id, name, false).await })
+                .await
+                .map_err(|error| format!("Create branch stopped: {error}"))
+                .and_then(|result| result.map_err(|error| error.to_string()));
+            let _ = this.update(cx, |this, cx| {
+                if this.review_action_generation != action_generation
+                    || this.context.as_ref().map(|context| &context.id) != Some(&result_session_id)
+                {
+                    return;
+                }
+                this.review_action_busy = false;
+                match result {
+                    Ok(_) => {
+                        this.review_feedback = Some((true, "Branch created".into()));
+                        this.create_branch_open = false;
+                        this.load_branch_refs(cx);
+                    }
+                    Err(message) => this.review_feedback = Some((false, message)),
+                }
+                this.refresh(true, cx);
+            });
+        }));
+    }
+
+    fn go_to_pull_request(&mut self, cx: &mut Context<Self>) {
+        if self.review_action_busy {
+            return;
+        }
+        let input = self.pr_query.text().trim().to_owned();
+        if input.is_empty() {
+            self.review_feedback = Some((false, "Enter #123 or a GitHub pull-request URL".into()));
+            cx.notify();
+            return;
+        }
+        let Some(context) = self.context.clone() else {
+            return;
+        };
+        self.review_action_generation = self.review_action_generation.wrapping_add(1);
+        let action_generation = self.review_action_generation;
+        let result_session_id = context.id.clone();
+        let client = Arc::clone(self.runtime.client());
+        let tokio = self.tokio.clone();
+        self.review_action_busy = true;
+        cx.notify();
+        self.review_action_task = Some(cx.spawn(async move |this, cx| {
+            let result = tokio
+                .spawn(async move { client.git_pr_resolve(context.id, input).await })
+                .await
+                .map_err(|error| format!("PR request stopped: {error}"))
+                .and_then(|result| result.map_err(|error| error.to_string()));
+            let _ = this.update(cx, |this, cx| {
+                if this.review_action_generation != action_generation
+                    || this.context.as_ref().map(|context| &context.id) != Some(&result_session_id)
+                {
+                    return;
+                }
+                this.review_action_busy = false;
+                match result {
+                    Ok(resolved) => {
+                        this.review_pr = Some(Arc::new(resolved.status.clone()));
+                        this.review_picker = ReviewPicker::None;
+                        this.set_review_target(
+                            GitReviewTarget::PullRequest {
+                                url: resolved.status.url,
+                                number: resolved.status.number,
+                            },
+                            cx,
+                        );
+                    }
+                    Err(message) => this.review_feedback = Some((false, message)),
+                }
+                cx.notify();
+            });
+        }));
+    }
+
+    fn open_pull_request_worktree(&mut self, cx: &mut Context<Self>) {
+        if self.review_action_busy {
+            return;
+        }
+        let GitReviewTarget::PullRequest { url, .. } = self.review_target.clone() else {
+            return;
+        };
+        let Some(context) = self.context.clone() else {
+            return;
+        };
+        self.review_action_generation = self.review_action_generation.wrapping_add(1);
+        let action_generation = self.review_action_generation;
+        let result_session_id = context.id.clone();
+        let client = Arc::clone(self.runtime.client());
+        let tokio = self.tokio.clone();
+        self.review_action_busy = true;
+        cx.notify();
+        self.review_action_task = Some(cx.spawn(async move |this, cx| {
+            let result = tokio
+                .spawn(async move { client.git_pr_open(context.id, url).await })
+                .await
+                .map_err(|error| format!("Open PR worktree stopped: {error}"))
+                .and_then(|result| result.map_err(|error| error.to_string()));
+            let _ = this.update(cx, |this, cx| {
+                if this.review_action_generation != action_generation
+                    || this.context.as_ref().map(|context| &context.id) != Some(&result_session_id)
+                {
+                    return;
+                }
+                this.review_action_busy = false;
+                match result {
+                    Ok(result) => {
+                        if let GitCheckoutDisposition::FocusExisting {
+                            session_id: Some(session_id),
+                            ..
+                        } = result.plan.disposition
+                        {
+                            cx.emit(InspectorEvent::FocusSession(session_id));
+                        }
+                        this.review_feedback = Some((true, "Opened pull-request worktree".into()));
+                        this.refresh(true, cx);
+                    }
+                    Err(message) => this.review_feedback = Some((false, message)),
+                }
                 cx.notify();
             });
         }));
@@ -2269,13 +2661,9 @@ impl WorkbenchInspector {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let ReviewLoadState::Ready(status) = &self.review_state else {
+        let ReviewLoadState::Ready(workspace) = &self.review_state else {
             let (symbol, label) = match &self.review_state {
                 ReviewLoadState::NoSession => ("minus.circle", "Select an agent to review"),
-                ReviewLoadState::Remote => (
-                    "network",
-                    "Remote changes are view-only until Git actions move into the daemon",
-                ),
                 ReviewLoadState::Loading => ("ellipsis", "Reading index and working tree…"),
                 ReviewLoadState::Error(error) => {
                     return div()
@@ -2309,7 +2697,9 @@ impl WorkbenchInspector {
                 .child(label)
                 .into_any_element();
         };
-        let status = Arc::clone(status);
+        let workspace = Arc::clone(workspace);
+        let status = ReviewStatus::from_proto(&workspace.status);
+        let comparing = !matches!(workspace.target, GitReviewTarget::WorkingTree);
         let staged_paths: Vec<_> = status
             .staged
             .iter()
@@ -2345,7 +2735,7 @@ impl WorkbenchInspector {
         let discard_armed = self.discard_armed;
 
         let mut actions = div().flex().items_center().gap(px(5.0));
-        if self.diff_layer == DiffLayer::Working && !stage_paths.is_empty() {
+        if !comparing && self.diff_layer == DiffLayer::Working && !stage_paths.is_empty() {
             let paths = stage_paths;
             actions = actions.child(
                 div()
@@ -2381,7 +2771,7 @@ impl WorkbenchInspector {
                     .child("Stage all"),
             );
         }
-        if self.diff_layer == DiffLayer::Staged && !staged_paths.is_empty() {
+        if !comparing && self.diff_layer == DiffLayer::Staged && !staged_paths.is_empty() {
             let paths = staged_paths;
             actions = actions.child(
                 div()
@@ -2439,7 +2829,7 @@ impl WorkbenchInspector {
                     .child(if commit_open { "Cancel" } else { "Commit" }),
             );
         }
-        if self.diff_layer == DiffLayer::Working && !discard_paths.is_empty() {
+        if !comparing && self.diff_layer == DiffLayer::Working && !discard_paths.is_empty() {
             let paths = discard_paths;
             actions = actions.child(
                 div()
@@ -2502,67 +2892,267 @@ impl WorkbenchInspector {
                 String::new()
             }
         );
-        let mut panel = div()
-            .flex_none()
-            .px(px(10.0))
-            .py(px(7.0))
-            .flex()
-            .flex_col()
-            .gap(px(7.0))
-            .border_b_1()
-            .border_color(colors.primary.alpha(0.06))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(7.0))
-                    .child(sf_symbol("arrow.branch", 11.0, colors.secondary))
-                    .child(
-                        div()
-                            .min_w(px(0.0))
-                            .flex_1()
-                            .truncate()
-                            .font_family(crate::fonts::mono_family())
-                            .text_size(px(10.5))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(colors.secondary)
-                            .child(branch),
-                    )
-                    .when_some(branch_detail, |row, detail| {
-                        row.child(
-                            div()
-                                .font_family(crate::fonts::mono_family())
-                                .text_size(px(9.5))
-                                .text_color(colors.tertiary)
-                                .child(detail),
-                        )
-                    })
-                    .child(
-                        div()
-                            .text_size(px(9.5))
-                            .text_color(if conflicted_count > 0 {
-                                Ink::DANGER
-                            } else {
-                                colors.tertiary
-                            })
-                            .child(counts),
-                    ),
-            )
-            .when(self.diff_layer != DiffLayer::Branch, |panel| {
-                panel.child(actions)
-            })
-            .when(self.diff_layer == DiffLayer::Branch, |panel| {
-                panel.child(
+        let repository = workspace
+            .repository
+            .clone()
+            .unwrap_or_else(|| workspace.repo_root.clone());
+        let target_label = match &workspace.target {
+            GitReviewTarget::WorkingTree => "Working tree".to_owned(),
+            GitReviewTarget::Branch { ref_name } => format!("Compare {ref_name}"),
+            GitReviewTarget::PullRequest { number, .. } => format!("PR #{number}"),
+        };
+        let owner_label = workspace.owner.as_ref().map(|owner| {
+            if owner.live {
+                format!("owned by {}", owner.title)
+            } else {
+                format!("last owned by {}", owner.title)
+            }
+        });
+        let dirty_label = if workspace.conflicted {
+            Some("conflicted")
+        } else if workspace.dirty {
+            Some("dirty")
+        } else {
+            None
+        };
+        let checkout_name = workspace
+            .worktree_path
+            .rsplit('/')
+            .next()
+            .unwrap_or(workspace.worktree_path.as_str())
+            .to_owned();
+        let mut panel =
+            div()
+                .flex_none()
+                .px(px(10.0))
+                .py(px(7.0))
+                .flex()
+                .flex_col()
+                .gap(px(7.0))
+                .border_b_1()
+                .border_color(colors.primary.alpha(0.06))
+                .child(
                     div()
                         .flex()
                         .items_center()
                         .gap(px(6.0))
-                        .text_size(px(9.5))
-                        .text_color(colors.tertiary)
-                        .child(sf_symbol("scope", 9.5, colors.tertiary))
-                        .child("Overview only · choose Working or Staged to mutate hunks"),
+                        .child(sf_symbol("shippingbox", 11.0, colors.secondary))
+                        .child(
+                            div()
+                                .min_w(px(0.0))
+                                .flex_1()
+                                .truncate()
+                                .font_family(crate::fonts::mono_family())
+                                .text_size(px(10.5))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(colors.secondary)
+                                .child(repository),
+                        )
+                        .child(
+                            div()
+                                .id("review-branches")
+                                .h(px(22.0))
+                                .px(px(7.0))
+                                .flex()
+                                .items_center()
+                                .rounded(px(Radius::BADGE))
+                                .bg(colors.primary.alpha(0.055))
+                                .text_size(px(10.0))
+                                .text_color(colors.secondary)
+                                .cursor_pointer()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.open_branches_picker(cx);
+                                    cx.stop_propagation();
+                                }))
+                                .child("Branches…"),
+                        )
+                        .child(
+                            div()
+                                .id("review-goto-pr")
+                                .h(px(22.0))
+                                .px(px(7.0))
+                                .flex()
+                                .items_center()
+                                .rounded(px(Radius::BADGE))
+                                .bg(colors.primary.alpha(0.055))
+                                .text_size(px(10.0))
+                                .text_color(colors.secondary)
+                                .cursor_pointer()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.open_pull_request_picker(cx);
+                                    cx.stop_propagation();
+                                }))
+                                .child("Go to PR…"),
+                        )
+                        .child(
+                            div()
+                                .id("review-fetch")
+                                .h(px(22.0))
+                                .px(px(7.0))
+                                .flex()
+                                .items_center()
+                                .rounded(px(Radius::BADGE))
+                                .text_size(px(10.0))
+                                .text_color(colors.tertiary)
+                                .cursor_pointer()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.fetch_refs(cx);
+                                    cx.stop_propagation();
+                                }))
+                                .child("Fetch"),
+                        ),
                 )
-            });
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(7.0))
+                        .child(sf_symbol("arrow.branch", 11.0, colors.secondary))
+                        .child(
+                            div()
+                                .min_w(px(0.0))
+                                .flex_1()
+                                .truncate()
+                                .font_family(crate::fonts::mono_family())
+                                .text_size(px(10.5))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(colors.secondary)
+                                .child(format!("{branch} · {checkout_name}")),
+                        )
+                        .when_some(branch_detail, |row, detail| {
+                            row.child(
+                                div()
+                                    .font_family(crate::fonts::mono_family())
+                                    .text_size(px(9.5))
+                                    .text_color(colors.tertiary)
+                                    .child(detail),
+                            )
+                        })
+                        .when_some(owner_label, |row, label| {
+                            row.child(
+                                div()
+                                    .text_size(px(9.5))
+                                    .text_color(colors.tertiary)
+                                    .child(label),
+                            )
+                        })
+                        .when_some(dirty_label, |row, label| {
+                            row.child(
+                                div()
+                                    .text_size(px(9.5))
+                                    .text_color(if workspace.conflicted {
+                                        Ink::DANGER
+                                    } else {
+                                        colors.tertiary
+                                    })
+                                    .child(label),
+                            )
+                        })
+                        .child(
+                            div()
+                                .text_size(px(9.5))
+                                .text_color(if conflicted_count > 0 {
+                                    Ink::DANGER
+                                } else {
+                                    colors.tertiary
+                                })
+                                .child(counts),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .child(sf_symbol("scope", 9.5, colors.tertiary))
+                        .child(
+                            div()
+                                .text_size(px(9.5))
+                                .text_color(colors.tertiary)
+                                .child(target_label),
+                        )
+                        .when(comparing, |row| {
+                            row.child(
+                                div()
+                                    .id("review-return-working-tree")
+                                    .h(px(20.0))
+                                    .px(px(6.0))
+                                    .flex()
+                                    .items_center()
+                                    .rounded(px(Radius::BADGE))
+                                    .text_size(px(9.5))
+                                    .text_color(colors.secondary)
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.set_review_target(GitReviewTarget::WorkingTree, cx);
+                                        cx.stop_propagation();
+                                    }))
+                                    .child("Working tree"),
+                            )
+                        }),
+                )
+                .when_some(self.review_pr.clone(), |panel, pr| {
+                    panel.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(3.0))
+                            .child(
+                                div()
+                                    .text_size(px(10.5))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(colors.secondary)
+                                    .child(format!(
+                                        "#{} {}",
+                                        pr.number,
+                                        pr.title.as_deref().unwrap_or("Pull request")
+                                    )),
+                            )
+                            .child(div().text_size(px(9.5)).text_color(colors.tertiary).child(
+                                format!(
+                                    "{} · {} · +{} −{} · {}",
+                                    pr.state,
+                                    pr.review_decision.as_deref().unwrap_or("no review"),
+                                    pr.additions,
+                                    pr.deletions,
+                                    pr.head_ref_name.as_deref().unwrap_or("head")
+                                ),
+                            ))
+                            .child(
+                                div()
+                                    .id("review-open-pr-worktree")
+                                    .h(px(22.0))
+                                    .px(px(7.0))
+                                    .flex()
+                                    .items_center()
+                                    .rounded(px(Radius::BADGE))
+                                    .bg(colors.primary.alpha(0.055))
+                                    .text_size(px(10.0))
+                                    .text_color(colors.secondary)
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.open_pull_request_worktree(cx);
+                                        cx.stop_propagation();
+                                    }))
+                                    .child("Open PR head worktree"),
+                            ),
+                    )
+                })
+                .when(self.diff_layer != DiffLayer::Branch, |panel| {
+                    panel.child(actions)
+                })
+                .when(self.diff_layer == DiffLayer::Branch, |panel| {
+                    panel.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .text_size(px(9.5))
+                            .text_color(colors.tertiary)
+                            .child(sf_symbol("scope", 9.5, colors.tertiary))
+                            .child("Overview only · choose Working or Staged to mutate hunks"),
+                    )
+                });
 
         if self.commit_open {
             let empty = self.commit_query.is_empty();
@@ -2676,6 +3266,52 @@ impl WorkbenchInspector {
         if self.account_open && event.keystroke.key == "escape" {
             self.account_open = false;
             cx.notify();
+            cx.stop_propagation();
+            return;
+        }
+        if self.review_picker != ReviewPicker::None {
+            match event.keystroke.key.as_str() {
+                "escape" => {
+                    self.review_picker = ReviewPicker::None;
+                    cx.notify();
+                }
+                "enter" if self.review_picker == ReviewPicker::PullRequest => {
+                    self.go_to_pull_request(cx);
+                }
+                "enter" if self.create_branch_open => self.create_branch_from_header(cx),
+                _ => {
+                    let Some(edit) = query_editor::edit_for(&event.keystroke) else {
+                        return;
+                    };
+                    let query = if self.review_picker == ReviewPicker::PullRequest {
+                        &mut self.pr_query
+                    } else {
+                        &mut self.branch_query
+                    };
+                    match edit {
+                        Edit::Local(local) => {
+                            query.apply(local);
+                        }
+                        Edit::Clipboard(ClipboardEdit::Copy) => {
+                            query_editor::copy_selection(query, cx);
+                        }
+                        Edit::Clipboard(ClipboardEdit::Cut) => {
+                            query_editor::cut_selection(query, cx);
+                        }
+                        Edit::Clipboard(ClipboardEdit::Paste) => {
+                            if let Some(text) =
+                                cx.read_from_clipboard().and_then(|item| item.text())
+                            {
+                                query.insert(&text);
+                            }
+                        }
+                    }
+                    if self.review_picker == ReviewPicker::Branches && !self.create_branch_open {
+                        self.load_branch_refs(cx);
+                    }
+                    cx.notify();
+                }
+            }
             cx.stop_propagation();
             return;
         }
@@ -2795,6 +3431,38 @@ impl WorkbenchInspector {
                     error,
                 )
                 .into_any_element(),
+        };
+        let body = if let Some(pull_request) = self.review_pr.clone() {
+            let markdown = pull_request
+                .body
+                .as_deref()
+                .filter(|body| !body.trim().is_empty())
+                .map(|body| self.markdown_document(body));
+            div()
+                .size_full()
+                .min_h(px(0.0))
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .id("review-pr-details")
+                        .max_h(px(340.0))
+                        .flex_none()
+                        .p(px(10.0))
+                        .overflow_y_scroll()
+                        .border_b_1()
+                        .border_color(colors.primary.alpha(0.06))
+                        .child(render_pull_request(
+                            &pull_request,
+                            colors,
+                            cx.entity(),
+                            markdown,
+                        )),
+                )
+                .child(div().min_h(px(0.0)).flex_1().overflow_hidden().child(body))
+                .into_any_element()
+        } else {
+            body
         };
         let comparison_open = remote && self.comparison_menu_open;
         let snapshot = match &self.state {
@@ -2979,6 +3647,265 @@ impl WorkbenchInspector {
             .child(self.render_review_controls(colors, window, cx))
             .child(div().min_h(px(0.0)).flex_1().overflow_hidden().child(body))
             .when_some(menu, |panel, menu| panel.child(menu))
+            .when(self.review_picker != ReviewPicker::None, |panel| {
+                panel.child(self.render_review_picker(colors, cx))
+            })
+            .into_any_element()
+    }
+
+    fn render_review_picker(
+        &mut self,
+        colors: SemanticColors,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let title = match self.review_picker {
+            ReviewPicker::Branches => "Branches",
+            ReviewPicker::PullRequest => "Go to Pull Request",
+            ReviewPicker::None => "",
+        };
+        let query = if self.review_picker == ReviewPicker::PullRequest {
+            self.pr_query.text()
+        } else {
+            self.branch_query.text()
+        };
+        let mut body = div()
+            .id("review-picker-scroll")
+            .max_h(px(370.0))
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .p(px(8.0))
+            .overflow_y_scroll();
+        body = body.child(
+            div()
+                .h(px(28.0))
+                .px(px(8.0))
+                .flex()
+                .items_center()
+                .rounded(px(Radius::CHIP))
+                .bg(colors.background)
+                .border_1()
+                .border_color(colors.primary.alpha(0.10))
+                .font_family(crate::fonts::mono_family())
+                .text_size(px(11.0))
+                .text_color(colors.primary)
+                .child(if query.is_empty() {
+                    if self.review_picker == ReviewPicker::PullRequest {
+                        "#123 or GitHub URL".to_owned()
+                    } else {
+                        "Search branches".to_owned()
+                    }
+                } else {
+                    query.to_owned()
+                }),
+        );
+        if self.review_picker == ReviewPicker::Branches {
+            body = body.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(
+                        div()
+                            .id("review-create-branch")
+                            .h(px(22.0))
+                            .px(px(7.0))
+                            .flex()
+                            .items_center()
+                            .rounded(px(Radius::BADGE))
+                            .text_size(px(10.0))
+                            .text_color(colors.secondary)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.create_branch_open = !this.create_branch_open;
+                                cx.notify();
+                            }))
+                            .child(if self.create_branch_open {
+                                "Cancel"
+                            } else {
+                                "Create branch"
+                            }),
+                    )
+                    .when(self.create_branch_open, |row| {
+                        row.child(
+                            div()
+                                .id("review-create-branch-confirm")
+                                .h(px(22.0))
+                                .px(px(7.0))
+                                .flex()
+                                .items_center()
+                                .rounded(px(Radius::BADGE))
+                                .bg(colors.primary.alpha(0.08))
+                                .text_size(px(10.0))
+                                .text_color(colors.secondary)
+                                .cursor_pointer()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.create_branch_from_header(cx);
+                                }))
+                                .child("Create"),
+                        )
+                    }),
+            );
+            for entry in self.branch_refs.iter().take(40).cloned() {
+                let name = entry.short_name.clone();
+                let identity = entry.name.clone();
+                let kind = match entry.kind {
+                    zeus_proto::GitRefKind::Local => "local",
+                    zeus_proto::GitRefKind::Remote => "remote",
+                };
+                let mut detail = kind.to_owned();
+                if entry.current {
+                    detail.push_str(" · current");
+                }
+                if let Some(path) = &entry.worktree_path {
+                    detail.push_str(" · ");
+                    detail.push_str(path.rsplit('/').next().unwrap_or(path));
+                }
+                let compare_name = name.clone();
+                let switch_name = name.clone();
+                let worktree_name = name.clone();
+                body = body.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(3.0))
+                        .py(px(4.0))
+                        .child(
+                            div()
+                                .font_family(crate::fonts::mono_family())
+                                .text_size(px(11.0))
+                                .text_color(colors.secondary)
+                                .child(name),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(9.5))
+                                .text_color(colors.tertiary)
+                                .child(detail),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(4.0))
+                                .child(self.review_ref_action(
+                                    SharedString::from(format!("review-ref-compare-{identity}")),
+                                    "Compare with…",
+                                    colors,
+                                    cx,
+                                    move |this, cx| this.compare_with_ref(compare_name.clone(), cx),
+                                ))
+                                .child(self.review_ref_action(
+                                    SharedString::from(format!("review-ref-switch-{identity}")),
+                                    "Switch checkout…",
+                                    colors,
+                                    cx,
+                                    move |this, cx| {
+                                        this.checkout_ref(
+                                            switch_name.clone(),
+                                            GitCheckoutMode::Switch,
+                                            cx,
+                                        )
+                                    },
+                                ))
+                                .child(self.review_ref_action(
+                                    SharedString::from(format!("review-ref-worktree-{identity}")),
+                                    "Open in new worktree",
+                                    colors,
+                                    cx,
+                                    move |this, cx| {
+                                        this.checkout_ref(
+                                            worktree_name.clone(),
+                                            GitCheckoutMode::Worktree,
+                                            cx,
+                                        )
+                                    },
+                                )),
+                        ),
+                );
+            }
+        } else {
+            body = body.child(
+                div()
+                    .id("review-pr-go")
+                    .h(px(24.0))
+                    .px(px(8.0))
+                    .flex()
+                    .items_center()
+                    .rounded(px(Radius::BADGE))
+                    .bg(colors.primary.alpha(0.08))
+                    .text_size(px(10.5))
+                    .text_color(colors.secondary)
+                    .cursor_pointer()
+                    .on_click(cx.listener(|this, _, _, cx| this.go_to_pull_request(cx)))
+                    .child("View pull request"),
+            );
+        }
+        div()
+            .absolute()
+            .inset_0()
+            .child(div().absolute().inset_0().occlude().on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.review_picker = ReviewPicker::None;
+                    cx.notify();
+                    cx.stop_propagation();
+                }),
+            ))
+            .child(
+                div()
+                    .id("review-picker")
+                    .absolute()
+                    .top(px(40.0))
+                    .left(px(9.0))
+                    .w(px(360.0))
+                    .max_h(px(420.0))
+                    .occlude()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(FloatingSurface::new(
+                        colors,
+                        div()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .px(px(10.0))
+                                    .py(px(7.0))
+                                    .text_size(px(11.0))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(colors.secondary)
+                                    .child(title),
+                            )
+                            .child(body),
+                    )),
+            )
+            .into_any_element()
+    }
+
+    fn review_ref_action(
+        &self,
+        id: SharedString,
+        label: &'static str,
+        colors: SemanticColors,
+        cx: &mut Context<Self>,
+        on_click: impl Fn(&mut Self, &mut Context<Self>) + 'static,
+    ) -> AnyElement {
+        div()
+            .id(id)
+            .h(px(20.0))
+            .px(px(6.0))
+            .flex()
+            .items_center()
+            .rounded(px(Radius::BADGE))
+            .text_size(px(9.5))
+            .text_color(colors.secondary)
+            .cursor_pointer()
+            .hover(move |button| button.bg(colors.primary.alpha(0.08)))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                on_click(this, cx);
+                cx.stop_propagation();
+            }))
+            .child(label)
             .into_any_element()
     }
 
@@ -3260,6 +4187,13 @@ fn git_is_not_installed(error: &str) -> bool {
     error.contains("git is not installed")
         || error.contains("git: command not found")
         || error.contains("git: not found")
+}
+
+fn paths_to_strings(paths: &[PathBuf]) -> Vec<String> {
+    paths
+        .iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect()
 }
 
 fn should_show_blocking_git_loading(context_changed: bool, state: &LoadState) -> bool {

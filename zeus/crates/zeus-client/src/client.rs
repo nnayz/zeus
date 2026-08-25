@@ -690,6 +690,193 @@ impl DaemonClient {
         Ok(result.entries)
     }
 
+    pub async fn git_workspace(
+        &self,
+        session_id: SessionId,
+        target: Option<GitReviewTarget>,
+    ) -> Result<GitWorkspaceResult, ClientError> {
+        self.typed(
+            Method::GIT_WORKSPACE,
+            &GitWorkspaceParams { session_id, target },
+        )
+        .await
+    }
+
+    pub async fn git_stage(
+        &self,
+        session_id: SessionId,
+        paths: Vec<String>,
+    ) -> Result<GitWorkspaceResult, ClientError> {
+        self.typed(Method::GIT_STAGE, &GitPathsParams { session_id, paths })
+            .await
+    }
+
+    pub async fn git_unstage(
+        &self,
+        session_id: SessionId,
+        paths: Vec<String>,
+    ) -> Result<GitWorkspaceResult, ClientError> {
+        self.typed(Method::GIT_UNSTAGE, &GitPathsParams { session_id, paths })
+            .await
+    }
+
+    pub async fn git_discard(
+        &self,
+        session_id: SessionId,
+        paths: Vec<String>,
+    ) -> Result<GitWorkspaceResult, ClientError> {
+        self.typed(Method::GIT_DISCARD, &GitPathsParams { session_id, paths })
+            .await
+    }
+
+    pub async fn git_apply_patch(
+        &self,
+        session_id: SessionId,
+        patch: Vec<u8>,
+        mutation: GitPatchMutation,
+    ) -> Result<GitWorkspaceResult, ClientError> {
+        self.typed(
+            Method::GIT_APPLY_PATCH,
+            &GitPatchParams {
+                session_id,
+                patch,
+                mutation,
+            },
+        )
+        .await
+    }
+
+    pub async fn git_commit(
+        &self,
+        session_id: SessionId,
+        message: String,
+    ) -> Result<GitCommitResult, ClientError> {
+        self.typed(
+            Method::GIT_COMMIT,
+            &GitCommitParams {
+                session_id,
+                message,
+            },
+        )
+        .await
+    }
+
+    pub async fn git_list_refs(
+        &self,
+        session_id: SessionId,
+        query: Option<String>,
+    ) -> Result<GitListRefsResult, ClientError> {
+        self.typed(
+            Method::GIT_LIST_REFS,
+            &GitListRefsParams { session_id, query },
+        )
+        .await
+    }
+
+    pub async fn git_fetch(
+        &self,
+        session_id: SessionId,
+        remote: Option<String>,
+    ) -> Result<GitFetchResult, ClientError> {
+        self.core
+            .request_typed(
+                Method::GIT_FETCH,
+                Some(&GitFetchParams { session_id, remote }),
+                Some(Duration::from_secs(90)),
+            )
+            .await
+    }
+
+    pub async fn git_compare(
+        &self,
+        session_id: SessionId,
+        target: GitReviewTarget,
+    ) -> Result<GitCompareResult, ClientError> {
+        self.typed(
+            Method::GIT_COMPARE,
+            &GitCompareParams { session_id, target },
+        )
+        .await
+    }
+
+    pub async fn git_branch_create(
+        &self,
+        session_id: SessionId,
+        name: String,
+        checkout: bool,
+    ) -> Result<GitCheckoutResult, ClientError> {
+        self.typed(
+            Method::GIT_BRANCH_CREATE,
+            &GitBranchCreateParams {
+                session_id,
+                name,
+                checkout,
+            },
+        )
+        .await
+    }
+
+    pub async fn git_checkout_plan(
+        &self,
+        session_id: SessionId,
+        ref_name: String,
+    ) -> Result<GitCheckoutPlan, ClientError> {
+        self.typed(
+            Method::GIT_CHECKOUT_PLAN,
+            &GitCheckoutParams {
+                session_id,
+                ref_name,
+                mode: GitCheckoutMode::Switch,
+            },
+        )
+        .await
+    }
+
+    pub async fn git_checkout(
+        &self,
+        session_id: SessionId,
+        ref_name: String,
+        mode: GitCheckoutMode,
+    ) -> Result<GitCheckoutResult, ClientError> {
+        self.typed(
+            Method::GIT_CHECKOUT,
+            &GitCheckoutParams {
+                session_id,
+                ref_name,
+                mode,
+            },
+        )
+        .await
+    }
+
+    pub async fn git_pr_resolve(
+        &self,
+        session_id: SessionId,
+        input: String,
+    ) -> Result<GitPrResolveResult, ClientError> {
+        self.core
+            .request_typed(
+                Method::GIT_PR_RESOLVE,
+                Some(&GitPrResolveParams { session_id, input }),
+                Some(Duration::from_secs(45)),
+            )
+            .await
+    }
+
+    pub async fn git_pr_open(
+        &self,
+        session_id: SessionId,
+        input: String,
+    ) -> Result<GitCheckoutResult, ClientError> {
+        self.core
+            .request_typed(
+                Method::GIT_PR_OPEN,
+                Some(&GitPrOpenParams { session_id, input }),
+                Some(Duration::from_secs(90)),
+            )
+            .await
+    }
+
     pub async fn history(&self) -> Result<SessionHistoryResult, ClientError> {
         self.no_params(Method::SESSION_HISTORY).await
     }

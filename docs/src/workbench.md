@@ -60,7 +60,7 @@ conducting.
 | Tab | Job |
 |-----|-----|
 | **Info** | Kind, cwd, host, timing, and usage for today / this month |
-| **Review** | Live git diff for this worktree. Stage, commit, and open a PR from here when the repo allows it |
+| **Review** | Git workspace for this checkout: repository header, branch picker, pull-request navigation, and the live diff. Stage and commit stay on the working tree |
 | **Code** | File viewer bound to the same tree. Word wrap is a Settings toggle |
 | **Artifacts** | Ports the session opened, pull requests it mentioned, and other finds |
 

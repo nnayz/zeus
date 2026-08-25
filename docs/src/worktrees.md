@@ -32,7 +32,10 @@ zeus worktree list --repo ~/src/mldrills
 ```
 
 The inspector **Review** tab is bound to the session's cwd. If that cwd is
-a worktree, you are reviewing that agent's branch, not `main`.
+a worktree, you are reviewing that agent's branch, not `main`. **Branches…**
+compares or opens another ref without confusing that with an in-place
+checkout. **Go to Pull Request…** loads `#123` or a GitHub URL even when no
+agent printed the link. Opening a PR head uses an isolated worktree.
 
 ## Clean up
 

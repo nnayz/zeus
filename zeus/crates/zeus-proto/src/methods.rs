@@ -46,6 +46,20 @@ impl Method {
     pub const WORKTREE_LIST: &'static str = "worktree.list";
     pub const WORKTREE_REMOVE: &'static str = "worktree.remove";
     pub const WORKTREE_OVERVIEW: &'static str = "worktree.overview";
+    pub const GIT_WORKSPACE: &'static str = "git.workspace";
+    pub const GIT_STAGE: &'static str = "git.stage";
+    pub const GIT_UNSTAGE: &'static str = "git.unstage";
+    pub const GIT_DISCARD: &'static str = "git.discard";
+    pub const GIT_APPLY_PATCH: &'static str = "git.apply_patch";
+    pub const GIT_COMMIT: &'static str = "git.commit";
+    pub const GIT_LIST_REFS: &'static str = "git.list_refs";
+    pub const GIT_FETCH: &'static str = "git.fetch";
+    pub const GIT_COMPARE: &'static str = "git.compare";
+    pub const GIT_BRANCH_CREATE: &'static str = "git.branch_create";
+    pub const GIT_CHECKOUT_PLAN: &'static str = "git.checkout_plan";
+    pub const GIT_CHECKOUT: &'static str = "git.checkout";
+    pub const GIT_PR_RESOLVE: &'static str = "git.pr_resolve";
+    pub const GIT_PR_OPEN: &'static str = "git.pr_open";
     pub const PROJECT_ADD: &'static str = "project.add";
     pub const PROJECT_REMOVE: &'static str = "project.remove";
     pub const CLIENT_SET_ACTIVE: &'static str = "client.set_active";
@@ -645,6 +659,335 @@ pub struct WorktreeRemoveParams {
 pub type WorktreeRemoveResult = EmptyResult;
 
 pub type WorktreeOverviewParams = EmptyParams;
+
+/// What Review is currently showing. Working tree is the session checkout;
+/// branch and pull-request targets are read-only comparisons unless the user
+/// later asks to open a worktree.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum GitReviewTarget {
+    #[default]
+    WorkingTree,
+    Branch {
+        #[serde(rename = "refName")]
+        ref_name: String,
+    },
+    PullRequest {
+        url: String,
+        number: i64,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum GitChangeKind {
+    Added,
+    Modified,
+    Deleted,
+    Renamed,
+    Copied,
+    TypeChanged,
+    Unmerged,
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitFileChange {
+    pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub original_path: Option<String>,
+    pub kind: GitChangeKind,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitBranchInfo {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oid: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upstream: Option<String>,
+    pub ahead: u64,
+    pub behind: u64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitReviewStatus {
+    pub repo_root: String,
+    pub branch: GitBranchInfo,
+    #[serde(default)]
+    pub staged: Vec<GitFileChange>,
+    #[serde(default)]
+    pub unstaged: Vec<GitFileChange>,
+    #[serde(default)]
+    pub untracked: Vec<GitFileChange>,
+    #[serde(default)]
+    pub conflicted: Vec<GitFileChange>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitWorkspaceOwner {
+    #[serde(rename = "sessionID")]
+    pub session_id: SessionId,
+    pub title: String,
+    pub live: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitWorkspaceResult {
+    #[serde(rename = "sessionID")]
+    pub session_id: SessionId,
+    pub repo_root: String,
+    pub worktree_path: String,
+    pub linked_worktree: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
+    pub branch: GitBranchInfo,
+    pub dirty: bool,
+    pub conflicted: bool,
+    pub unborn: bool,
+    pub detached: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner: Option<GitWorkspaceOwner>,
+    pub target: GitReviewTarget,
+    pub status: GitReviewStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pull_request: Option<crate::model::PullRequestStatus>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitWorkspaceParams {
+    #[serde(rename = "sessionID")]
+    pub session_id: SessionId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<GitReviewTarget>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitPathsParams {
+    #[serde(rename = "sessionID")]
+    pub session_id: SessionId,
+    pub paths: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum GitPatchMutation {
+    Stage,
+    Unstage,
+    Discard,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitPatchParams {
+    #[serde(rename = "sessionID")]
+    pub session_id: SessionId,
+    #[serde(with = "base64_bytes")]
+    pub patch: Vec<u8>,
+    pub mutation: GitPatchMutation,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitCommitParams {
+    #[serde(rename = "sessionID")]
+    pub session_id: SessionId,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitCommitResult {
+    pub oid: String,
+    pub summary: String,
+    pub workspace: GitWorkspaceResult,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum GitRefKind {
+    Local,
+    Remote,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitRefEntry {
+    pub name: String,
+    pub short_name: String,
+    pub kind: GitRefKind,
+    pub oid: String,
+    pub current: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upstream: Option<String>,
+    pub ahead: u64,
+    pub behind: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner: Option<GitWorkspaceOwner>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitListRefsParams {
+    #[serde(rename = "sessionID")]
+    pub session_id: SessionId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitListRefsResult {
+    pub refs: Vec<GitRefEntry>,
+    pub truncated: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitFetchParams {
+    #[serde(rename = "sessionID")]
+    pub session_id: SessionId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitFetchResult {
+    pub remote: String,
+    pub summary: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitCompareParams {
+    #[serde(rename = "sessionID")]
+    pub session_id: SessionId,
+    pub target: GitReviewTarget,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitCompareResult {
+    #[serde(with = "base64_bytes")]
+    pub patch: Vec<u8>,
+    pub repo_root: String,
+    pub truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub head_ref: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitBranchCreateParams {
+    #[serde(rename = "sessionID")]
+    pub session_id: SessionId,
+    pub name: String,
+    #[serde(default)]
+    pub checkout: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum GitCheckoutMode {
+    #[default]
+    Switch,
+    Worktree,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitCheckoutBlock {
+    pub code: String,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum GitCheckoutDisposition {
+    SwitchInPlace,
+    FocusExisting {
+        path: String,
+        #[serde(rename = "sessionID", skip_serializing_if = "Option::is_none")]
+        session_id: Option<SessionId>,
+    },
+    OpenNewWorktree {
+        path: String,
+    },
+    Blocked,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitCheckoutPlan {
+    pub ref_name: String,
+    pub disposition: GitCheckoutDisposition,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reasons: Vec<GitCheckoutBlock>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitCheckoutParams {
+    #[serde(rename = "sessionID")]
+    pub session_id: SessionId,
+    #[serde(rename = "refName")]
+    pub ref_name: String,
+    #[serde(default)]
+    pub mode: GitCheckoutMode,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitCheckoutResult {
+    pub plan: GitCheckoutPlan,
+    pub workspace: GitWorkspaceResult,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitPrResolveParams {
+    #[serde(rename = "sessionID")]
+    pub session_id: SessionId,
+    pub input: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitPrResolveResult {
+    pub status: crate::model::PullRequestStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub head_oid: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_oid: Option<String>,
+    pub is_cross_repository: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub head_repository: Option<String>,
+    pub same_repository: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitPrOpenParams {
+    #[serde(rename = "sessionID")]
+    pub session_id: SessionId,
+    pub input: String,
+}
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]

@@ -1533,33 +1533,55 @@ impl WorkbenchInspector {
 
         let hero = div()
             .debug_selector(|| "INFO_HERO".to_owned())
-            .p(px(14.0))
+            .px(px(2.0))
+            .py(px(3.0))
             .flex()
             .flex_col()
-            .gap(px(12.0))
-            .rounded(px(Radius::CARD))
-            .bg(colors.primary.alpha(0.035))
-            .border_1()
-            .border_color(colors.primary.alpha(0.065))
+            .gap(px(4.0))
+            .border_b_1()
+            .border_color(colors.primary.alpha(0.07))
             .child(
                 div()
                     .flex()
-                    .items_start()
-                    .gap(px(11.0))
-                    .child(AgentLogo::new(kind, 36.0, colors))
+                    .items_center()
+                    .gap(px(9.0))
+                    .child(AgentLogo::new(kind, 28.0, colors))
                     .child(
                         div()
                             .min_w(px(0.0))
                             .flex_1()
                             .flex()
                             .flex_col()
-                            .gap(px(3.0))
+                            .gap(px(2.0))
                             .child(
                                 div()
-                                    .text_size(px(Typo::DISPLAY_TITLE.size))
-                                    .font_weight(Typo::DISPLAY_TITLE.weight)
-                                    .text_color(colors.primary)
-                                    .child(session.title.clone()),
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(8.0))
+                                    .child(
+                                        div()
+                                            .min_w(px(0.0))
+                                            .flex_1()
+                                            .truncate()
+                                            .text_size(px(Typo::ROW_EMPHASIZED.size))
+                                            .font_weight(Typo::ROW_EMPHASIZED.weight)
+                                            .text_color(colors.primary)
+                                            .child(session.title.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(5.0))
+                                            .text_size(px(Typo::META.size))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(status_color)
+                                            .child(
+                                                div().size(px(6.0)).rounded_full().bg(status_color),
+                                            )
+                                            .child(status_label),
+                                    ),
                             )
                             .child(
                                 div()
@@ -1579,53 +1601,45 @@ impl WorkbenchInspector {
                     .flex()
                     .items_center()
                     .justify_between()
+                    .gap(px(10.0))
                     .child(
                         div()
-                            .flex()
-                            .items_center()
-                            .gap(px(7.0))
+                            .id("info-hero-place")
+                            .debug_selector(|| "INFO_HERO_PLACE".to_owned())
+                            .min_w(px(0.0))
+                            .flex_1()
+                            .truncate()
                             .text_size(px(Typo::META.size))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(status_color)
-                            .child(div().size(px(7.0)).rounded_full().bg(status_color))
-                            .child(status_label),
+                            .text_color(colors.secondary)
+                            .when(session.git_branch.is_some(), |line| {
+                                line.cursor_pointer()
+                                    .hover(move |line| line.text_color(colors.primary))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.select_tab(InspectorTab::Changes, cx);
+                                        cx.stop_propagation();
+                                    }))
+                            })
+                            .child(place),
                     )
                     .child(
                         div()
-                            .text_size(px(Typo::META.size))
+                            .flex_none()
+                            .text_size(px(10.0))
                             .text_color(colors.tertiary)
                             .child(format!("Updated {}", relative_time(session.updated_at.0))),
                     ),
-            )
-            .child(
-                div()
-                    .id("info-hero-place")
-                    .debug_selector(|| "INFO_HERO_PLACE".to_owned())
-                    .min_w(px(0.0))
-                    .truncate()
-                    .text_size(px(Typo::META.size))
-                    .text_color(colors.secondary)
-                    .when(session.git_branch.is_some(), |line| {
-                        line.cursor_pointer()
-                            .hover(move |line| line.text_color(colors.primary))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.select_tab(InspectorTab::Changes, cx);
-                                cx.stop_propagation();
-                            }))
-                    })
-                    .child(place),
             );
 
         let mut content = div()
             .id("inspector-info-scroll")
             .size_full()
             .min_h(px(0.0))
-            .px(px(12.0))
-            .pt(px(8.0))
-            .pb(px(18.0))
+            .px(px(14.0))
+            .pt(px(4.0))
+            .pb(px(14.0))
             .flex()
             .flex_col()
-            .gap(px(14.0))
+            .gap(px(11.0))
             .overflow_y_scroll()
             .child(hero);
 
@@ -1634,8 +1648,8 @@ impl WorkbenchInspector {
                 div()
                     .flex()
                     .flex_col()
-                    .gap(px(7.0))
-                    .child(section_label(
+                    .gap(px(5.0))
+                    .child(info_section_label(
                         if matches!(state, BriefingState::NeedsInput { .. }) {
                             "Attention"
                         } else {
@@ -1649,10 +1663,8 @@ impl WorkbenchInspector {
 
         let mut location = div()
             .debug_selector(|| "INFO_LOCATION".to_owned())
-            .rounded(px(Radius::CARD))
-            .bg(colors.primary.alpha(0.025))
-            .border_1()
-            .border_color(colors.primary.alpha(0.055))
+            .border_t_1()
+            .border_color(colors.primary.alpha(0.065))
             .overflow_hidden()
             .child(detail_row(
                 "Project",
@@ -1713,21 +1725,21 @@ impl WorkbenchInspector {
                 colors,
             ));
         }
+        location = location.child(self.render_git_summary(colors, cx));
         content = content.child(
             div()
                 .flex()
                 .flex_col()
-                .gap(px(7.0))
-                .child(section_label("Location", colors))
-                .child(location)
-                .child(self.render_git_summary(colors, cx)),
+                .gap(px(5.0))
+                .child(info_section_label("Location", colors))
+                .child(location),
         );
         content = content.child(
             div()
                 .flex()
                 .flex_col()
-                .gap(px(7.0))
-                .child(section_label("Timeline", colors))
+                .gap(px(5.0))
+                .child(info_section_label("Timeline", colors))
                 .child(render_timeline(session, colors)),
         );
         if briefing.parent.is_some()
@@ -1738,8 +1750,8 @@ impl WorkbenchInspector {
                 div()
                     .flex()
                     .flex_col()
-                    .gap(px(7.0))
-                    .child(section_label("Lineage", colors))
+                    .gap(px(5.0))
+                    .child(info_section_label("Lineage", colors))
                     .child(render_lineage(session, &briefing, colors, cx.entity())),
             );
         }
@@ -1751,10 +1763,8 @@ impl WorkbenchInspector {
             .map_or(0, |ports| ports.len());
         let mut runtime = div()
             .debug_selector(|| "INFO_RUNTIME".to_owned())
-            .rounded(px(Radius::CARD))
-            .bg(colors.primary.alpha(0.025))
-            .border_1()
-            .border_color(colors.primary.alpha(0.055))
+            .border_t_1()
+            .border_color(colors.primary.alpha(0.065))
             .overflow_hidden()
             .child(detail_row(
                 "Memory",
@@ -1804,8 +1814,8 @@ impl WorkbenchInspector {
             div()
                 .flex()
                 .flex_col()
-                .gap(px(7.0))
-                .child(section_label("Runtime", colors))
+                .gap(px(5.0))
+                .child(info_section_label("Runtime", colors))
                 .child(runtime),
         );
         content
@@ -1813,8 +1823,8 @@ impl WorkbenchInspector {
                 div()
                     .flex()
                     .flex_col()
-                    .gap(px(7.0))
-                    .child(section_label("Identity", colors))
+                    .gap(px(5.0))
+                    .child(info_section_label("Identity", colors))
                     .child(render_identity(
                         session,
                         self.identity_open,
@@ -1891,25 +1901,22 @@ impl WorkbenchInspector {
             ),
         };
         let status_mark = symbol.map_or_else(
-            || LoadingIndicator::new("inspector-git-loading", 16.0, accent).into_any_element(),
-            |symbol| sf_symbol(symbol, 15.0, accent),
+            || LoadingIndicator::new("inspector-git-loading", 13.0, accent).into_any_element(),
+            |symbol| sf_symbol(symbol, 13.0, accent),
         );
         div()
             .id("inspector-git-summary")
             .debug_selector(|| "INFO_GIT_SUMMARY".to_owned())
-            .min_h(px(52.0))
-            .px(px(11.0))
-            .py(px(9.0))
+            .h(px(34.0))
+            .px(px(2.0))
             .flex()
             .items_center()
-            .gap(px(10.0))
-            .rounded(px(Radius::CARD))
-            .bg(colors.primary.alpha(0.035))
-            .border_1()
-            .border_color(colors.primary.alpha(0.06))
+            .gap(px(8.0))
+            .border_b_1()
+            .border_color(colors.primary.alpha(0.05))
             .when(can_open, |row| {
                 row.cursor_pointer()
-                    .hover(move |row| row.bg(colors.primary.alpha(0.065)))
+                    .hover(move |row| row.bg(colors.primary.alpha(0.05)))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.select_tab(InspectorTab::Changes, cx);
                         cx.stop_propagation();
@@ -1921,25 +1928,29 @@ impl WorkbenchInspector {
                     .min_w(px(0.0))
                     .flex_1()
                     .flex()
-                    .flex_col()
-                    .gap(px(2.0))
+                    .items_center()
+                    .gap(px(8.0))
                     .child(
                         div()
-                            .text_size(px(Typo::ROW_EMPHASIZED.size))
-                            .font_weight(Typo::ROW_EMPHASIZED.weight)
+                            .min_w(px(0.0))
+                            .flex_1()
+                            .truncate()
+                            .text_size(px(Typo::META.size))
+                            .font_weight(FontWeight::MEDIUM)
                             .text_color(colors.primary)
                             .child(title),
                     )
                     .child(
                         div()
+                            .max_w(px(150.0))
                             .truncate()
-                            .text_size(px(Typo::META.size))
+                            .text_size(px(10.0))
                             .text_color(colors.tertiary)
                             .child(detail),
                     ),
             )
             .when(can_open, |row| {
-                row.child(sf_symbol("chevron.right", 11.0, colors.tertiary))
+                row.child(sf_symbol("chevron.right", 10.0, colors.tertiary))
             })
             .into_any_element()
     }
@@ -3550,6 +3561,16 @@ fn section_label(label: &'static str, colors: SemanticColors) -> AnyElement {
         .into_any_element()
 }
 
+fn info_section_label(label: &'static str, colors: SemanticColors) -> AnyElement {
+    div()
+        .px(px(2.0))
+        .text_size(px(9.0))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(colors.tertiary)
+        .child(label.to_ascii_uppercase())
+        .into_any_element()
+}
+
 fn account_section_label(label: &'static str, colors: SemanticColors) -> AnyElement {
     div()
         .px(px(14.0))
@@ -3607,16 +3628,16 @@ fn detail_row(
     colors: SemanticColors,
 ) -> AnyElement {
     div()
-        .min_h(px(38.0))
-        .px(px(11.0))
+        .h(px(32.0))
+        .px(px(2.0))
         .flex()
         .items_center()
-        .gap(px(12.0))
+        .gap(px(8.0))
         .border_b_1()
         .border_color(colors.primary.alpha(0.05))
         .child(
             div()
-                .w(px(64.0))
+                .w(px(68.0))
                 .flex_none()
                 .text_size(px(Typo::META.size))
                 .text_color(colors.tertiary)
@@ -3652,18 +3673,18 @@ fn copy_detail_row(
     div()
         .id(selector)
         .debug_selector(move || selector.to_owned())
-        .min_h(px(38.0))
-        .px(px(11.0))
+        .h(px(32.0))
+        .px(px(2.0))
         .flex()
         .items_center()
-        .gap(px(12.0))
+        .gap(px(8.0))
         .border_b_1()
         .border_color(colors.primary.alpha(0.05))
         .cursor_pointer()
         .hover(move |row| row.bg(colors.primary.alpha(0.05)))
         .child(
             div()
-                .w(px(64.0))
+                .w(px(68.0))
                 .flex_none()
                 .text_size(px(Typo::META.size))
                 .text_color(colors.tertiary)
@@ -3685,7 +3706,7 @@ fn copy_detail_row(
                 .text_color(colors.secondary)
                 .child(value),
         )
-        .child(sf_symbol("doc.on.doc", 11.0, colors.tertiary))
+        .child(sf_symbol("doc.on.doc", 10.0, colors.tertiary))
         .on_click(move |_, _, cx| {
             cx.write_to_clipboard(ClipboardItem::new_string(clipboard.clone()));
             cx.stop_propagation();
@@ -3702,16 +3723,16 @@ fn accent_detail_row(
 ) -> AnyElement {
     div()
         .debug_selector(move || selector.to_owned())
-        .min_h(px(38.0))
-        .px(px(11.0))
+        .h(px(32.0))
+        .px(px(2.0))
         .flex()
         .items_center()
-        .gap(px(12.0))
+        .gap(px(8.0))
         .border_b_1()
         .border_color(colors.primary.alpha(0.05))
         .child(
             div()
-                .w(px(64.0))
+                .w(px(68.0))
                 .flex_none()
                 .text_size(px(Typo::META.size))
                 .text_color(colors.tertiary)
@@ -3742,18 +3763,18 @@ fn tab_jump_detail_row(
     div()
         .id(selector)
         .debug_selector(move || selector.to_owned())
-        .min_h(px(38.0))
-        .px(px(11.0))
+        .h(px(32.0))
+        .px(px(2.0))
         .flex()
         .items_center()
-        .gap(px(12.0))
+        .gap(px(8.0))
         .border_b_1()
         .border_color(colors.primary.alpha(0.05))
         .cursor_pointer()
         .hover(move |row| row.bg(colors.primary.alpha(0.05)))
         .child(
             div()
-                .w(px(64.0))
+                .w(px(68.0))
                 .flex_none()
                 .text_size(px(Typo::META.size))
                 .text_color(colors.tertiary)
@@ -3775,7 +3796,7 @@ fn tab_jump_detail_row(
                 .text_color(colors.secondary)
                 .child(value),
         )
-        .child(sf_symbol("chevron.right", 11.0, colors.tertiary))
+        .child(sf_symbol("chevron.right", 10.0, colors.tertiary))
         .on_click(move |_, _, cx| {
             inspector.update(cx, |inspector, cx| inspector.select_tab(tab, cx));
             cx.stop_propagation();
@@ -3807,12 +3828,12 @@ fn render_briefing_state(state: &BriefingState, colors: SemanticColors) -> AnyEl
                 .flex_1()
                 .flex()
                 .flex_col()
-                .gap(px(7.0))
+                .gap(px(5.0))
                 .child(
                     div()
                         .flex()
                         .items_center()
-                        .gap(px(6.0))
+                        .gap(px(4.0))
                         .child(info_chip(kind, accent))
                         .when(*risk != "neutral", |row| row.child(info_chip(risk, accent))),
                 )
@@ -3826,7 +3847,7 @@ fn render_briefing_state(state: &BriefingState, colors: SemanticColors) -> AnyEl
                 );
             if !options.is_empty() {
                 details = details.child(
-                    div().flex().flex_wrap().gap(px(5.0)).children(
+                    div().flex().flex_wrap().gap(px(4.0)).children(
                         options
                             .iter()
                             .map(|option| info_chip(option, colors.secondary)),
@@ -3836,9 +3857,9 @@ fn render_briefing_state(state: &BriefingState, colors: SemanticColors) -> AnyEl
             if let Some(excerpt) = prompt_excerpt {
                 details = details.child(
                     div()
-                        .p(px(8.0))
+                        .p(px(6.0))
                         .rounded(px(Radius::BADGE))
-                        .bg(colors.primary.alpha(0.04))
+                        .bg(colors.primary.alpha(0.035))
                         .font_family(crate::fonts::mono_family())
                         .text_size(px(Typo::META_MONO.size))
                         .text_color(colors.secondary)
@@ -3848,45 +3869,54 @@ fn render_briefing_state(state: &BriefingState, colors: SemanticColors) -> AnyEl
             }
             div()
                 .debug_selector(move || selector.to_owned())
-                .p(px(12.0))
+                .p(px(9.0))
                 .flex()
                 .items_start()
-                .gap(px(9.0))
-                .rounded(px(Radius::CARD))
-                .bg(accent.alpha(0.10))
-                .border_1()
-                .border_color(accent.alpha(0.22))
-                .child(sf_symbol("questionmark.bubble", 15.0, accent))
+                .gap(px(8.0))
+                .rounded(px(Radius::BADGE))
+                .bg(accent.alpha(0.055))
+                .border_l_2()
+                .border_color(accent.alpha(0.55))
+                .child(sf_symbol("questionmark.bubble", 13.0, accent))
                 .child(details)
                 .into_any_element()
         }
         BriefingState::Sleeping { reason, since } => div()
             .debug_selector(|| "INFO_SLEEPING".to_owned())
-            .p(px(12.0))
+            .min_h(px(38.0))
+            .px(px(8.0))
+            .py(px(6.0))
             .flex()
-            .items_start()
-            .gap(px(9.0))
-            .rounded(px(Radius::CARD))
-            .bg(colors.primary.alpha(0.035))
-            .border_1()
-            .border_color(colors.primary.alpha(0.07))
-            .child(sf_symbol("moon.zzz", 15.0, colors.secondary))
+            .items_center()
+            .gap(px(8.0))
+            .rounded(px(Radius::BADGE))
+            .bg(colors.primary.alpha(0.025))
+            .border_l_2()
+            .border_color(colors.secondary.alpha(0.35))
+            .child(sf_symbol("moon.zzz", 13.0, colors.secondary))
             .child(
                 div()
+                    .min_w(px(0.0))
+                    .flex_1()
                     .flex()
-                    .flex_col()
-                    .gap(px(3.0))
+                    .items_center()
+                    .justify_between()
+                    .gap(px(8.0))
                     .child(
                         div()
-                            .text_size(px(Typo::ROW_EMPHASIZED.size))
-                            .font_weight(Typo::ROW_EMPHASIZED.weight)
+                            .min_w(px(0.0))
+                            .flex_1()
+                            .truncate()
+                            .text_size(px(Typo::META.size))
+                            .font_weight(FontWeight::MEDIUM)
                             .text_color(colors.primary)
                             .child(format!("Sleeping · {reason}")),
                     )
                     .child(
                         div()
-                            .text_size(px(Typo::META.size))
-                            .text_color(colors.secondary)
+                            .flex_none()
+                            .text_size(px(10.0))
+                            .text_color(colors.tertiary)
                             .child(format!("Since {}", relative_time(*since))),
                     ),
             )
@@ -3896,31 +3926,40 @@ fn render_briefing_state(state: &BriefingState, colors: SemanticColors) -> AnyEl
             resumability,
         } => div()
             .debug_selector(|| "INFO_ENDED".to_owned())
-            .p(px(12.0))
+            .min_h(px(38.0))
+            .px(px(8.0))
+            .py(px(6.0))
             .flex()
-            .items_start()
-            .gap(px(9.0))
-            .rounded(px(Radius::CARD))
+            .items_center()
+            .gap(px(8.0))
+            .rounded(px(Radius::BADGE))
             .bg(colors.primary.alpha(0.025))
-            .border_1()
-            .border_color(colors.primary.alpha(0.06))
-            .child(sf_symbol("stop.circle", 15.0, colors.tertiary))
+            .border_l_2()
+            .border_color(colors.tertiary.alpha(0.35))
+            .child(sf_symbol("stop.circle", 13.0, colors.tertiary))
             .child(
                 div()
+                    .min_w(px(0.0))
+                    .flex_1()
                     .flex()
-                    .flex_col()
-                    .gap(px(3.0))
+                    .items_center()
+                    .justify_between()
+                    .gap(px(8.0))
                     .child(
                         div()
-                            .text_size(px(Typo::ROW_EMPHASIZED.size))
-                            .font_weight(Typo::ROW_EMPHASIZED.weight)
+                            .min_w(px(0.0))
+                            .flex_1()
+                            .truncate()
+                            .text_size(px(Typo::META.size))
+                            .font_weight(FontWeight::MEDIUM)
                             .text_color(colors.primary)
                             .child(summary.clone()),
                     )
                     .child(
                         div()
-                            .text_size(px(Typo::META.size))
-                            .text_color(colors.secondary)
+                            .flex_none()
+                            .text_size(px(10.0))
+                            .text_color(colors.tertiary)
                             .child(*resumability),
                     ),
             )
@@ -3930,13 +3969,11 @@ fn render_briefing_state(state: &BriefingState, colors: SemanticColors) -> AnyEl
 
 fn info_chip(text: &str, accent: gpui::Rgba) -> AnyElement {
     div()
-        .px(px(7.0))
-        .py(px(2.0))
+        .px(px(6.0))
+        .py(px(1.0))
         .rounded_full()
-        .bg(accent.alpha(0.10))
-        .border_1()
-        .border_color(accent.alpha(0.18))
-        .text_size(px(10.0))
+        .bg(accent.alpha(0.09))
+        .text_size(px(9.0))
         .font_weight(FontWeight::MEDIUM)
         .text_color(accent)
         .child(text.to_owned())
@@ -3947,10 +3984,8 @@ fn render_timeline(session: &SessionRecord, colors: SemanticColors) -> AnyElemen
     let now = now_millis();
     let mut timeline = div()
         .debug_selector(|| "INFO_TIMELINE".to_owned())
-        .rounded(px(Radius::CARD))
-        .bg(colors.primary.alpha(0.025))
-        .border_1()
-        .border_color(colors.primary.alpha(0.055))
+        .border_t_1()
+        .border_color(colors.primary.alpha(0.065))
         .overflow_hidden()
         .child(timeline_time_row(
             "Created",
@@ -4036,10 +4071,8 @@ fn render_lineage(
 ) -> AnyElement {
     let mut lineage = div()
         .debug_selector(|| "INFO_LINEAGE".to_owned())
-        .rounded(px(Radius::CARD))
-        .bg(colors.primary.alpha(0.025))
-        .border_1()
-        .border_color(colors.primary.alpha(0.055))
+        .border_t_1()
+        .border_color(colors.primary.alpha(0.065))
         .overflow_hidden();
     if let Some(parent) = &briefing.parent {
         lineage = lineage.child(related_session_row(
@@ -4092,46 +4125,41 @@ fn related_session_row(
     div()
         .id(format!("info-lineage:{}", relation.id.0))
         .debug_selector(move || format!("INFO_LINEAGE_{}", selector_id.0))
-        .min_h(px(42.0))
-        .px(px(11.0))
+        .h(px(34.0))
+        .px(px(2.0))
         .flex()
         .items_center()
-        .gap(px(9.0))
+        .gap(px(7.0))
         .border_b_1()
         .border_color(colors.primary.alpha(0.05))
         .cursor_pointer()
         .hover(move |row| row.bg(colors.primary.alpha(0.05)))
         .child(
             div()
-                .w(px(72.0))
+                .w(px(68.0))
                 .flex_none()
                 .text_size(px(Typo::META.size))
                 .text_color(colors.tertiary)
                 .child(label),
         )
-        .child(div().size(px(6.0)).rounded_full().bg(accent))
+        .child(div().size(px(5.0)).rounded_full().bg(accent))
         .child(
             div()
                 .min_w(px(0.0))
                 .flex_1()
-                .flex()
-                .flex_col()
-                .gap(px(1.0))
-                .child(
-                    div()
-                        .truncate()
-                        .text_size(px(Typo::META.size))
-                        .text_color(colors.primary)
-                        .child(relation.title.clone()),
-                )
-                .child(
-                    div()
-                        .text_size(px(10.0))
-                        .text_color(colors.tertiary)
-                        .child(relation.status),
-                ),
+                .truncate()
+                .text_size(px(Typo::META.size))
+                .text_color(colors.primary)
+                .child(relation.title.clone()),
         )
-        .child(sf_symbol("chevron.right", 11.0, colors.tertiary))
+        .child(
+            div()
+                .flex_none()
+                .text_size(px(10.0))
+                .text_color(colors.tertiary)
+                .child(relation.status),
+        )
+        .child(sf_symbol("chevron.right", 10.0, colors.tertiary))
         .on_click(move |_, _, cx| {
             inspector.update(cx, |inspector, cx| {
                 inspector.activate_related_session(id.clone(), cx)
@@ -4149,17 +4177,15 @@ fn render_identity(
 ) -> AnyElement {
     let mut identity = div()
         .debug_selector(|| "INFO_IDENTITY".to_owned())
-        .rounded(px(Radius::CARD))
-        .bg(colors.primary.alpha(0.025))
-        .border_1()
-        .border_color(colors.primary.alpha(0.055))
+        .border_t_1()
+        .border_color(colors.primary.alpha(0.065))
         .overflow_hidden()
         .child(
             div()
                 .id("info-identity-toggle")
                 .debug_selector(|| "INFO_IDENTITY_TOGGLE".to_owned())
-                .h(px(40.0))
-                .px(px(11.0))
+                .h(px(32.0))
+                .px(px(2.0))
                 .flex()
                 .items_center()
                 .gap(px(8.0))
@@ -4171,7 +4197,7 @@ fn render_identity(
                     } else {
                         "chevron.right"
                     },
-                    11.0,
+                    10.0,
                     colors.tertiary,
                 ))
                 .child(
@@ -4179,7 +4205,7 @@ fn render_identity(
                         .flex_1()
                         .text_size(px(Typo::META.size))
                         .text_color(colors.secondary)
-                        .child("Session identifiers and paths"),
+                        .child("IDs and transcript"),
                 )
                 .on_click(move |_, _, cx| {
                     inspector.update(cx, |inspector, cx| {
@@ -6463,6 +6489,22 @@ mod tests {
             cx.debug_bounds("INSPECTOR_PR_OPEN").is_none(),
             "Info must not render pull-request content"
         );
+        for (selector, maximum_height) in [
+            ("INFO_HERO", 72.0),
+            ("INFO_COPY_CWD", 32.0),
+            ("INFO_GIT_SUMMARY", 34.0),
+            ("INFO_LINEAGE_preview-cursor", 34.0),
+            ("INFO_COPY_SESSION_ID", 32.0),
+        ] {
+            let bounds = cx
+                .debug_bounds(selector)
+                .unwrap_or_else(|| panic!("missing compact surface {selector}"));
+            assert!(
+                f32::from(bounds.size.height) <= maximum_height,
+                "{selector} exceeded the compact height budget: {} > {maximum_height}",
+                f32::from(bounds.size.height)
+            );
+        }
 
         let inspector = harness.read_with(cx, |harness, _| harness.inspector.clone());
         inspector.update(cx, |inspector, cx| {

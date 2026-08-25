@@ -7,6 +7,7 @@ mod code_viewer;
 mod daemon_launch;
 mod dev_build;
 pub mod diff;
+mod file_tree;
 pub mod fonts;
 pub mod fuzzy;
 mod git_review;

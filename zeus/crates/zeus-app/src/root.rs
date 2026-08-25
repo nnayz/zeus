@@ -771,6 +771,16 @@ impl RootView {
             }
             "b" => self.sidebar.update(cx, |sidebar, cx| sidebar.toggle(cx)),
             "d" if event.keystroke.modifiers.shift => self.toggle_inspector(cx),
+            "e" if event.keystroke.modifiers.shift => {
+                let inspector = self.inspector.clone();
+                self.reveal_inspector(cx);
+                let Some(inspector) = inspector else {
+                    return;
+                };
+                inspector.update(cx, |inspector, cx| {
+                    inspector.focus_code_tree(_window, cx);
+                });
+            }
             key @ ("t" | "n") => match new_session_shortcut(key, event.keystroke.modifiers) {
                 Some(NewSessionShortcut::Default) => {
                     if !self.spawn_default() {

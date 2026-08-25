@@ -59,13 +59,26 @@ conducting.
 
 | Tab | Job |
 |-----|-----|
-| **Info** | Kind, cwd, host, timing, and usage for today / this month |
+| **Info** | Session briefing: identity, attention, location, lifecycle, lineage, and runtime |
 | **Review** | Live git diff for this worktree. Stage, commit, and open a PR from here when the repo allows it |
 | **Code** | File viewer bound to the same tree. Word wrap is a Settings toggle |
 | **Artifacts** | Ports the session opened, pull requests it mentioned, and other finds |
 
 Review is how Zeus earns the "accept the work" claim. Let the agent finish,
 then read the diff in the same window you used to watch it.
+
+Info answers the quick briefing questions for the selected session: what kind
+of agent it is, where it runs, whether it needs you, when it last completed a
+turn, whether a remote process can survive disconnect, and how it relates to
+parent, child, and `⌘J` workbench sessions. Sleeping and ended sessions explain
+their lifecycle state and resumability. Paths, timestamps, and session IDs can
+be copied from the panel.
+
+Info keeps Git to a one-shot working-tree summary that jumps to Review; it does
+not poll in the background, show pull-request content, or mutate the repository.
+Artifacts and listening ports are counts that jump to Artifacts. Installation-
+level usage remains in the account menu; Info only shows usage when Zeus can
+attribute it to the selected session.
 
 ## Session overview
 

@@ -11,11 +11,11 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gpui::{
-    Anchor, Animation, AnimationExt, AnyElement, App, Context, DragMoveEvent, Entity, EventEmitter,
-    FocusHandle, Focusable, FontWeight, KeyDownEvent, ListHorizontalSizingBehavior, MouseButton,
-    Render, ScrollStrategy, SharedString, StatefulInteractiveElement, Task,
-    UniformListScrollHandle, Window, anchored, deferred, div, ease_out_quint, point, prelude::*,
-    px, rgba, uniform_list,
+    Anchor, Animation, AnimationExt, AnyElement, App, ClipboardItem, Context, DragMoveEvent,
+    Entity, EventEmitter, FocusHandle, Focusable, FontWeight, KeyDownEvent,
+    ListHorizontalSizingBehavior, MouseButton, Render, ScrollStrategy, SharedString,
+    StatefulInteractiveElement, Task, UniformListScrollHandle, Window, anchored, deferred, div,
+    ease_out_quint, point, prelude::*, px, rgba, uniform_list,
 };
 use zeus_proto::{
     AgentKind as ProtoAgentKind, ArtifactKind, PrCheck, PrDiscussionItem, PullRequestStatus,
@@ -39,7 +39,7 @@ use crate::markdown::MarkdownDocument;
 use crate::markdown_view::render_markdown;
 use crate::query_editor::{self, ClipboardEdit, Edit, QueryEditor};
 use crate::review_prompt::{ReviewEvidence, ReviewLayer, ReviewPrompt};
-use crate::store::{InspectorTab, StoreRuntime};
+use crate::store::{InspectorTab, SessionStore, StoreRuntime};
 use crate::updates::{UpdateCommand, UpdatePhase, UpdateState};
 use crate::usage::{UsageFormat, UsageSnapshot};
 
@@ -90,6 +90,7 @@ struct ScrollbarMetrics {
 #[derive(Clone, Debug)]
 pub enum InspectorEvent {
     Close,
+    SessionActivated,
     OpenSettings,
     AddRemoteHost,
     Update(UpdateCommand),
@@ -168,6 +169,126 @@ struct AskDraft {
     label: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BriefingHost {
+    name: String,
+    ssh: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BriefingRelation {
+    id: SessionId,
+    title: String,
+    status: &'static str,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum BriefingState {
+    NeedsInput {
+        kind: &'static str,
+        risk: &'static str,
+        summary: String,
+        options: Vec<String>,
+        prompt_excerpt: Option<String>,
+    },
+    Sleeping {
+        reason: &'static str,
+        since: f64,
+    },
+    Ended {
+        summary: String,
+        resumability: &'static str,
+    },
+}
+
+/// Read-only session briefing. This projects the selected record and live
+/// family; it owns no reducer, polling loop, or discovered-object model.
+#[derive(Clone, Debug, PartialEq)]
+struct InfoBriefing {
+    project_name: String,
+    host: Option<BriefingHost>,
+    parent: Option<BriefingRelation>,
+    children: Vec<BriefingRelation>,
+    workbench: Option<BriefingRelation>,
+    sibling_count: usize,
+    state: Option<BriefingState>,
+}
+
+impl InfoBriefing {
+    fn from_store(session: &SessionRecord, store: &SessionStore) -> Self {
+        let project_name = store
+            .projects()
+            .get(&session.project_id)
+            .map(|project| project.name.clone())
+            .unwrap_or_else(|| folder_name(&session.cwd));
+        let host = session.host.as_deref().map(|id| {
+            store.host(id).map_or_else(
+                || BriefingHost {
+                    name: id.to_owned(),
+                    ssh: id.to_owned(),
+                },
+                |host| BriefingHost {
+                    name: host.display_name().to_owned(),
+                    ssh: host.ssh.clone(),
+                },
+            )
+        });
+        let parent = session
+            .parent
+            .as_ref()
+            .and_then(|id| store.sessions().get(id))
+            .map(|parent| briefing_relation(parent));
+        let mut family = store
+            .sessions()
+            .values()
+            .filter(|candidate| {
+                candidate.parent.as_ref() == Some(&session.id)
+                    && !candidate.is_archived()
+                    && !matches!(candidate.status, SessionStatus::Exited(_))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        family.sort_by(|left, right| {
+            left.created_at
+                .partial_cmp(&right.created_at)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| left.id.0.cmp(&right.id.0))
+        });
+        let workbench = family
+            .iter()
+            .rev()
+            .find(|candidate| candidate.is_workbench_terminal())
+            .map(|candidate| briefing_relation(candidate));
+        let children = family
+            .iter()
+            .filter(|candidate| !candidate.is_workbench_terminal())
+            .map(|candidate| briefing_relation(candidate))
+            .collect();
+        let sibling_count = session.parent.as_ref().map_or(0, |parent_id| {
+            store
+                .sessions()
+                .values()
+                .filter(|candidate| {
+                    candidate.id != session.id
+                        && candidate.parent.as_ref() == Some(parent_id)
+                        && !candidate.is_workbench_terminal()
+                        && !candidate.is_archived()
+                        && !matches!(candidate.status, SessionStatus::Exited(_))
+                })
+                .count()
+        });
+        Self {
+            project_name,
+            host,
+            parent,
+            children,
+            workbench,
+            sibling_count,
+            state: briefing_state(session),
+        }
+    }
+}
+
 pub struct WorkbenchInspector {
     runtime: Arc<StoreRuntime>,
     _tokio_owner: Arc<tokio::runtime::Runtime>,
@@ -208,6 +329,7 @@ pub struct WorkbenchInspector {
     scrollbar_interaction: ScrollbarInteraction,
     scrollbar_layout_primed: bool,
     account_open: bool,
+    identity_open: bool,
     preview_account: bool,
     usage: Option<UsageSnapshot>,
     update: UpdateState,
@@ -298,6 +420,7 @@ impl WorkbenchInspector {
             scrollbar_interaction: ScrollbarInteraction::default(),
             scrollbar_layout_primed: false,
             account_open: false,
+            identity_open: false,
             preview_account: false,
             usage: None,
             update: UpdateState::default(),
@@ -469,6 +592,20 @@ impl WorkbenchInspector {
         cx.notify();
     }
 
+    fn activate_related_session(&mut self, id: SessionId, cx: &mut Context<Self>) {
+        self.runtime
+            .store
+            .write()
+            .expect("session store lock poisoned")
+            .select(id);
+        // The direct family-row selection is not delivered through the
+        // StoreRuntime broadcast, so refresh here to keep the one-shot Git
+        // summary tied to the newly selected session.
+        self.refresh(true, cx);
+        cx.emit(InspectorEvent::SessionActivated);
+        cx.notify();
+    }
+
     pub(crate) fn set_word_wrap(&mut self, word_wrap: bool, cx: &mut Context<Self>) {
         if self.word_wrap == word_wrap {
             return;
@@ -540,6 +677,7 @@ impl WorkbenchInspector {
         };
         let context_changed = self.context.as_ref() != Some(&context);
         if context_changed {
+            self.identity_open = false;
             self.scroll = UniformListScrollHandle::new();
             self.scrollbar_interaction = ScrollbarInteraction::default();
             self.scrollbar_layout_primed = false;
@@ -1370,55 +1508,80 @@ impl WorkbenchInspector {
                 .into_any_element();
         };
 
-        let (project_name, host_name) = {
+        let briefing = {
             let store = self
                 .runtime
                 .store
                 .read()
                 .expect("session store lock poisoned");
-            let project_name = store
-                .projects()
-                .get(&session.project_id)
-                .map(|project| project.name.clone())
-                .unwrap_or_else(|| folder_name(&session.cwd));
-            let host_name = session
-                .host
-                .as_deref()
-                .map(|host| store.host_display_name(host));
-            (project_name, host_name)
+            InfoBriefing::from_store(session, &store)
         };
         let kind = ui_agent_kind(session.effective_kind());
         let (status_label, status_color) = session_status(session, colors);
-        let artifact_total = artifact_count(session);
+        let location_name = session.worktree_path.as_deref().unwrap_or(&session.cwd);
+        let mut place_parts = vec![
+            briefing
+                .host
+                .as_ref()
+                .map_or_else(|| "This Mac".to_owned(), |host| host.name.clone()),
+        ];
+        place_parts.push(folder_name(location_name));
+        if let Some(branch) = session.git_branch.as_deref() {
+            place_parts.push(branch.to_owned());
+        }
+        let place = place_parts.join(" · ");
 
         let hero = div()
-            .p(px(14.0))
+            .debug_selector(|| "INFO_HERO".to_owned())
+            .px(px(2.0))
+            .py(px(3.0))
             .flex()
             .flex_col()
-            .gap(px(12.0))
-            .rounded(px(Radius::CARD))
-            .bg(colors.primary.alpha(0.035))
-            .border_1()
-            .border_color(colors.primary.alpha(0.065))
+            .gap(px(4.0))
+            .border_b_1()
+            .border_color(colors.primary.alpha(0.07))
             .child(
                 div()
                     .flex()
-                    .items_start()
-                    .gap(px(11.0))
-                    .child(AgentLogo::new(kind, 36.0, colors))
+                    .items_center()
+                    .gap(px(9.0))
+                    .child(AgentLogo::new(kind, 28.0, colors))
                     .child(
                         div()
                             .min_w(px(0.0))
                             .flex_1()
                             .flex()
                             .flex_col()
-                            .gap(px(3.0))
+                            .gap(px(2.0))
                             .child(
                                 div()
-                                    .text_size(px(Typo::DISPLAY_TITLE.size))
-                                    .font_weight(Typo::DISPLAY_TITLE.weight)
-                                    .text_color(colors.primary)
-                                    .child(session.title.clone()),
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(8.0))
+                                    .child(
+                                        div()
+                                            .min_w(px(0.0))
+                                            .flex_1()
+                                            .truncate()
+                                            .text_size(px(Typo::ROW_EMPHASIZED.size))
+                                            .font_weight(Typo::ROW_EMPHASIZED.weight)
+                                            .text_color(colors.primary)
+                                            .child(session.title.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(5.0))
+                                            .text_size(px(Typo::META.size))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(status_color)
+                                            .child(
+                                                div().size(px(6.0)).rounded_full().bg(status_color),
+                                            )
+                                            .child(status_label),
+                                    ),
                             )
                             .child(
                                 div()
@@ -1429,7 +1592,7 @@ impl WorkbenchInspector {
                                     .text_color(colors.tertiary)
                                     .child(kind.label())
                                     .child("·")
-                                    .child(project_name.clone()),
+                                    .child(briefing.project_name.clone()),
                             ),
                     ),
             )
@@ -1438,20 +1601,30 @@ impl WorkbenchInspector {
                     .flex()
                     .items_center()
                     .justify_between()
+                    .gap(px(10.0))
                     .child(
                         div()
-                            .flex()
-                            .items_center()
-                            .gap(px(7.0))
+                            .id("info-hero-place")
+                            .debug_selector(|| "INFO_HERO_PLACE".to_owned())
+                            .min_w(px(0.0))
+                            .flex_1()
+                            .truncate()
                             .text_size(px(Typo::META.size))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(status_color)
-                            .child(div().size(px(7.0)).rounded_full().bg(status_color))
-                            .child(status_label),
+                            .text_color(colors.secondary)
+                            .when(session.git_branch.is_some(), |line| {
+                                line.cursor_pointer()
+                                    .hover(move |line| line.text_color(colors.primary))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.select_tab(InspectorTab::Changes, cx);
+                                        cx.stop_propagation();
+                                    }))
+                            })
+                            .child(place),
                     )
                     .child(
                         div()
-                            .text_size(px(Typo::META.size))
+                            .flex_none()
+                            .text_size(px(10.0))
                             .text_color(colors.tertiary)
                             .child(format!("Updated {}", relative_time(session.updated_at.0))),
                     ),
@@ -1461,146 +1634,204 @@ impl WorkbenchInspector {
             .id("inspector-info-scroll")
             .size_full()
             .min_h(px(0.0))
-            .px(px(12.0))
-            .pt(px(8.0))
-            .pb(px(18.0))
+            .px(px(14.0))
+            .pt(px(4.0))
+            .pb(px(14.0))
             .flex()
             .flex_col()
-            .gap(px(14.0))
+            .gap(px(11.0))
             .overflow_y_scroll()
             .child(hero);
 
-        if let Some(detail) = &session.needs_input {
-            let risk_color = if detail.risk_hint == zeus_proto::RiskHint::Destructive {
-                Ink::DANGER
-            } else {
-                Ink::ATTENTION
-            };
+        if let Some(state) = briefing.state.as_ref() {
             content = content.child(
                 div()
-                    .p(px(12.0))
                     .flex()
-                    .items_start()
-                    .gap(px(9.0))
-                    .rounded(px(Radius::CARD))
-                    .bg(risk_color.alpha(0.10))
-                    .border_1()
-                    .border_color(risk_color.alpha(0.22))
-                    .child(sf_symbol("questionmark.bubble", 15.0, risk_color))
-                    .child(
-                        div()
-                            .min_w(px(0.0))
-                            .flex_1()
-                            .flex()
-                            .flex_col()
-                            .gap(px(3.0))
-                            .child(
-                                div()
-                                    .text_size(px(Typo::ROW_EMPHASIZED.size))
-                                    .font_weight(Typo::ROW_EMPHASIZED.weight)
-                                    .text_color(colors.primary)
-                                    .child("Needs your input"),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(Typo::META.size))
-                                    .text_color(colors.secondary)
-                                    .child(detail.summary.clone()),
-                            ),
-                    ),
+                    .flex_col()
+                    .gap(px(5.0))
+                    .child(info_section_label(
+                        if matches!(state, BriefingState::NeedsInput { .. }) {
+                            "Attention"
+                        } else {
+                            "Session state"
+                        },
+                        colors,
+                    ))
+                    .child(render_briefing_state(state, colors)),
             );
         }
 
-        content = content
-            .child(section_label("Git status", colors))
-            .child(self.render_git_summary(colors, cx));
-
-        if let Some(pull_requests) = session.pull_requests.as_deref()
-            && !pull_requests.is_empty()
-        {
-            content = content.child(section_label(
-                if pull_requests.len() == 1 {
-                    "Pull request"
-                } else {
-                    "Pull requests"
-                },
+        let mut location = div()
+            .debug_selector(|| "INFO_LOCATION".to_owned())
+            .border_t_1()
+            .border_color(colors.primary.alpha(0.065))
+            .overflow_hidden()
+            .child(detail_row(
+                "Project",
+                briefing.project_name.clone(),
+                false,
+                colors,
+            ))
+            .child(copy_detail_row(
+                "Directory",
+                session.cwd.clone(),
+                session.cwd.clone(),
+                true,
+                "INFO_COPY_CWD",
                 colors,
             ));
-            let inspector = cx.entity();
-            for pull_request in pull_requests.iter().take(2) {
-                let body = pull_request
-                    .body
-                    .as_deref()
-                    .filter(|body| !body.trim().is_empty())
-                    .map(|body| self.markdown_document(body));
-                content = content.child(render_pull_request(
-                    pull_request,
-                    colors,
-                    inspector.clone(),
-                    body,
-                ));
-            }
+        if let Some(worktree) = session
+            .worktree_path
+            .as_deref()
+            .filter(|worktree| *worktree != session.cwd)
+        {
+            location = location.child(copy_detail_row(
+                "Worktree",
+                worktree.to_owned(),
+                worktree.to_owned(),
+                true,
+                "INFO_COPY_WORKTREE",
+                colors,
+            ));
         }
-
-        if artifact_total > 0 {
-            content = content.child(section_label("Artifacts", colors)).child(
+        if let Some(branch) = &session.git_branch {
+            location = location.child(tab_jump_detail_row(
+                "Branch",
+                branch.clone(),
+                true,
+                "INFO_BRANCH_REVIEW",
+                InspectorTab::Changes,
+                colors,
+                cx.entity(),
+            ));
+        }
+        if let Some(host) = &briefing.host {
+            location = location.child(detail_row(
+                "Host",
+                format!("{} · {}", host.name, host.ssh),
+                false,
+                colors,
+            ));
+        } else {
+            location = location.child(detail_row("Host", "This Mac".to_owned(), false, colors));
+        }
+        if let Some(persistence) = session.remote_persistence {
+            let (label, accent) = persistence_briefing(persistence);
+            location = location.child(accent_detail_row(
+                "Persistence",
+                label.to_owned(),
+                accent.unwrap_or(colors.secondary),
+                "INFO_REMOTE_PERSISTENCE",
+                colors,
+            ));
+        }
+        location = location.child(self.render_git_summary(colors, cx));
+        content = content.child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(5.0))
+                .child(info_section_label("Location", colors))
+                .child(location),
+        );
+        content = content.child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(5.0))
+                .child(info_section_label("Timeline", colors))
+                .child(render_timeline(session, colors)),
+        );
+        if briefing.parent.is_some()
+            || !briefing.children.is_empty()
+            || briefing.workbench.is_some()
+        {
+            content = content.child(
                 div()
-                    .id("inspector-artifacts-summary")
-                    .h(px(44.0))
-                    .px(px(11.0))
                     .flex()
-                    .items_center()
-                    .gap(px(9.0))
-                    .rounded(px(Radius::ROW))
-                    .bg(colors.primary.alpha(0.035))
-                    .border_1()
-                    .border_color(colors.primary.alpha(0.06))
-                    .cursor_pointer()
-                    .hover(move |row| row.bg(colors.primary.alpha(0.065)))
-                    .child(sf_symbol("shippingbox", 14.0, colors.secondary))
-                    .child(
-                        div()
-                            .min_w(px(0.0))
-                            .flex_1()
-                            .text_size(px(Typo::ROW.size))
-                            .text_color(colors.primary)
-                            .child(format!(
-                                "{artifact_total} {} discovered",
-                                if artifact_total == 1 {
-                                    "artifact"
-                                } else {
-                                    "artifacts"
-                                }
-                            )),
-                    )
-                    .child(sf_symbol("chevron.right", 11.0, colors.tertiary))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.select_tab(InspectorTab::Artifacts, cx);
-                        cx.stop_propagation();
-                    })),
+                    .flex_col()
+                    .gap(px(5.0))
+                    .child(info_section_label("Lineage", colors))
+                    .child(render_lineage(session, &briefing, colors, cx.entity())),
             );
         }
 
-        let mut details = div()
-            .rounded(px(Radius::CARD))
-            .bg(colors.primary.alpha(0.025))
-            .border_1()
-            .border_color(colors.primary.alpha(0.055))
+        let object_total = discovered_object_count(session);
+        let port_total = session
+            .listening_ports
+            .as_deref()
+            .map_or(0, |ports| ports.len());
+        let mut runtime = div()
+            .debug_selector(|| "INFO_RUNTIME".to_owned())
+            .border_t_1()
+            .border_color(colors.primary.alpha(0.065))
             .overflow_hidden()
-            .child(detail_row("Project", project_name, false, colors))
-            .child(detail_row("Directory", session.cwd.clone(), true, colors));
-        if let Some(branch) = &session.git_branch {
-            details = details.child(detail_row("Branch", branch.clone(), true, colors));
-        }
-        if let Some(host) = host_name {
-            details = details.child(detail_row("Host", host, false, colors));
-        }
-        if let Some(bytes) = session.memory_bytes {
-            details = details.child(detail_row("Memory", format_bytes(bytes), false, colors));
-        }
+            .child(detail_row(
+                "Memory",
+                session
+                    .memory_bytes
+                    .map_or_else(|| "Not reported".to_owned(), format_bytes),
+                false,
+                colors,
+            ));
+        runtime = if object_total > 0 {
+            runtime.child(tab_jump_detail_row(
+                "Artifacts",
+                count_noun(object_total, "artifact", "artifacts"),
+                false,
+                "INFO_ARTIFACTS_JUMP",
+                InspectorTab::Artifacts,
+                colors,
+                cx.entity(),
+            ))
+        } else {
+            runtime.child(detail_row(
+                "Artifacts",
+                "None discovered".to_owned(),
+                false,
+                colors,
+            ))
+        };
+        runtime = if port_total > 0 {
+            runtime.child(tab_jump_detail_row(
+                "Ports",
+                count_noun(port_total, "listening port", "listening ports"),
+                false,
+                "INFO_PORTS_JUMP",
+                InspectorTab::Artifacts,
+                colors,
+                cx.entity(),
+            ))
+        } else {
+            runtime.child(detail_row(
+                "Ports",
+                "None listening".to_owned(),
+                false,
+                colors,
+            ))
+        };
+        content = content.child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(5.0))
+                .child(info_section_label("Runtime", colors))
+                .child(runtime),
+        );
         content
-            .child(section_label("Details", colors))
-            .child(details)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(5.0))
+                    .child(info_section_label("Identity", colors))
+                    .child(render_identity(
+                        session,
+                        self.identity_open,
+                        colors,
+                        cx.entity(),
+                    )),
+            )
             .into_any_element()
     }
 
@@ -1670,24 +1901,22 @@ impl WorkbenchInspector {
             ),
         };
         let status_mark = symbol.map_or_else(
-            || LoadingIndicator::new("inspector-git-loading", 16.0, accent).into_any_element(),
-            |symbol| sf_symbol(symbol, 15.0, accent),
+            || LoadingIndicator::new("inspector-git-loading", 13.0, accent).into_any_element(),
+            |symbol| sf_symbol(symbol, 13.0, accent),
         );
         div()
             .id("inspector-git-summary")
-            .min_h(px(52.0))
-            .px(px(11.0))
-            .py(px(9.0))
+            .debug_selector(|| "INFO_GIT_SUMMARY".to_owned())
+            .h(px(34.0))
+            .px(px(2.0))
             .flex()
             .items_center()
-            .gap(px(10.0))
-            .rounded(px(Radius::CARD))
-            .bg(colors.primary.alpha(0.035))
-            .border_1()
-            .border_color(colors.primary.alpha(0.06))
+            .gap(px(8.0))
+            .border_b_1()
+            .border_color(colors.primary.alpha(0.05))
             .when(can_open, |row| {
                 row.cursor_pointer()
-                    .hover(move |row| row.bg(colors.primary.alpha(0.065)))
+                    .hover(move |row| row.bg(colors.primary.alpha(0.05)))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.select_tab(InspectorTab::Changes, cx);
                         cx.stop_propagation();
@@ -1699,25 +1928,29 @@ impl WorkbenchInspector {
                     .min_w(px(0.0))
                     .flex_1()
                     .flex()
-                    .flex_col()
-                    .gap(px(2.0))
+                    .items_center()
+                    .gap(px(8.0))
                     .child(
                         div()
-                            .text_size(px(Typo::ROW_EMPHASIZED.size))
-                            .font_weight(Typo::ROW_EMPHASIZED.weight)
+                            .min_w(px(0.0))
+                            .flex_1()
+                            .truncate()
+                            .text_size(px(Typo::META.size))
+                            .font_weight(FontWeight::MEDIUM)
                             .text_color(colors.primary)
                             .child(title),
                     )
                     .child(
                         div()
+                            .max_w(px(150.0))
                             .truncate()
-                            .text_size(px(Typo::META.size))
+                            .text_size(px(10.0))
                             .text_color(colors.tertiary)
                             .child(detail),
                     ),
             )
             .when(can_open, |row| {
-                row.child(sf_symbol("chevron.right", 11.0, colors.tertiary))
+                row.child(sf_symbol("chevron.right", 10.0, colors.tertiary))
             })
             .into_any_element()
     }
@@ -3328,6 +3561,16 @@ fn section_label(label: &'static str, colors: SemanticColors) -> AnyElement {
         .into_any_element()
 }
 
+fn info_section_label(label: &'static str, colors: SemanticColors) -> AnyElement {
+    div()
+        .px(px(2.0))
+        .text_size(px(9.0))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(colors.tertiary)
+        .child(label.to_ascii_uppercase())
+        .into_any_element()
+}
+
 fn account_section_label(label: &'static str, colors: SemanticColors) -> AnyElement {
     div()
         .px(px(14.0))
@@ -3385,16 +3628,16 @@ fn detail_row(
     colors: SemanticColors,
 ) -> AnyElement {
     div()
-        .min_h(px(38.0))
-        .px(px(11.0))
+        .h(px(32.0))
+        .px(px(2.0))
         .flex()
         .items_center()
-        .gap(px(12.0))
+        .gap(px(8.0))
         .border_b_1()
         .border_color(colors.primary.alpha(0.05))
         .child(
             div()
-                .w(px(64.0))
+                .w(px(68.0))
                 .flex_none()
                 .text_size(px(Typo::META.size))
                 .text_color(colors.tertiary)
@@ -3417,6 +3660,592 @@ fn detail_row(
                 .child(value),
         )
         .into_any_element()
+}
+
+fn copy_detail_row(
+    label: &'static str,
+    value: String,
+    clipboard: String,
+    monospaced: bool,
+    selector: &'static str,
+    colors: SemanticColors,
+) -> AnyElement {
+    div()
+        .id(selector)
+        .debug_selector(move || selector.to_owned())
+        .h(px(32.0))
+        .px(px(2.0))
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .border_b_1()
+        .border_color(colors.primary.alpha(0.05))
+        .cursor_pointer()
+        .hover(move |row| row.bg(colors.primary.alpha(0.05)))
+        .child(
+            div()
+                .w(px(68.0))
+                .flex_none()
+                .text_size(px(Typo::META.size))
+                .text_color(colors.tertiary)
+                .child(label),
+        )
+        .child(
+            div()
+                .min_w(px(0.0))
+                .flex_1()
+                .truncate()
+                .when(monospaced, |value| {
+                    value.font_family(crate::fonts::mono_family())
+                })
+                .text_size(px(if monospaced {
+                    Typo::META_MONO.size
+                } else {
+                    Typo::META.size
+                }))
+                .text_color(colors.secondary)
+                .child(value),
+        )
+        .child(sf_symbol("doc.on.doc", 10.0, colors.tertiary))
+        .on_click(move |_, _, cx| {
+            cx.write_to_clipboard(ClipboardItem::new_string(clipboard.clone()));
+            cx.stop_propagation();
+        })
+        .into_any_element()
+}
+
+fn accent_detail_row(
+    label: &'static str,
+    value: String,
+    accent: gpui::Rgba,
+    selector: &'static str,
+    colors: SemanticColors,
+) -> AnyElement {
+    div()
+        .debug_selector(move || selector.to_owned())
+        .h(px(32.0))
+        .px(px(2.0))
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .border_b_1()
+        .border_color(colors.primary.alpha(0.05))
+        .child(
+            div()
+                .w(px(68.0))
+                .flex_none()
+                .text_size(px(Typo::META.size))
+                .text_color(colors.tertiary)
+                .child(label),
+        )
+        .child(
+            div()
+                .min_w(px(0.0))
+                .flex_1()
+                .truncate()
+                .text_size(px(Typo::META.size))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(accent)
+                .child(value),
+        )
+        .into_any_element()
+}
+
+fn tab_jump_detail_row(
+    label: &'static str,
+    value: String,
+    monospaced: bool,
+    selector: &'static str,
+    tab: InspectorTab,
+    colors: SemanticColors,
+    inspector: Entity<WorkbenchInspector>,
+) -> AnyElement {
+    div()
+        .id(selector)
+        .debug_selector(move || selector.to_owned())
+        .h(px(32.0))
+        .px(px(2.0))
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .border_b_1()
+        .border_color(colors.primary.alpha(0.05))
+        .cursor_pointer()
+        .hover(move |row| row.bg(colors.primary.alpha(0.05)))
+        .child(
+            div()
+                .w(px(68.0))
+                .flex_none()
+                .text_size(px(Typo::META.size))
+                .text_color(colors.tertiary)
+                .child(label),
+        )
+        .child(
+            div()
+                .min_w(px(0.0))
+                .flex_1()
+                .truncate()
+                .when(monospaced, |value| {
+                    value.font_family(crate::fonts::mono_family())
+                })
+                .text_size(px(if monospaced {
+                    Typo::META_MONO.size
+                } else {
+                    Typo::META.size
+                }))
+                .text_color(colors.secondary)
+                .child(value),
+        )
+        .child(sf_symbol("chevron.right", 10.0, colors.tertiary))
+        .on_click(move |_, _, cx| {
+            inspector.update(cx, |inspector, cx| inspector.select_tab(tab, cx));
+            cx.stop_propagation();
+        })
+        .into_any_element()
+}
+
+fn render_briefing_state(state: &BriefingState, colors: SemanticColors) -> AnyElement {
+    match state {
+        BriefingState::NeedsInput {
+            kind,
+            risk,
+            summary,
+            options,
+            prompt_excerpt,
+        } => {
+            let accent = if *risk == "destructive" {
+                Ink::DANGER
+            } else {
+                Ink::ATTENTION
+            };
+            let selector = if *kind == "permission" {
+                "INFO_ATTENTION_PERMISSION"
+            } else {
+                "INFO_ATTENTION_QUESTION"
+            };
+            let mut details = div()
+                .min_w(px(0.0))
+                .flex_1()
+                .flex()
+                .flex_col()
+                .gap(px(5.0))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(4.0))
+                        .child(info_chip(kind, accent))
+                        .when(*risk != "neutral", |row| row.child(info_chip(risk, accent))),
+                )
+                .child(
+                    div()
+                        .whitespace_normal()
+                        .text_size(px(Typo::ROW_EMPHASIZED.size))
+                        .font_weight(Typo::ROW_EMPHASIZED.weight)
+                        .text_color(colors.primary)
+                        .child(summary.clone()),
+                );
+            if !options.is_empty() {
+                details = details.child(
+                    div().flex().flex_wrap().gap(px(4.0)).children(
+                        options
+                            .iter()
+                            .map(|option| info_chip(option, colors.secondary)),
+                    ),
+                );
+            }
+            if let Some(excerpt) = prompt_excerpt {
+                details = details.child(
+                    div()
+                        .p(px(6.0))
+                        .rounded(px(Radius::BADGE))
+                        .bg(colors.primary.alpha(0.035))
+                        .font_family(crate::fonts::mono_family())
+                        .text_size(px(Typo::META_MONO.size))
+                        .text_color(colors.secondary)
+                        .whitespace_normal()
+                        .child(excerpt.clone()),
+                );
+            }
+            div()
+                .debug_selector(move || selector.to_owned())
+                .p(px(9.0))
+                .flex()
+                .items_start()
+                .gap(px(8.0))
+                .rounded(px(Radius::BADGE))
+                .bg(accent.alpha(0.055))
+                .border_l_2()
+                .border_color(accent.alpha(0.55))
+                .child(sf_symbol("questionmark.bubble", 13.0, accent))
+                .child(details)
+                .into_any_element()
+        }
+        BriefingState::Sleeping { reason, since } => div()
+            .debug_selector(|| "INFO_SLEEPING".to_owned())
+            .min_h(px(38.0))
+            .px(px(8.0))
+            .py(px(6.0))
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .rounded(px(Radius::BADGE))
+            .bg(colors.primary.alpha(0.025))
+            .border_l_2()
+            .border_color(colors.secondary.alpha(0.35))
+            .child(sf_symbol("moon.zzz", 13.0, colors.secondary))
+            .child(
+                div()
+                    .min_w(px(0.0))
+                    .flex_1()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .min_w(px(0.0))
+                            .flex_1()
+                            .truncate()
+                            .text_size(px(Typo::META.size))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(colors.primary)
+                            .child(format!("Sleeping · {reason}")),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(px(10.0))
+                            .text_color(colors.tertiary)
+                            .child(format!("Since {}", relative_time(*since))),
+                    ),
+            )
+            .into_any_element(),
+        BriefingState::Ended {
+            summary,
+            resumability,
+        } => div()
+            .debug_selector(|| "INFO_ENDED".to_owned())
+            .min_h(px(38.0))
+            .px(px(8.0))
+            .py(px(6.0))
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .rounded(px(Radius::BADGE))
+            .bg(colors.primary.alpha(0.025))
+            .border_l_2()
+            .border_color(colors.tertiary.alpha(0.35))
+            .child(sf_symbol("stop.circle", 13.0, colors.tertiary))
+            .child(
+                div()
+                    .min_w(px(0.0))
+                    .flex_1()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .min_w(px(0.0))
+                            .flex_1()
+                            .truncate()
+                            .text_size(px(Typo::META.size))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(colors.primary)
+                            .child(summary.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(px(10.0))
+                            .text_color(colors.tertiary)
+                            .child(*resumability),
+                    ),
+            )
+            .into_any_element(),
+    }
+}
+
+fn info_chip(text: &str, accent: gpui::Rgba) -> AnyElement {
+    div()
+        .px(px(6.0))
+        .py(px(1.0))
+        .rounded_full()
+        .bg(accent.alpha(0.09))
+        .text_size(px(9.0))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(accent)
+        .child(text.to_owned())
+        .into_any_element()
+}
+
+fn render_timeline(session: &SessionRecord, colors: SemanticColors) -> AnyElement {
+    let now = now_millis();
+    let mut timeline = div()
+        .debug_selector(|| "INFO_TIMELINE".to_owned())
+        .border_t_1()
+        .border_color(colors.primary.alpha(0.065))
+        .overflow_hidden()
+        .child(timeline_time_row(
+            "Created",
+            session.created_at.0,
+            now,
+            "INFO_TIMELINE_CREATED",
+            colors,
+        ));
+    timeline = if let Some(at) = session.last_turn_completed_at {
+        timeline.child(timeline_time_row(
+            "Last turn",
+            at.0,
+            now,
+            "INFO_TIMELINE_LAST_TURN",
+            colors,
+        ))
+    } else {
+        timeline.child(detail_row(
+            "Last turn",
+            "Not recorded".to_owned(),
+            false,
+            colors,
+        ))
+    };
+    timeline = if let Some(at) = session.last_seen_at {
+        timeline.child(timeline_time_row(
+            "Last seen",
+            at.0,
+            now,
+            "INFO_TIMELINE_LAST_SEEN",
+            colors,
+        ))
+    } else {
+        timeline.child(detail_row(
+            "Last seen",
+            "Not recorded".to_owned(),
+            false,
+            colors,
+        ))
+    };
+    match session.status {
+        SessionStatus::Exited(_) => timeline.child(timeline_time_row(
+            "Ended",
+            session.updated_at.0,
+            now,
+            "INFO_TIMELINE_ENDED",
+            colors,
+        )),
+        _ => timeline.child(copy_detail_row(
+            "Running",
+            format_duration(now - session.created_at.0),
+            absolute_time(session.created_at.0),
+            false,
+            "INFO_TIMELINE_RUNNING",
+            colors,
+        )),
+    }
+    .into_any_element()
+}
+
+fn timeline_time_row(
+    label: &'static str,
+    at: f64,
+    now: f64,
+    selector: &'static str,
+    colors: SemanticColors,
+) -> AnyElement {
+    copy_detail_row(
+        label,
+        relative_time_at(at, now),
+        absolute_time(at),
+        false,
+        selector,
+        colors,
+    )
+}
+
+fn render_lineage(
+    selected: &SessionRecord,
+    briefing: &InfoBriefing,
+    colors: SemanticColors,
+    inspector: Entity<WorkbenchInspector>,
+) -> AnyElement {
+    let mut lineage = div()
+        .debug_selector(|| "INFO_LINEAGE".to_owned())
+        .border_t_1()
+        .border_color(colors.primary.alpha(0.065))
+        .overflow_hidden();
+    if let Some(parent) = &briefing.parent {
+        lineage = lineage.child(related_session_row(
+            if selected.is_workbench_terminal() {
+                "Workbench for"
+            } else {
+                "Parent"
+            },
+            parent,
+            colors,
+            inspector.clone(),
+        ));
+        if !selected.is_workbench_terminal() && briefing.sibling_count > 0 {
+            lineage = lineage.child(detail_row(
+                "Siblings",
+                count_noun(briefing.sibling_count, "live sibling", "live siblings"),
+                false,
+                colors,
+            ));
+        }
+    }
+    for child in &briefing.children {
+        lineage = lineage.child(related_session_row(
+            "Child",
+            child,
+            colors,
+            inspector.clone(),
+        ));
+    }
+    if let Some(workbench) = &briefing.workbench {
+        lineage = lineage.child(related_session_row(
+            "⌘J split",
+            workbench,
+            colors,
+            inspector,
+        ));
+    }
+    lineage.into_any_element()
+}
+
+fn related_session_row(
+    label: &'static str,
+    relation: &BriefingRelation,
+    colors: SemanticColors,
+    inspector: Entity<WorkbenchInspector>,
+) -> AnyElement {
+    let id = relation.id.clone();
+    let selector_id = id.clone();
+    let accent = relation_status_color(relation.status, colors);
+    div()
+        .id(format!("info-lineage:{}", relation.id.0))
+        .debug_selector(move || format!("INFO_LINEAGE_{}", selector_id.0))
+        .h(px(34.0))
+        .px(px(2.0))
+        .flex()
+        .items_center()
+        .gap(px(7.0))
+        .border_b_1()
+        .border_color(colors.primary.alpha(0.05))
+        .cursor_pointer()
+        .hover(move |row| row.bg(colors.primary.alpha(0.05)))
+        .child(
+            div()
+                .w(px(68.0))
+                .flex_none()
+                .text_size(px(Typo::META.size))
+                .text_color(colors.tertiary)
+                .child(label),
+        )
+        .child(div().size(px(5.0)).rounded_full().bg(accent))
+        .child(
+            div()
+                .min_w(px(0.0))
+                .flex_1()
+                .truncate()
+                .text_size(px(Typo::META.size))
+                .text_color(colors.primary)
+                .child(relation.title.clone()),
+        )
+        .child(
+            div()
+                .flex_none()
+                .text_size(px(10.0))
+                .text_color(colors.tertiary)
+                .child(relation.status),
+        )
+        .child(sf_symbol("chevron.right", 10.0, colors.tertiary))
+        .on_click(move |_, _, cx| {
+            inspector.update(cx, |inspector, cx| {
+                inspector.activate_related_session(id.clone(), cx)
+            });
+            cx.stop_propagation();
+        })
+        .into_any_element()
+}
+
+fn render_identity(
+    session: &SessionRecord,
+    open: bool,
+    colors: SemanticColors,
+    inspector: Entity<WorkbenchInspector>,
+) -> AnyElement {
+    let mut identity = div()
+        .debug_selector(|| "INFO_IDENTITY".to_owned())
+        .border_t_1()
+        .border_color(colors.primary.alpha(0.065))
+        .overflow_hidden()
+        .child(
+            div()
+                .id("info-identity-toggle")
+                .debug_selector(|| "INFO_IDENTITY_TOGGLE".to_owned())
+                .h(px(32.0))
+                .px(px(2.0))
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .cursor_pointer()
+                .hover(move |row| row.bg(colors.primary.alpha(0.05)))
+                .child(sf_symbol(
+                    if open {
+                        "chevron.down"
+                    } else {
+                        "chevron.right"
+                    },
+                    10.0,
+                    colors.tertiary,
+                ))
+                .child(
+                    div()
+                        .flex_1()
+                        .text_size(px(Typo::META.size))
+                        .text_color(colors.secondary)
+                        .child("IDs and transcript"),
+                )
+                .on_click(move |_, _, cx| {
+                    inspector.update(cx, |inspector, cx| {
+                        inspector.identity_open = !inspector.identity_open;
+                        cx.notify();
+                    });
+                    cx.stop_propagation();
+                }),
+        );
+    if open {
+        identity = identity.child(copy_detail_row(
+            "Session",
+            session.id.0.clone(),
+            session.id.0.clone(),
+            true,
+            "INFO_COPY_SESSION_ID",
+            colors,
+        ));
+        if let Some(id) = session.agent_session_id.as_ref() {
+            identity = identity.child(copy_detail_row(
+                "Agent",
+                id.clone(),
+                id.clone(),
+                true,
+                "INFO_COPY_AGENT_ID",
+                colors,
+            ));
+        }
+        if let Some(path) = session.transcript_path.as_ref() {
+            identity = identity.child(copy_detail_row(
+                "Transcript",
+                path.clone(),
+                path.clone(),
+                true,
+                "INFO_COPY_TRANSCRIPT",
+                colors,
+            ));
+        }
+    }
+    identity.into_any_element()
 }
 
 fn render_pull_request(
@@ -4289,6 +5118,145 @@ fn artifact_count(session: &SessionRecord) -> usize {
     artifacts.len() + ports.len() + status_only_pull_requests
 }
 
+fn discovered_object_count(session: &SessionRecord) -> usize {
+    artifact_count(session).saturating_sub(
+        session
+            .listening_ports
+            .as_deref()
+            .map_or(0, |ports| ports.len()),
+    )
+}
+
+fn briefing_relation(session: &SessionRecord) -> BriefingRelation {
+    BriefingRelation {
+        id: session.id.clone(),
+        title: session.title.clone(),
+        status: plain_session_status(session),
+    }
+}
+
+fn briefing_state(session: &SessionRecord) -> Option<BriefingState> {
+    if let SessionStatus::NeedsInput(status_kind) = &session.status {
+        let detail = session.needs_input.as_ref();
+        let kind = match detail.map_or(status_kind, |detail| &detail.kind) {
+            zeus_proto::NeedsInputKind::Permission => "permission",
+            zeus_proto::NeedsInputKind::Question => "question",
+            zeus_proto::NeedsInputKind::Unknown => "input",
+        };
+        let risk = match detail.map(|detail| &detail.risk_hint) {
+            Some(zeus_proto::RiskHint::Destructive) => "destructive",
+            Some(zeus_proto::RiskHint::Network) => "network",
+            Some(zeus_proto::RiskHint::FileWrite) => "file write",
+            Some(zeus_proto::RiskHint::Neutral | zeus_proto::RiskHint::Unknown) | None => "neutral",
+        };
+        return Some(BriefingState::NeedsInput {
+            kind,
+            risk,
+            summary: detail.map_or_else(
+                || "The agent is waiting for your input.".to_owned(),
+                |detail| detail.summary.clone(),
+            ),
+            options: detail
+                .and_then(|detail| detail.options.clone())
+                .unwrap_or_default(),
+            prompt_excerpt: detail
+                .and_then(|detail| detail.prompt_excerpt.as_deref())
+                .filter(|excerpt| !excerpt.trim().is_empty())
+                .map(truncate_prompt_excerpt),
+        });
+    }
+    if let Some(hibernation) = session.hibernation.as_ref() {
+        let reason = match hibernation.reason {
+            zeus_proto::HibernationReason::Idle => "Idle",
+            zeus_proto::HibernationReason::MemoryPressure => "Memory pressure",
+            zeus_proto::HibernationReason::Manual => "Manual",
+            zeus_proto::HibernationReason::Unknown => "Unknown reason",
+        };
+        return Some(BriefingState::Sleeping {
+            reason,
+            since: hibernation.since.0,
+        });
+    }
+    if let SessionStatus::Exited(info) = &session.status {
+        let reason = match info.reason {
+            zeus_proto::ExitReason::Exited => "Exited",
+            zeus_proto::ExitReason::Signaled => "Signaled",
+            zeus_proto::ExitReason::DaemonRestart => "Engine restarted",
+            zeus_proto::ExitReason::External => "Ended externally",
+            zeus_proto::ExitReason::Archived => "Archived",
+            zeus_proto::ExitReason::Unknown => "Ended",
+        };
+        let fact = info
+            .code
+            .map(|code| format!("code {code}"))
+            .or_else(|| info.signal.map(|signal| format!("signal {signal}")));
+        return Some(BriefingState::Ended {
+            summary: fact.map_or_else(|| reason.to_owned(), |fact| format!("{reason} · {fact}")),
+            resumability: match session.resumability {
+                zeus_proto::Resumability::Live => "Still live",
+                zeus_proto::Resumability::Resumable => "Can be resumed",
+                zeus_proto::Resumability::TranscriptMissing => "Transcript missing",
+                zeus_proto::Resumability::NotResumable => "Cannot be resumed",
+                zeus_proto::Resumability::Unknown => "Resumability unknown",
+            },
+        });
+    }
+    None
+}
+
+fn truncate_prompt_excerpt(excerpt: &str) -> String {
+    const LIMIT: usize = 220;
+    let mut characters = excerpt.chars();
+    let truncated = characters.by_ref().take(LIMIT).collect::<String>();
+    if characters.next().is_some() {
+        format!("{truncated}…")
+    } else {
+        truncated
+    }
+}
+
+fn plain_session_status(session: &SessionRecord) -> &'static str {
+    if session.hibernation.is_some() {
+        return "Sleeping";
+    }
+    match session.status {
+        SessionStatus::Starting => "Starting",
+        SessionStatus::Working => "Working",
+        SessionStatus::NeedsInput(_) => "Needs input",
+        SessionStatus::Idle if session.attention() == zeus_proto::AttentionLevel::DoneUnseen => {
+            "Finished unseen"
+        }
+        SessionStatus::Idle => "Idle",
+        SessionStatus::Exited(_) => "Ended",
+        SessionStatus::Unknown => "Unknown",
+    }
+}
+
+fn relation_status_color(status: &str, colors: SemanticColors) -> gpui::Rgba {
+    match status {
+        "Working" | "Starting" => rgba(0x4f8ef7ff),
+        "Needs input" => Ink::ATTENTION,
+        "Finished unseen" => Ink::FRESH,
+        _ => colors.tertiary,
+    }
+}
+
+fn persistence_briefing(
+    persistence: zeus_proto::remote_pty::PersistenceCapability,
+) -> (&'static str, Option<gpui::Rgba>) {
+    match persistence {
+        zeus_proto::remote_pty::PersistenceCapability::NativeDetach => ("native-detach", None),
+        zeus_proto::remote_pty::PersistenceCapability::UserSupervisor => ("user-supervisor", None),
+        zeus_proto::remote_pty::PersistenceCapability::NonPersistent => {
+            ("non-persistent · no detach", Some(Ink::DANGER))
+        }
+    }
+}
+
+fn count_noun(count: usize, singular: &str, plural: &str) -> String {
+    format!("{count} {}", if count == 1 { singular } else { plural })
+}
+
 fn ui_agent_kind(kind: &ProtoAgentKind) -> AgentKind {
     AgentKind::from_id(kind.id())
 }
@@ -4451,10 +5419,17 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
-fn relative_time(milliseconds: f64) -> String {
-    let now = SystemTime::now()
+fn now_millis() -> f64 {
+    SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_or(0.0, |duration| duration.as_secs_f64() * 1000.0);
+        .map_or(0.0, |duration| duration.as_secs_f64() * 1000.0)
+}
+
+fn relative_time(milliseconds: f64) -> String {
+    relative_time_at(milliseconds, now_millis())
+}
+
+fn relative_time_at(milliseconds: f64, now: f64) -> String {
     let seconds = ((now - milliseconds).max(0.0) / 1000.0) as u64;
     match seconds {
         0..=59 => "now".to_owned(),
@@ -4462,6 +5437,46 @@ fn relative_time(milliseconds: f64) -> String {
         3_600..=86_399 => format!("{}h ago", seconds / 3_600),
         _ => format!("{}d ago", seconds / 86_400),
     }
+}
+
+fn format_duration(milliseconds: f64) -> String {
+    let seconds = (milliseconds.max(0.0) / 1000.0) as u64;
+    match seconds {
+        0..=59 => "under a minute".to_owned(),
+        60..=3_599 => format!("{}m", seconds / 60),
+        3_600..=86_399 => format!("{}h {}m", seconds / 3_600, seconds % 3_600 / 60),
+        _ => format!("{}d {}h", seconds / 86_400, seconds % 86_400 / 3_600),
+    }
+}
+
+fn absolute_time(milliseconds: f64) -> String {
+    let seconds = (milliseconds / 1000.0).floor() as i64;
+    let days = seconds.div_euclid(86_400);
+    let day_seconds = seconds.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    let hour = day_seconds / 3_600;
+    let minute = day_seconds % 3_600 / 60;
+    let second = day_seconds % 60;
+    format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02} UTC")
+}
+
+fn civil_from_days(days: i64) -> (i64, i64, i64) {
+    let shifted = days + 719_468;
+    let era = if shifted >= 0 {
+        shifted
+    } else {
+        shifted - 146_096
+    } / 146_097;
+    let day_of_era = shifted - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let mut year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    year += i64::from(month <= 2);
+    (year, month, day)
 }
 
 #[derive(Clone)]
@@ -5017,7 +6032,7 @@ mod tests {
     use super::*;
     use crate::sidebar::{PreviewScenario, SidebarPreviewFixture};
     use gpui::{Entity, Modifiers, TestAppContext};
-    use zeus_proto::DateMillis;
+    use zeus_proto::{DateMillis, HostEntry, Resumability};
 
     struct InspectorHarness {
         inspector: Entity<WorkbenchInspector>,
@@ -5038,6 +6053,173 @@ mod tests {
         assert!(InspectorTab::Info.index() < InspectorTab::Changes.index());
         assert!(InspectorTab::Changes.index() < InspectorTab::Code.index());
         assert!(InspectorTab::Code.index() < InspectorTab::Artifacts.index());
+    }
+
+    #[test]
+    fn deterministic_briefing_fixture_covers_session_states_and_lineage() {
+        let mut fixture = SidebarPreviewFixture::make(PreviewScenario::Typical);
+        let codex_id = SessionId::new("preview-codex");
+        let cursor_id = SessionId::new("preview-cursor");
+        let shell_id = SessionId::new("preview-shell");
+
+        let codex = fixture
+            .list
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == codex_id)
+            .expect("codex fixture");
+        codex.host = Some("forge".to_owned());
+        codex.remote_persistence =
+            Some(zeus_proto::remote_pty::PersistenceCapability::NonPersistent);
+        codex.worktree_path = Some("/srv/zeus/worktrees/sidebar-craft".to_owned());
+        codex.agent_session_id = Some("agent-session-61".to_owned());
+        codex.transcript_path = Some("/srv/transcripts/session-61.jsonl".to_owned());
+
+        let workbench = fixture
+            .list
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == shell_id)
+            .expect("shell fixture");
+        workbench.parent = Some(codex_id.clone());
+        workbench.workbench = Some(true);
+
+        let question = fixture
+            .list
+            .sessions
+            .iter_mut()
+            .find(|session| session.id.0 == "preview-question")
+            .expect("question fixture");
+        question
+            .needs_input
+            .as_mut()
+            .expect("question detail")
+            .prompt_excerpt = Some("Choose the compact empty state".repeat(20));
+
+        let permission = fixture
+            .list
+            .sessions
+            .iter()
+            .find(|session| session.id.0 == "preview-claude")
+            .expect("permission fixture");
+        assert!(matches!(
+            briefing_state(permission),
+            Some(BriefingState::NeedsInput {
+                kind: "permission",
+                risk: "network",
+                ..
+            })
+        ));
+
+        let question = fixture
+            .list
+            .sessions
+            .iter()
+            .find(|session| session.id.0 == "preview-question")
+            .expect("question fixture");
+        match briefing_state(question).expect("question state") {
+            BriefingState::NeedsInput {
+                kind,
+                risk,
+                options,
+                prompt_excerpt,
+                ..
+            } => {
+                assert_eq!(kind, "question");
+                assert_eq!(risk, "neutral");
+                assert_eq!(options, ["Editorial", "Compact"]);
+                let excerpt = prompt_excerpt.expect("truncated prompt excerpt");
+                assert_eq!(excerpt.chars().count(), 221);
+                assert!(excerpt.ends_with('…'));
+            }
+            state => panic!("unexpected question state: {state:?}"),
+        }
+
+        let sleeping = fixture
+            .list
+            .sessions
+            .iter()
+            .find(|session| session.id.0 == "preview-sleeping")
+            .expect("sleeping fixture");
+        assert!(matches!(
+            briefing_state(sleeping),
+            Some(BriefingState::Sleeping { reason: "Idle", .. })
+        ));
+
+        let idle = fixture
+            .list
+            .sessions
+            .iter()
+            .find(|session| session.id == shell_id)
+            .expect("idle fixture");
+        assert_eq!(plain_session_status(idle), "Idle");
+        assert_eq!(briefing_state(idle), None);
+
+        let mut ended = fixture
+            .list
+            .sessions
+            .iter()
+            .find(|session| session.id == codex_id)
+            .expect("ended base")
+            .clone();
+        ended.status = SessionStatus::Exited(zeus_proto::ExitInfo {
+            reason: zeus_proto::ExitReason::Exited,
+            code: Some(0),
+            signal: None,
+        });
+        ended.resumability = Resumability::Resumable;
+        assert_eq!(
+            briefing_state(&ended),
+            Some(BriefingState::Ended {
+                summary: "Exited · code 0".to_owned(),
+                resumability: "Can be resumed",
+            })
+        );
+
+        let mut store = fixture.into_store();
+        store.set_hosts(vec![HostEntry {
+            id: "forge".to_owned(),
+            name: Some("Forge".to_owned()),
+            ssh: "builder@forge.example".to_owned(),
+            default_cwd: Some("/srv/zeus".to_owned()),
+            node: None,
+        }]);
+        let codex = store.sessions().get(&codex_id).expect("stored codex");
+        let briefing = InfoBriefing::from_store(codex, &store);
+        assert_eq!(
+            briefing.host,
+            Some(BriefingHost {
+                name: "Forge".to_owned(),
+                ssh: "builder@forge.example".to_owned(),
+            })
+        );
+        assert_ne!(codex.worktree_path.as_deref(), Some(codex.cwd.as_str()));
+        assert_eq!(briefing.children.len(), 2);
+        assert_eq!(
+            briefing.workbench.as_ref().map(|terminal| &terminal.id),
+            Some(&shell_id)
+        );
+
+        let cursor = store.sessions().get(&cursor_id).expect("stored child");
+        let child_briefing = InfoBriefing::from_store(cursor, &store);
+        assert_eq!(
+            child_briefing.parent.as_ref().map(|parent| &parent.id),
+            Some(&codex_id)
+        );
+        assert_eq!(child_briefing.sibling_count, 1);
+    }
+
+    #[test]
+    fn timeline_copy_is_absolute_and_deterministic() {
+        assert_eq!(
+            absolute_time(1_750_000_000_000.0),
+            "2025-06-15 15:06:40 UTC"
+        );
+        assert_eq!(
+            relative_time_at(1_750_000_000_000.0, 1_750_007_200_000.0),
+            "2h ago"
+        );
+        assert_eq!(format_duration(7_500_000.0), "2h 5m");
     }
 
     #[test]
@@ -5223,6 +6405,124 @@ mod tests {
         cx.run_until_parked();
     }
 
+    #[gpui::test]
+    fn info_renders_the_briefing_without_pr_content(cx: &mut TestAppContext) {
+        let runtime = Arc::new(StoreRuntime::inert());
+        let mut fixture = SidebarPreviewFixture::make(PreviewScenario::Artifacts);
+        let selected = fixture
+            .selected_session_id
+            .clone()
+            .expect("selected fixture");
+        let related = SessionId::new("preview-cursor");
+        let workbench_id = SessionId::new("preview-shell");
+        let session = fixture
+            .list
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == selected)
+            .expect("selected session");
+        session.host = Some("forge".to_owned());
+        session.remote_persistence =
+            Some(zeus_proto::remote_pty::PersistenceCapability::NonPersistent);
+        session.worktree_path = Some("/srv/zeus/worktrees/repository-cloning".to_owned());
+        session.agent_session_id = Some("agent-session-61".to_owned());
+        session.transcript_path = Some("/srv/transcripts/session-61.jsonl".to_owned());
+        let workbench = fixture
+            .list
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == workbench_id)
+            .expect("workbench session");
+        workbench.parent = Some(selected.clone());
+        workbench.workbench = Some(true);
+        {
+            let mut store = runtime.store.write().expect("session store lock poisoned");
+            store.hydrate(fixture.list);
+            store.set_hosts(vec![HostEntry {
+                id: "forge".to_owned(),
+                name: Some("Forge".to_owned()),
+                ssh: "builder@forge.example".to_owned(),
+                default_cwd: None,
+                node: None,
+            }]);
+            store.select(selected.clone());
+        }
+        let tokio = Arc::new(
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime"),
+        );
+        let inspector_runtime = Arc::clone(&runtime);
+        let (harness, cx) = cx.add_window_view(move |_window, cx| {
+            let inspector = cx.new(|cx| {
+                let mut inspector = WorkbenchInspector::new(inspector_runtime, tokio, cx);
+                inspector.identity_open = true;
+                inspector.state = LoadState::Error("fatal: not a git repository".to_owned());
+                inspector
+            });
+            InspectorHarness { inspector }
+        });
+        cx.run_until_parked();
+
+        for selector in [
+            "INFO_HERO",
+            "INFO_HERO_PLACE",
+            "INFO_LOCATION",
+            "INFO_COPY_CWD",
+            "INFO_COPY_WORKTREE",
+            "INFO_BRANCH_REVIEW",
+            "INFO_REMOTE_PERSISTENCE",
+            "INFO_GIT_SUMMARY",
+            "INFO_TIMELINE",
+            "INFO_LINEAGE",
+            "INFO_RUNTIME",
+            "INFO_ARTIFACTS_JUMP",
+            "INFO_IDENTITY",
+            "INFO_COPY_SESSION_ID",
+            "INFO_COPY_AGENT_ID",
+            "INFO_COPY_TRANSCRIPT",
+        ] {
+            assert!(cx.debug_bounds(selector).is_some(), "missing {selector}");
+        }
+        assert!(
+            cx.debug_bounds("INSPECTOR_PR_OPEN").is_none(),
+            "Info must not render pull-request content"
+        );
+        for (selector, maximum_height) in [
+            ("INFO_HERO", 72.0),
+            ("INFO_COPY_CWD", 32.0),
+            ("INFO_GIT_SUMMARY", 34.0),
+            ("INFO_LINEAGE_preview-cursor", 34.0),
+            ("INFO_COPY_SESSION_ID", 32.0),
+        ] {
+            let bounds = cx
+                .debug_bounds(selector)
+                .unwrap_or_else(|| panic!("missing compact surface {selector}"));
+            assert!(
+                f32::from(bounds.size.height) <= maximum_height,
+                "{selector} exceeded the compact height budget: {} > {maximum_height}",
+                f32::from(bounds.size.height)
+            );
+        }
+
+        let inspector = harness.read_with(cx, |harness, _| harness.inspector.clone());
+        inspector.update(cx, |inspector, cx| {
+            inspector.activate_related_session(related.clone(), cx);
+            inspector.refresh_task = None;
+            inspector.review_task = None;
+        });
+        assert_eq!(
+            runtime
+                .store
+                .read()
+                .expect("session store lock poisoned")
+                .selected_session_id(),
+            Some(&related)
+        );
+        cx.run_until_parked();
+    }
+
     #[test]
     fn artifact_titles_extract_the_useful_destination() {
         let pull_request = SessionArtifact {
@@ -5403,5 +6703,11 @@ mod tests {
             "internal: git is not installed on this host"
         ));
         assert!(!git_is_not_a_repository("ssh connection timed out"));
+        let no_git = LoadState::Error("fatal: not a git repository".to_owned());
+        assert!(matches!(no_git, LoadState::Error(ref error) if git_is_not_a_repository(error)));
+        assert!(
+            !should_show_blocking_git_loading(false, &no_git),
+            "the settled no-Git fixture must remain a calm Info state"
+        );
     }
 }

@@ -364,6 +364,15 @@ impl RootView {
                 window,
                 |this, _, event, window, cx| match event {
                     InspectorEvent::Close => this.set_inspector_open(false, cx),
+                    InspectorEvent::SessionActivated => {
+                        if let Some(terminal) = &this.terminal {
+                            terminal.update(cx, |terminal, cx| {
+                                terminal.dismiss_startup_welcome(cx);
+                                terminal.focus(window, cx);
+                            });
+                            this.sync_auxiliary_terminal(window, cx);
+                        }
+                    }
                     InspectorEvent::OpenSettings => {
                         if let Some(surfaces) = &this.utility_surfaces {
                             surfaces.update(cx, |surfaces, cx| surfaces.open_settings(cx));

@@ -31,6 +31,10 @@ fn main() {
 
 #[cfg(unix)]
 fn main() {
+    if zeus_engine::screenshot::run_worker_if_requested() {
+        return;
+    }
+
     // Stamp process start on stderr: captured into zeusd.boot.log by the
     // app's launcher, and our only visibility for pre-log failures.
     eprintln!(

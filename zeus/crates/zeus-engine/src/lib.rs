@@ -46,6 +46,7 @@ pub mod pty;
 pub mod registry;
 pub mod remote;
 pub mod screen;
+pub mod screenshot;
 pub mod session;
 pub mod status;
 

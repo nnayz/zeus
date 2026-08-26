@@ -30,6 +30,7 @@ pub fn call(tool: &str, args: &Value) -> Result<Value, CliError> {
         "send_prompt" => send_prompt(args),
         "wait_for_agent" => wait_for_agent(args),
         "read_output" => read_output(args),
+        "screenshot" => screenshot(args),
         "get_artifacts" => get_artifacts(args),
         "create_worktree" => create_worktree(args),
         "list_worktrees" => list_worktrees(args),
@@ -94,7 +95,10 @@ fn handle_message(message: Value) -> Option<Value> {
         "tools/list" => id.map(|id| success(id, tools_json())),
         "tools/call" => id.map(|id| {
             let Some(name) = params.get("name").and_then(Value::as_str) else {
-                return success(id, tool_content(Err("tools/call missing 'name'".into())));
+                return success(
+                    id,
+                    tool_content(None, Err("tools/call missing 'name'".into())),
+                );
             };
             let arguments = params
                 .get("arguments")
@@ -102,7 +106,10 @@ fn handle_message(message: Value) -> Option<Value> {
                 .unwrap_or_else(|| json!({}));
             success(
                 id,
-                tool_content(call(name, &arguments).map_err(|error| error.to_string())),
+                tool_content(
+                    Some(name),
+                    call(name, &arguments).map_err(|error| error.to_string()),
+                ),
             )
         }),
         _ if id.is_none() => None,
@@ -154,16 +161,37 @@ fn success(id: Value, result: Value) -> Value {
     json!({"jsonrpc":"2.0","id":id,"result":result})
 }
 
-fn tool_content(result: Result<Value, String>) -> Value {
-    let (value, is_error) = match result {
-        Ok(value) => (value, false),
-        Err(message) => (Value::String(message), true),
+fn tool_content(tool: Option<&str>, result: Result<Value, String>) -> Value {
+    let mut value = match result {
+        Ok(value) => value,
+        Err(message) => {
+            return json!({"content":[{"type":"text","text":message}],"isError":true});
+        }
     };
+    if tool == Some("screenshot")
+        && let Some(object) = value.as_object_mut()
+        && let Some(data) = object.remove("data")
+    {
+        let Some(mime_type) = object.remove("mimeType") else {
+            return json!({"content":[{"type":"text","text":"screenshot result omitted mimeType"}],"isError":true});
+        };
+        if !data.is_string() || !mime_type.is_string() {
+            return json!({"content":[{"type":"text","text":"screenshot result contained invalid image content"}],"isError":true});
+        }
+        let text = serde_json::to_string(&value).unwrap_or_else(|_| "null".into());
+        return json!({
+            "content":[
+                {"type":"text","text":text},
+                {"type":"image","mimeType":mime_type,"data":data}
+            ],
+            "isError":false
+        });
+    }
     let text = value
         .as_str()
         .map(str::to_owned)
         .unwrap_or_else(|| serde_json::to_string(&value).unwrap_or_else(|_| "null".into()));
-    json!({"content":[{"type":"text","text":text}],"isError":is_error})
+    json!({"content":[{"type":"text","text":text}],"isError":false})
 }
 
 fn tool_definitions() -> Vec<Value> {
@@ -212,6 +240,18 @@ fn tool_definitions() -> Vec<Value> {
             "read_output",
             "Read an agent session's output.",
             json!({"type":"object","properties":{"session_id":{"type":"string"},"mode":{"type":"string","enum":["screen","tail"]},"lines":{"type":"number","default":50}},"required":["session_id"]}),
+        ),
+        tool(
+            "screenshot",
+            "Capture a screenshot of a local window (default: the Zeus window hosting this session). USE THIS instead of writing a Playwright script, calling `screencapture`, or using `browser` with `action: \"screenshot\"`. Returns the image directly. For terminal text use `read_output`. For a page inside the session Playwright browser, use `browser`.",
+            json!({
+                "type":"object",
+                "properties":{
+                    "window":{"type":"string","description":"Substring match on window title. Omit to capture the Zeus window."},
+                    "display":{"type":"integer","description":"Capture this display id. Do not use unless the user asked for a full display."},
+                    "list":{"type":"boolean","description":"If true, return capturable windows/displays and take no image."}
+                }
+            }),
         ),
         tool(
             "create_worktree",
@@ -696,6 +736,12 @@ fn browser(args: &Value) -> Result<Value, CliError> {
     })
 }
 
+fn screenshot(args: &Value) -> Result<Value, CliError> {
+    conn::with_conn(Duration::from_secs(20), |conn| {
+        conn.request_value(Method::SCREENSHOT_CAPTURE, args, Duration::from_secs(20))
+    })
+}
+
 fn test_run(args: &Value) -> Result<Value, CliError> {
     let url = require_string(args, "url")?;
     let steps = args
@@ -1043,6 +1089,7 @@ mod tests {
             "spawn_agent",
             "get_artifacts",
             "browser",
+            "screenshot",
             "whoami",
             "report_to_parent",
             "summarize_children",
@@ -1053,6 +1100,63 @@ mod tests {
             );
         }
         assert!(!names.contains(&"test_run"));
+    }
+
+    #[test]
+    fn screenshot_has_a_small_object_schema_and_returns_image_content() {
+        let tools = tool_definitions();
+        let screenshot = tools
+            .iter()
+            .find(|tool| tool["name"] == "screenshot")
+            .expect("screenshot tool");
+        assert_eq!(screenshot["inputSchema"]["type"], "object");
+        assert_eq!(
+            screenshot["inputSchema"]["properties"]
+                .as_object()
+                .expect("properties")
+                .len(),
+            3
+        );
+
+        let content = tool_content(
+            Some("screenshot"),
+            Ok(json!({
+                "target":"zeus",
+                "width":2,
+                "height":1,
+                "mimeType":"image/jpeg",
+                "data":"/9j/2Q=="
+            })),
+        );
+        assert_eq!(content["isError"], false);
+        assert_eq!(content["content"][1]["type"], "image");
+        assert_eq!(content["content"][1]["mimeType"], "image/jpeg");
+        assert_eq!(content["content"][1]["data"], "/9j/2Q==");
+        assert!(
+            !content["content"][0]["text"]
+                .as_str()
+                .expect("metadata")
+                .contains("/9j/2Q==")
+        );
+
+        let listed = tool_content(
+            Some("screenshot"),
+            Ok(json!({"targets":[{"id":11,"title":"Zeus","kind":"window"}]})),
+        );
+        assert_eq!(listed["content"].as_array().expect("content").len(), 1);
+        assert_eq!(listed["content"][0]["type"], "text");
+
+        let denied = tool_content(
+            Some("screenshot"),
+            Err("screen_recording_denied: enable Screen Recording for Zeus".into()),
+        );
+        assert_eq!(denied["isError"], true);
+        assert!(
+            denied["content"][0]["text"]
+                .as_str()
+                .expect("error")
+                .contains("screen_recording_denied")
+        );
     }
 
     #[test]

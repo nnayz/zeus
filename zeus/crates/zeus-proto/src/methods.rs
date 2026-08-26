@@ -69,6 +69,7 @@ impl Method {
     pub const EVENTS_WAIT: &'static str = "events.wait";
     pub const HOOK_REPORT: &'static str = "hook.report";
     pub const TEST_RUN: &'static str = "test.run";
+    pub const SCREENSHOT_CAPTURE: &'static str = "screenshot.capture";
     pub const STATE_SNAPSHOT: &'static str = "state.snapshot";
     pub const DAEMON_PREPARE_SHUTDOWN: &'static str = "daemon.prepare_shutdown";
     pub const DAEMON_SHUTDOWN_IF_IDLE: &'static str = "daemon.shutdown_if_idle";

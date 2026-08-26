@@ -121,6 +121,18 @@ pub fn tool_definitions_for(kinds: &[String]) -> Vec<ToolDefinition> {
             }),
         ),
         tool(
+            "screenshot",
+            "Capture a screenshot of a local window (default: the Zeus window hosting this session). USE THIS instead of writing a Playwright script, calling `screencapture`, or using `browser` with `action: \"screenshot\"`. Returns the image directly. For terminal text use `read_output`. For a page inside the session Playwright browser, use `browser`.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "window": { "type": "string", "description": "Substring match on window title. Omit to capture the Zeus window." },
+                    "display": { "type": "integer", "description": "Capture this display id. Do not use unless the user asked for a full display." },
+                    "list": { "type": "boolean", "description": "If true, return capturable windows/displays and take no image." }
+                }
+            }),
+        ),
+        tool(
             "release_agent",
             "End a session and kill its process tree. The record stays in the list.",
             json!({

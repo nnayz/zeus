@@ -688,6 +688,7 @@ impl ControlServer {
             Method::GIT_PR_OPEN => self.git_pr_open(params),
             Method::TEST_RUN => self.browser_call("run", params),
             "browser.act" => self.browser_call("browser", params),
+            Method::SCREENSHOT_CAPTURE => self.screenshot_capture(params),
             Method::EVENTS_WAIT => self.events_wait(params),
             Method::HOST_SYNC_PREFS => self.host_sync_prefs(params),
             Method::HOST_INITIALIZE => self.host_initialize(params),
@@ -1169,6 +1170,15 @@ impl ControlServer {
             code: "browser_pool".into(),
             message: error,
         })
+    }
+
+    /// One-shot native local-window capture for the MCP `screenshot` tool.
+    /// The capture module owns the bounded helper process and never writes an
+    /// artifact path or image bytes to Engine logs.
+    fn screenshot_capture(&self, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
+        let params = params.unwrap_or_else(|| json!({}));
+        crate::screenshot::capture(&params)
+            .map_err(|error| ControlError::new(error.code, error.message))
     }
 
     /// The aggregated staleness view: every worktree of every project,

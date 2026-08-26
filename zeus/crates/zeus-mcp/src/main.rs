@@ -107,16 +107,37 @@ fn error(id: Value, code: i64, message: impl Into<String>) -> Value {
     json!({"jsonrpc":"2.0","id":id,"error":{"code":code,"message":message.into()}})
 }
 
-fn tool_content(result: Result<Value, String>) -> Value {
-    let (value, is_error) = match result {
-        Ok(value) => (value, false),
-        Err(message) => (Value::String(message), true),
+fn tool_content(tool: Option<&str>, result: Result<Value, String>) -> Value {
+    let mut value = match result {
+        Ok(value) => value,
+        Err(message) => {
+            return json!({"content":[{"type":"text","text":message}],"isError":true});
+        }
     };
+    if tool == Some("screenshot")
+        && let Some(object) = value.as_object_mut()
+        && let Some(data) = object.remove("data")
+    {
+        let Some(mime_type) = object.remove("mimeType") else {
+            return json!({"content":[{"type":"text","text":"screenshot result omitted mimeType"}],"isError":true});
+        };
+        if !data.is_string() || !mime_type.is_string() {
+            return json!({"content":[{"type":"text","text":"screenshot result contained invalid image content"}],"isError":true});
+        }
+        let text = serde_json::to_string(&value).unwrap_or_else(|_| "null".to_owned());
+        return json!({
+            "content":[
+                {"type":"text","text":text},
+                {"type":"image","mimeType":mime_type,"data":data}
+            ],
+            "isError":false
+        });
+    }
     let text = value.as_str().map_or_else(
         || serde_json::to_string(&value).unwrap_or_else(|_| "null".to_owned()),
         str::to_owned,
     );
-    json!({"content":[{"type":"text","text":text}],"isError":is_error})
+    json!({"content":[{"type":"text","text":text}],"isError":false})
 }
 
 fn initialize(params: &Value) -> Value {
@@ -172,14 +193,14 @@ fn handle_message(message: Value, backend: &mut impl ToolBackend) -> Option<Valu
             let Some(name) = params.get("name").and_then(Value::as_str) else {
                 return success(
                     id,
-                    tool_content(Err("tools/call missing 'name'".to_owned())),
+                    tool_content(None, Err("tools/call missing 'name'".to_owned())),
                 );
             };
             let arguments = params
                 .get("arguments")
                 .cloned()
                 .unwrap_or_else(|| json!({}));
-            success(id, tool_content(backend.call(name, &arguments)))
+            success(id, tool_content(Some(name), backend.call(name, &arguments)))
         }),
         _ if id.is_none() => None,
         _ => Some(error(
@@ -239,9 +260,17 @@ mod tests {
         }
 
         fn call(&mut self, name: &str, _: &Value) -> Result<Value, String> {
-            (name == "list_agents")
-                .then(|| json!({"agents":[]}))
-                .ok_or_else(|| "unknown tool".to_owned())
+            match name {
+                "list_agents" => Ok(json!({"agents":[]})),
+                "screenshot" => Ok(json!({
+                    "target":"zeus",
+                    "width":2,
+                    "height":1,
+                    "mimeType":"image/jpeg",
+                    "data":"/9j/2Q=="
+                })),
+                _ => Err("unknown tool".to_owned()),
+            }
         }
     }
 
@@ -286,5 +315,20 @@ mod tests {
         .unwrap();
         assert_eq!(called["result"]["isError"], false);
         assert_eq!(called["result"]["content"][0]["text"], "{\"agents\":[]}");
+
+        let screenshot = handle_message(
+            json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"screenshot","arguments":{}}}),
+            &mut backend,
+        )
+        .unwrap();
+        assert_eq!(screenshot["result"]["isError"], false);
+        assert_eq!(screenshot["result"]["content"][1]["type"], "image");
+        assert_eq!(screenshot["result"]["content"][1]["data"], "/9j/2Q==");
+        assert!(
+            !screenshot["result"]["content"][0]["text"]
+                .as_str()
+                .expect("metadata")
+                .contains("/9j/2Q==")
+        );
     }
 }

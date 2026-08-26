@@ -10,6 +10,8 @@
     <false/>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSScreenCaptureUsageDescription</key>
+    <string>Zeus captures a window when a hosted coding agent asks to see the local interface.</string>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
     <key>NSUserNotificationAlertStyle</key>

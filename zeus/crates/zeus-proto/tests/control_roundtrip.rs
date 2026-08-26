@@ -246,12 +246,13 @@ fn method_name_set_is_complete() {
         Method::EVENTS_WAIT,
         Method::HOOK_REPORT,
         Method::TEST_RUN,
+        Method::SCREENSHOT_CAPTURE,
         Method::STATE_SNAPSHOT,
         Method::DAEMON_PREPARE_SHUTDOWN,
         Method::DAEMON_SHUTDOWN_IF_IDLE,
         Method::DAEMON_SHUTDOWN,
     ];
-    assert_eq!(methods.len(), 51);
+    assert_eq!(methods.len(), 52);
     assert_eq!(methods[0], "hello");
     assert_eq!(methods.last().copied(), Some("daemon.shutdown"));
 }

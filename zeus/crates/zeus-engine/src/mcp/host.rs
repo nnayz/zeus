@@ -306,6 +306,10 @@ impl ToolHost for RegistryHost {
                 self.wait_for_children(&caller, timeout)
             }
 
+            "screenshot" => {
+                crate::screenshot::capture(arguments).map_err(|error| error.to_string())
+            }
+
             // spawn_agent is served by the control layer, which owns log paths
             "spawn_agent" => self.spawn_agent(arguments),
 

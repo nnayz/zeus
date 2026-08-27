@@ -177,11 +177,7 @@ impl AgentDescriptor {
             }
             spec.env.push((key, value));
         }
-        spec.env.retain(|(key, _)| key != "NO_COLOR");
-        spec.env
-            .retain(|(key, _)| key != "TERM" && key != "COLORTERM");
-        spec.env.push(("TERM".into(), "xterm-256color".into()));
-        spec.env.push(("COLORTERM".into(), "truecolor".into()));
+        crate::pty::assert_color_environment(&mut spec.env);
         for (key, value) in &self.env {
             spec.env.retain(|(existing, _)| existing != key);
             spec.env.push((key.clone(), value.clone()));
@@ -255,10 +251,7 @@ impl AgentDescriptor {
                 spec.env.push((key, value));
             }
         }
-        spec.env
-            .retain(|(key, _)| !matches!(key.as_str(), "NO_COLOR" | "TERM" | "COLORTERM"));
-        spec.env.push(("TERM".into(), "xterm-256color".into()));
-        spec.env.push(("COLORTERM".into(), "truecolor".into()));
+        crate::pty::assert_color_environment(&mut spec.env);
         for (key, value) in &self.env {
             spec.env.retain(|(existing, _)| existing != key);
             spec.env.push((key.clone(), value.clone()));
@@ -553,27 +546,35 @@ mod tests {
     }
 
     #[test]
-    fn colour_is_asserted_rather_than_inherited() {
+    fn colour_is_asserted_for_local_and_remote_agents_rather_than_inherited() {
         // An inherited NO_COLOR turns the agent monochrome, and the screen
         // rules that look for its prompt box then never match.
         let claude = descriptor("claude-code");
         let inherited = [
             ("NO_COLOR".to_string(), "1".to_string()),
             ("TERM".to_string(), "dumb".to_string()),
+            ("COLORTERM".to_string(), "ansi".to_string()),
         ];
-        let spec = claude
-            .spawn_spec(Path::new("/tmp"), inherited, &[])
-            .expect("spec");
+        let specs = [
+            claude
+                .spawn_spec(Path::new("/tmp"), inherited.clone(), &[])
+                .expect("local spec"),
+            claude
+                .remote_spawn_spec(Path::new("/tmp"), inherited, &[])
+                .expect("remote spec"),
+        ];
 
-        let get = |name: &str| {
-            spec.env
-                .iter()
-                .find(|(key, _)| key == name)
-                .map(|(_, value)| value.as_str())
-        };
-        assert_eq!(get("NO_COLOR"), None, "NO_COLOR must be removed");
-        assert_eq!(get("TERM"), Some("xterm-256color"));
-        assert_eq!(get("COLORTERM"), Some("truecolor"));
+        for spec in specs {
+            let get = |name: &str| {
+                spec.env
+                    .iter()
+                    .find(|(key, _)| key == name)
+                    .map(|(_, value)| value.as_str())
+            };
+            assert_eq!(get("NO_COLOR"), None, "NO_COLOR must be removed");
+            assert_eq!(get("TERM"), Some("xterm-256color"));
+            assert_eq!(get("COLORTERM"), Some("truecolor"));
+        }
     }
 
     #[test]

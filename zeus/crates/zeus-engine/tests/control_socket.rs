@@ -128,9 +128,37 @@ fn a_client_can_handshake_and_list_over_the_socket() {
 }
 
 #[test]
-fn spawning_a_shell_over_the_socket_produces_a_watched_session() {
-    // The capstone: a client asks the engine to start something, and gets back
-    // a session record for a process the engine is now watching.
+fn a_terminal_without_inherited_term_runs_clear_over_the_socket() {
+    // Run the regression body in an isolated copy of this test process. That
+    // faithfully simulates a GUI-launched daemon without TERM without racing
+    // other tests through process-global environment mutation.
+    const CHILD_MARKER: &str = "ZEUS_TEST_CONTROL_SOCKET_WITHOUT_TERM";
+    if std::env::var_os(CHILD_MARKER).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "a_terminal_without_inherited_term_runs_clear_over_the_socket",
+                "--nocapture",
+            ])
+            .env_remove("TERM")
+            .env(CHILD_MARKER, "1")
+            .output()
+            .expect("run isolated regression test");
+        assert!(
+            output.status.success(),
+            "isolated test failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        return;
+    }
+    assert!(
+        std::env::var_os("TERM").is_none(),
+        "the simulated GUI/daemon environment must not provide TERM"
+    );
+
+    // A client asks the engine to start a binary-free Terminal manifest. The
+    // session must supply enough terminal capability for clear(1) to work.
     let temp = tempfile::tempdir().expect("temp");
     let registry = Registry::new(engine(), temp.path().join("state.json"));
     let registry = Arc::new(Mutex::new(registry));
@@ -167,7 +195,7 @@ fn spawning_a_shell_over_the_socket_produces_a_watched_session() {
         params: Some(json!({
             "kind": { "shell": {} },
             "cwd": "/tmp",
-            "argv": ["/bin/sh", "-c", "printf spawned-ok\\n; sleep 30"],
+            "argv": ["/bin/sh", "-c", "clear && printf clear-ok\\n; sleep 30"],
         })),
     });
     let id = match spawned {
@@ -178,7 +206,7 @@ fn spawning_a_shell_over_the_socket_produces_a_watched_session() {
     };
     assert!(id.starts_with("s_"), "id follows the daemon format: {id}");
 
-    // The engine is really watching it: its output reaches the screen.
+    // clear(1) succeeded and the following output reached the watched screen.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     let mut seen = false;
     while std::time::Instant::now() < deadline && !seen {
@@ -194,16 +222,13 @@ fn spawning_a_shell_over_the_socket_produces_a_watched_session() {
         {
             seen = result["text"]
                 .as_str()
-                .is_some_and(|text| text.contains("spawned-ok"));
+                .is_some_and(|text| text.contains("clear-ok"));
         }
         if !seen {
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
     }
-    assert!(
-        seen,
-        "the spawned process's output never reached the engine"
-    );
+    assert!(seen, "clear did not succeed in the Terminal session");
 
     // And listing reports it.
     let listed = request(ControlMessage::Request {

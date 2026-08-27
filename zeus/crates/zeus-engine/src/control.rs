@@ -840,12 +840,7 @@ impl ControlServer {
         let mut pty = match descriptor.spawn_spec(&cwd_path, inherited.clone(), &launch_args) {
             Some(spec) => spec,
             // No binary in the manifest: the caller has to say what to run.
-            None if !argv.is_empty() => {
-                let mut spec = crate::pty::PtySpec::new(argv.clone(), &cwd_path);
-                spec.env = inherited;
-                spec.env.retain(|(key, _)| key != "NO_COLOR");
-                spec
-            }
+            None if !argv.is_empty() => binary_free_spawn_spec(argv.clone(), &cwd_path, inherited),
             None => {
                 return Err(ControlError::bad_request(format!(
                     "agent {kind:?} declares no binary, so argv is required"
@@ -1062,12 +1057,7 @@ impl ControlServer {
                 .remote_spawn_spec(&cwd, inherited, &launch_args)
                 .ok_or_else(|| ControlError::internal("remote descriptor has no binary"))?
         } else {
-            let mut spec = crate::pty::PtySpec::new(argv, &cwd);
-            spec.env = inherited;
-            spec.env.retain(|(key, _)| key != "NO_COLOR");
-            spec.env.retain(|(key, _)| key != "TERM");
-            spec.env.push(("TERM".into(), "xterm-256color".into()));
-            spec
+            binary_free_spawn_spec(argv, &cwd, inherited)
         };
         if let (Some(cols), Some(rows)) = (p.initial_cols, p.initial_rows) {
             pty.cols = cols.clamp(2, u16::MAX as i64) as u16;
@@ -2599,6 +2589,20 @@ impl ControlServer {
     }
 }
 
+/// Build the PTY spec for manifests without a binary (`shell` and `generic`).
+/// Local and remote session creation deliberately share this function so
+/// their terminal capabilities cannot drift apart again.
+fn binary_free_spawn_spec(
+    argv: Vec<String>,
+    cwd: &Path,
+    inherited: impl IntoIterator<Item = (String, String)>,
+) -> crate::pty::PtySpec {
+    let mut spec = crate::pty::PtySpec::new(argv, cwd);
+    spec.env.extend(inherited);
+    crate::pty::assert_color_environment(&mut spec.env);
+    spec
+}
+
 impl Drop for ControlServer {
     fn drop(&mut self) {
         // Leaving the socket file behind would make the next start think a
@@ -3898,6 +3902,33 @@ mod tests {
                 .is_empty(),
             "an unavailable remote transport must not create a session record"
         );
+    }
+
+    #[test]
+    fn binary_free_local_and_remote_shells_share_the_truecolor_environment() {
+        // Both branches of session spawn call this builder. Exercise the
+        // captured remote-shell case with stale capabilities so neither path
+        // can regress to forwarding them or setting only TERM.
+        let spec = binary_free_spawn_spec(
+            vec!["/bin/sh".into(), "-l".into()],
+            Path::new("/remote/project"),
+            [
+                ("PATH".into(), "/usr/bin:/bin".into()),
+                ("TERM".into(), "dumb".into()),
+                ("COLORTERM".into(), "ansi".into()),
+                ("NO_COLOR".into(), "1".into()),
+            ],
+        );
+        let value = |name: &str| {
+            spec.env
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.as_str())
+        };
+
+        assert_eq!(value("TERM"), Some("xterm-256color"));
+        assert_eq!(value("COLORTERM"), Some("truecolor"));
+        assert_eq!(value("NO_COLOR"), None);
     }
 
     #[test]

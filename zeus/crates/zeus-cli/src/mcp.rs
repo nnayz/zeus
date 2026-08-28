@@ -6,6 +6,9 @@ use std::process;
 use std::time::Duration;
 
 use serde_json::{Map, Value, json};
+use zeus_proto::orchestration::{
+    CREATE_ZEUS_SESSION_TOOL, canonical_tool_name, create_session_tool_definition, mcp_instructions,
+};
 use zeus_proto::{
     AgentKind, EventsSubscribeParams, EventsWaitParams, Method, SendTextParams, SessionId,
     SessionIdParams, SessionRecord, SessionSpawnParams, TestRunParams, WorktreeCreateParams,
@@ -23,8 +26,8 @@ pub fn tools_json() -> Value {
 }
 
 pub fn call(tool: &str, args: &Value) -> Result<Value, CliError> {
-    match tool {
-        "spawn_agent" => spawn_agent(args),
+    match canonical_tool_name(tool) {
+        CREATE_ZEUS_SESSION_TOOL => spawn_agent(args),
         "list_agents" => list_agents(),
         "get_status" => get_status(args),
         "send_prompt" => send_prompt(args),
@@ -126,34 +129,11 @@ fn initialize(params: &Value) -> Value {
         .get("protocolVersion")
         .and_then(Value::as_str)
         .unwrap_or("2025-06-18");
-    let browser = if env::var_os("ZEUS_TEST_RUN_AVAILABLE").is_some() {
-        " To test a web feature, use test_run with a preview URL from get_artifacts."
-    } else {
-        ""
-    };
     json!({
         "protocolVersion": version,
         "capabilities": {"tools":{}},
         "serverInfo": {"name":"zeus","version":env!("CARGO_PKG_VERSION")},
-        "instructions": format!(
-            "This session is running INSIDE Zeus, a macOS orchestrator for coding agents. \
-             These tools control it. Use them proactively whenever the user asks to \
-             open/start/spawn/close another agent, session, tab, or terminal (Claude Code, \
-             Codex, Cursor, Gemini, or a shell), to check what other sessions are doing, to \
-             talk to another session, or to parallelize work across git worktrees — no \
-             extra confirmation of intent needed.\n\nNever use the host agent's built-in \
-             collaboration spawn_agent / subagents: those workers stay inside this terminal \
-             and never appear in the Zeus sidebar. Always call this MCP spawn_agent so the \
-             child is a real Zeus tab. Unless the user explicitly requests multiple agents, \
-             make exactly one spawn_agent call. When the user does not name an agent kind, omit \
-             kind so Zeus uses the configured default; never probe or fan out across kinds.\n\n\
-             Typical orchestration flow: spawn_agent \
-             (optionally worktree:true and an initial prompt) → wait_for_agent(until:\"done\") \
-             → read_output → send_prompt for follow-ups → release_agent when finished. \
-             get_artifacts returns PR/Linear/preview URLs and listening ports a session has \
-             produced; PR entries include live GitHub status (state, review decision, checks, \
-             comment counts, +/- lines).{browser}"
-        )
+        "instructions": mcp_instructions(env::var_os("ZEUS_TEST_RUN_AVAILABLE").is_some()),
     })
 }
 
@@ -197,25 +177,9 @@ fn tool_content(tool: Option<&str>, result: Result<Value, String>) -> Value {
 fn tool_definitions() -> Vec<Value> {
     let kinds = catalog::spawnable_kind_labels();
     let names = catalog::spawnable_display_names();
+    let spawn = create_session_tool_definition(&kinds, &names);
     let mut tools = vec![
-        tool(
-            "spawn_agent",
-            &format!(
-                "Open ONE new Zeus session tab nested under this one, running {names} — locally or on a configured remote host. This is the ONLY way spawned agents appear in the Zeus sidebar and terminal. Do NOT use built-in collaboration/subagent spawn — those stay hidden inside this PTY. USE THIS whenever the user asks to open/start/spawn/launch another agent, session, or terminal. Unless the user explicitly requests multiple agents, call this exactly once. If the user does not name a kind, omit kind and Zeus will use the configured default; never guess, probe, or fan out across agent kinds."
-            ),
-            json!({
-                "type":"object",
-                "properties":{
-                    "kind":{"type":"string","enum":kinds,"description":"Which agent to run. Omit to use Zeus's configured default agent."},
-                    "cwd":{"type":"string","description":"Working directory."},
-                    "host":{"type":"string","description":"Host id from hosts.json."},
-                    "worktree":{"type":"boolean","description":"Create a fresh git worktree off cwd and run there. Local only."},
-                    "prompt":{"type":"string","description":"Initial prompt to send once the agent is ready."},
-                    "name":{"type":"string","description":"Session title."}
-                },
-                "required":["cwd"]
-            }),
-        ),
+        tool(&spawn.name, &spawn.description, spawn.input_schema),
         tool(
             "list_agents",
             "List all active agent sessions with id, kind, title, status, parent, and cwd.",
@@ -1086,7 +1050,7 @@ mod tests {
             .filter_map(|tool| tool["name"].as_str())
             .collect();
         for expected in [
-            "spawn_agent",
+            "create_zeus_session",
             "get_artifacts",
             "browser",
             "screenshot",
@@ -1099,7 +1063,17 @@ mod tests {
                 "{expected} missing from {names:?}"
             );
         }
+        assert!(!names.contains(&"spawn_agent"));
         assert!(!names.contains(&"test_run"));
+    }
+
+    #[test]
+    fn initialize_uses_the_shared_orchestration_instructions() {
+        let initialized = initialize(&json!({ "protocolVersion": "2025-06-18" }));
+        assert_eq!(
+            initialized["instructions"],
+            mcp_instructions(env::var_os("ZEUS_TEST_RUN_AVAILABLE").is_some())
+        );
     }
 
     #[test]
@@ -1160,17 +1134,24 @@ mod tests {
     }
 
     #[test]
-    fn spawn_agent_omits_kind_to_use_the_configured_default() {
+    fn create_zeus_session_omits_kind_and_keeps_the_legacy_alias_callable() {
         let tools = tool_definitions();
         let spawn = tools
             .iter()
-            .find(|tool| tool["name"] == "spawn_agent")
-            .expect("spawn_agent");
+            .find(|tool| tool["name"] == "create_zeus_session")
+            .expect("create_zeus_session");
         let required = spawn["inputSchema"]["required"]
             .as_array()
             .expect("required");
         assert!(!required.iter().any(|field| field == "kind"));
         assert!(required.iter().any(|field| field == "cwd"));
+        assert_eq!(canonical_tool_name("spawn_agent"), "create_zeus_session");
+        let legacy_error = call("spawn_agent", &json!({ "kind": "not-an-agent" }))
+            .expect_err("invalid legacy spawn call");
+        assert!(
+            legacy_error.to_string().contains("invalid kind"),
+            "the compatibility alias must reach session creation: {legacy_error}"
+        );
 
         assert_eq!(
             default_agent_from_preferences(&json!({"defaultAgent": "codex"})).as_deref(),

@@ -366,7 +366,7 @@ fn worktree_tools_work_against_a_real_repository() {
 }
 
 #[test]
-fn spawn_agent_starts_a_session_owned_by_its_caller() {
+fn create_zeus_session_validates_before_starting_a_child() {
     // Lineage is the point: a spawned session must record who spawned it, or
     // list_children and wait_for_children have nothing to work with.
     let temp = tempfile::tempdir().expect("temp");
@@ -394,7 +394,7 @@ fn spawn_agent_starts_a_session_owned_by_its_caller() {
     // An unknown agent is refused too.
     let unknown = call(
         &server,
-        "spawn_agent",
+        "create_zeus_session",
         json!({ "kind": "not-an-agent", "cwd": "/tmp" }),
     )
     .expect_err("unknown agent");
@@ -403,7 +403,7 @@ fn spawn_agent_starts_a_session_owned_by_its_caller() {
     // A missing directory is caught before anything is started.
     let bad_cwd = call(
         &server,
-        "spawn_agent",
+        "create_zeus_session",
         json!({ "kind": "claude-code", "cwd": "/no/such/dir" }),
     )
     .expect_err("bad cwd");
@@ -413,7 +413,7 @@ fn spawn_agent_starts_a_session_owned_by_its_caller() {
     // lookup, code sync, or session creation while the new transport is dark.
     let unavailable = call(
         &server,
-        "spawn_agent",
+        "create_zeus_session",
         json!({ "kind": "claude-code", "cwd": "/no/such/dir", "host": "forge" }),
     )
     .expect_err("remote transport unavailable");
@@ -466,7 +466,7 @@ fn a_spawned_session_records_its_parent_and_appears_as_a_child() {
 
     let spawned = call(
         &server,
-        "spawn_agent",
+        "create_zeus_session",
         json!({ "cwd": "/tmp", "name": "worker one", "prompt": "do the thing" }),
     )
     .expect("spawn");

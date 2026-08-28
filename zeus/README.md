@@ -81,6 +81,20 @@ preferences, and Application Support directory. That makes the dev build useful
 against real sessions, but do not focus the same session in both apps at
 different terminal sizes: each client can resize the shared PTY.
 
+An ignored live smoke test checks that an ordinary delegation request creates
+a child `SessionRecord` through the hosted agent's Zeus MCP connection. Start
+the current development build, ensure the selected agent is authenticated, and
+run:
+
+```sh
+ZEUS_REAL_AGENT_SMOKE=1 ZEUS_REAL_AGENT_KIND=codex \
+  cargo test -p zeus-cli --test real_agent_delegation -- --ignored --nocapture
+```
+
+The test uses the current directory by default; set `ZEUS_REAL_AGENT_CWD` and
+`ZEUS_REAL_AGENT_TIMEOUT_SECONDS` to override its workspace and 300-second
+deadline. It removes the parent and child sessions it creates.
+
 The app uses blurred window backing, a translucent persistent-width sidebar, an opaque Zeus Dark terminal card, full-size content under transparent titlebar chrome, adjusted traffic lights, and a 900×560 minimum size.
 
 ### Sidebar preview fixtures

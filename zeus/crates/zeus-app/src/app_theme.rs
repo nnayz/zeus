@@ -19,17 +19,17 @@ pub(crate) fn sidebar_colors(id: &str) -> SemanticColors {
 }
 
 fn semantic_colors(theme: TermTheme, sidebar_tones: bool) -> SemanticColors {
-    // Zeus Dark follows Ayu Dark's Zed hierarchy: the editor keeps the
-    // ink-blue canvas while persistent panels use Ayu's clearly lifted
-    // surface. Other catalog themes retain their derived surfaces so their
-    // individual tint carries through the application.
-    let (sidebar_surface, floating_surface) = if theme.id == TermTheme::ZEUS_DARK.id {
-        (hex(0x1f2127), hex(0x0f131a))
-    } else {
-        (
+    // The Zeus themes use deliberate neutral surface steps: ChatGPT-like
+    // charcoal for the default and a near-black hierarchy for high contrast.
+    // Other catalog themes retain derived surfaces so their tint carries
+    // through the application.
+    let (sidebar_surface, floating_surface) = match theme.id {
+        id if id == TermTheme::ZEUS_DARK.id => (hex(0x171717), hex(0x2f2f2f)),
+        id if id == TermTheme::ZEUS_DARK_HIGH_CONTRAST.id => (hex(0x0a0a0a), hex(0x1a1a1a)),
+        _ => (
             mix(theme.background, theme.foreground, 0.08, 0.92),
             mix(theme.background, theme.foreground, 0.13, 1.0),
-        )
+        ),
     };
     let mut colors = SemanticColors::themed(
         match theme.appearance {
@@ -43,11 +43,11 @@ fn semantic_colors(theme: TermTheme, sidebar_tones: bool) -> SemanticColors {
         sidebar_tones,
     );
     if theme.id == TermTheme::ZEUS_DARK.id {
-        // Zed's Ayu palette uses concrete warm neutrals rather than opacity-
-        // derived white labels. Keeping them opaque preserves their hue over
-        // both the base canvas and raised surfaces.
-        colors.secondary = hex(0x8a8986);
-        colors.tertiary = hex(0x696a6a);
+        colors.secondary = hex(0xb4b4b4);
+        colors.tertiary = hex(0x8e8e8e);
+    } else if theme.id == TermTheme::ZEUS_DARK_HIGH_CONTRAST.id {
+        colors.secondary = hex(0xd4d4d4);
+        colors.tertiary = hex(0xa3a3a3);
     }
     colors
 }
@@ -103,15 +103,31 @@ mod tests {
     }
 
     #[test]
-    fn zeus_dark_uses_ayu_dark_workbench_surfaces_and_text() {
+    fn zeus_dark_uses_neutral_chatgpt_style_surfaces_and_text() {
         let app = colors(TermTheme::ZEUS_DARK.id);
 
-        assert_eq!(app.background, hex(0x0d1016));
-        assert_eq!(app.primary, hex(0xbfbdb6));
-        assert_eq!(app.secondary, hex(0x8a8986));
-        assert_eq!(app.tertiary, hex(0x696a6a));
-        assert_eq!(app.sidebar_surface(), hex(0x1f2127));
-        assert_eq!(app.floating_surface(), hex(0x0f131a));
+        assert_eq!(app.background, hex(0x212121));
+        assert_eq!(app.primary, hex(0xececec));
+        assert_eq!(app.secondary, hex(0xb4b4b4));
+        assert_eq!(app.tertiary, hex(0x8e8e8e));
+        assert_eq!(app.sidebar_surface(), hex(0x171717));
+        assert_eq!(app.floating_surface(), hex(0x2f2f2f));
+    }
+
+    #[test]
+    fn zeus_dark_high_contrast_uses_brighter_text_and_black_surfaces() {
+        let standard = colors(TermTheme::ZEUS_DARK.id);
+        let high_contrast = colors(TermTheme::ZEUS_DARK_HIGH_CONTRAST.id);
+
+        assert_eq!(high_contrast.background, hex(0x000000));
+        assert_eq!(high_contrast.primary, hex(0xffffff));
+        assert_eq!(high_contrast.secondary, hex(0xd4d4d4));
+        assert_eq!(high_contrast.tertiary, hex(0xa3a3a3));
+        assert_eq!(high_contrast.sidebar_surface(), hex(0x0a0a0a));
+        assert_eq!(high_contrast.floating_surface(), hex(0x1a1a1a));
+        assert!(high_contrast.primary.r > standard.primary.r);
+        assert!(high_contrast.secondary.r > standard.secondary.r);
+        assert!(high_contrast.background.r < standard.background.r);
     }
 
     #[test]

@@ -282,6 +282,27 @@ impl UtilitySurfaces {
         store_runtime: Arc<StoreRuntime>,
         runtime: Arc<Runtime>,
         updates: UpdateHandle,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::new_inner(store_runtime, runtime, updates, false, window, cx)
+    }
+
+    pub(crate) fn new_preview(
+        store_runtime: Arc<StoreRuntime>,
+        runtime: Arc<Runtime>,
+        updates: UpdateHandle,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::new_inner(store_runtime, runtime, updates, true, window, cx)
+    }
+
+    fn new_inner(
+        store_runtime: Arc<StoreRuntime>,
+        runtime: Arc<Runtime>,
+        updates: UpdateHandle,
+        preview: bool,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -289,7 +310,11 @@ impl UtilitySurfaces {
         let home = std::env::var_os("HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("/nonexistent"));
-        let hosts_path = zeus_proto::paths::ZeusPaths::hosts_config_file(&home);
+        let hosts_path = if preview {
+            PathBuf::from("/nonexistent/zeus-preview/hosts.json")
+        } else {
+            zeus_proto::paths::ZeusPaths::hosts_config_file(&home)
+        };
         let (prefs, hosts) = {
             let store = store_runtime
                 .store

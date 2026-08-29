@@ -33,9 +33,10 @@ folder plus parents of open projects.
 ## Terminal
 
 **Color theme.** Applies to the app chrome and every open terminal at
-once. The catalog includes Zeus Dark (default), Zeus Light, Solarized,
-Dracula, One Dark, Gruvbox, Tokyo Night, Catppuccin, Vesper, Nord,
-Rosé Pine, Kanagawa, Everforest, GitHub Light, and friends.
+once. The catalog includes the monochromatic Zeus Dark (default), Zeus Dark
+High Contrast, Zeus Light, Solarized, Dracula, One Dark, Gruvbox, Tokyo Night,
+Catppuccin, Vesper, Nord, Rosé Pine, Kanagawa, Everforest, GitHub Light, and
+friends.
 
 **Font size.** Terminal text only, 10 to 20 pt. `⌘+` / `⌘-` / `⌘0` do the
 same from the keyboard.

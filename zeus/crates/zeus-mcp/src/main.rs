@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use serde_json::{Value, json};
+use zeus_proto::orchestration::mcp_instructions;
 
 trait ToolBackend {
     fn tools(&mut self) -> Result<Value, String>;
@@ -145,31 +146,11 @@ fn initialize(params: &Value) -> Value {
         .get("protocolVersion")
         .and_then(Value::as_str)
         .unwrap_or("2025-06-18");
-    let browser = if env::var_os("ZEUS_TEST_RUN_AVAILABLE").is_some() {
-        " To test a web feature, use test_run with a preview URL from get_artifacts."
-    } else {
-        ""
-    };
     json!({
         "protocolVersion": version,
         "capabilities": {"tools":{}},
         "serverInfo": {"name":"zeus","version":env!("CARGO_PKG_VERSION")},
-        "instructions": format!(
-            "This session is running INSIDE Zeus, a macOS orchestrator for coding agents. \
-             These tools control it. Use them proactively whenever the user asks to \
-             open/start/spawn/close another agent, session, tab, or terminal (Claude Code, \
-             Codex, Cursor, Gemini, or a shell), to check what other sessions are doing, to \
-             talk to another session, or to parallelize work across git worktrees — no \
-             extra confirmation of intent needed.\n\nNever use the host agent's built-in \
-             collaboration spawn_agent / subagents: those workers stay inside this terminal \
-             and never appear in the Zeus sidebar. Always call this MCP spawn_agent so the \
-             child is a real Zeus tab.\n\nTypical orchestration flow: spawn_agent \
-             (optionally worktree:true and an initial prompt) → wait_for_agent(until:\"done\") \
-             → read_output → send_prompt for follow-ups → release_agent when finished. \
-             get_artifacts returns PR/Linear/preview URLs and listening ports a session has \
-             produced; PR entries include live GitHub status (state, review decision, checks, \
-             comment counts, +/- lines).{browser}"
-        )
+        "instructions": mcp_instructions(env::var_os("ZEUS_TEST_RUN_AVAILABLE").is_some()),
     })
 }
 
@@ -293,6 +274,10 @@ mod tests {
         .unwrap();
         assert_eq!(initialized["result"]["protocolVersion"], "2025-06-18");
         assert_eq!(initialized["result"]["capabilities"], json!({"tools":{}}));
+        assert_eq!(
+            initialized["result"]["instructions"],
+            mcp_instructions(env::var_os("ZEUS_TEST_RUN_AVAILABLE").is_some())
+        );
         assert!(
             handle_message(
                 json!({"jsonrpc":"2.0","method":"notifications/initialized","params":{}}),

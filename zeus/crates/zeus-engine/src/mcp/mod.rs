@@ -18,6 +18,7 @@ pub use host::RegistryHost;
 pub use tools::{ToolDefinition, tool_definitions, tool_definitions_for};
 
 use serde_json::{Value, json};
+use zeus_proto::orchestration::{canonical_tool_name, mcp_instructions};
 
 pub const SERVER_NAME: &str = "zeus";
 pub const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -85,6 +86,7 @@ impl<H: ToolHost> McpServer<H> {
             "protocolVersion": version,
             "capabilities": { "tools": {} },
             "serverInfo": { "name": SERVER_NAME, "version": SERVER_VERSION },
+            "instructions": mcp_instructions(false),
         })
     }
 
@@ -104,11 +106,12 @@ impl<H: ToolHost> McpServer<H> {
     }
 
     fn tools_call(&self, params: &Value) -> Value {
-        let Some(name) = params.get("name").and_then(Value::as_str) else {
+        let Some(requested_name) = params.get("name").and_then(Value::as_str) else {
             return tool_error("tools/call requires a tool name");
         };
+        let name = canonical_tool_name(requested_name);
         if !self.tools.iter().any(|tool| tool.name == name) {
-            return tool_error(&format!("unknown tool {name:?}"));
+            return tool_error(&format!("unknown tool {requested_name:?}"));
         }
         let arguments = params
             .get("arguments")
@@ -227,6 +230,7 @@ mod tests {
             .expect("a reply");
         assert_eq!(response["result"]["protocolVersion"], "2025-03-26");
         assert_eq!(response["result"]["serverInfo"]["name"], "zeus");
+        assert_eq!(response["result"]["instructions"], mcp_instructions(false));
     }
 
     #[test]
@@ -263,7 +267,7 @@ mod tests {
             .collect();
 
         for expected in [
-            "spawn_agent",
+            "create_zeus_session",
             "list_agents",
             "get_status",
             "send_prompt",
@@ -278,6 +282,7 @@ mod tests {
                 "{expected} missing from {names:?}"
             );
         }
+        assert!(!names.contains(&"spawn_agent"));
         for tool in tools {
             assert_eq!(
                 tool["inputSchema"]["type"], "object",

@@ -231,12 +231,18 @@ impl RootView {
             let runtime = Arc::clone(&services.store);
             cx.new(|cx| SessionSurfaces::new(runtime, cx))
         });
-        let utility_surfaces = (!preview).then(|| {
+        let utility_surfaces = {
             let runtime = Arc::clone(&services.store);
             let tokio = Arc::clone(&services.tokio);
             let updates = services.updates.clone();
-            cx.new(|cx| UtilitySurfaces::new(runtime, tokio, updates, window, cx))
-        });
+            Some(cx.new(|cx| {
+                if preview {
+                    UtilitySurfaces::new_preview(runtime, tokio, updates, window, cx)
+                } else {
+                    UtilitySurfaces::new(runtime, tokio, updates, window, cx)
+                }
+            }))
+        };
         let inspector = {
             let runtime = Arc::clone(&services.store);
             let tokio = Arc::clone(&services.tokio);

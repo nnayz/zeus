@@ -9,12 +9,8 @@
 //! manifest becomes spawnable over MCP with no code change.
 
 use serde_json::{Value, json};
-
-pub struct ToolDefinition {
-    pub name: String,
-    pub description: String,
-    pub input_schema: Value,
-}
+pub use zeus_proto::orchestration::ToolDefinition;
+use zeus_proto::orchestration::create_session_tool_definition;
 
 fn tool(name: &str, description: &str, input_schema: Value) -> ToolDefinition {
     ToolDefinition {
@@ -36,33 +32,16 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
     ])
 }
 
-/// The tool surface, with `spawn_agent` constrained to `kinds`.
+/// The tool surface, with `create_zeus_session` constrained to `kinds`.
 pub fn tool_definitions_for(kinds: &[String]) -> Vec<ToolDefinition> {
-    let kind_enum: Vec<Value> = kinds.iter().map(|kind| json!(kind)).collect();
+    let display_names = if kinds.is_empty() {
+        "the configured agents".to_owned()
+    } else {
+        kinds.join(", ")
+    };
 
     vec![
-        tool(
-            "spawn_agent",
-            "Open ONE new Zeus session tab nested under this one. This is the ONLY way \
-             spawned agents appear in the Zeus sidebar and terminal. Do NOT use built-in \
-             collaboration/subagent spawn — those stay hidden inside this PTY. USE THIS \
-             whenever the user asks to open, start, spawn or launch another agent, session, \
-             or terminal. Optionally create a fresh git worktree for it and give it an \
-             initial prompt. Unless the user explicitly requests multiple agents, call this \
-             exactly once. If the user does not name a kind, omit kind and Zeus will use the \
-             configured default; never guess, probe, or fan out across agent kinds.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "kind": { "type": "string", "enum": kind_enum, "description": "Which agent to run. Omit to use Zeus's configured default agent." },
-                    "cwd": { "type": "string", "description": "Working directory (a repo path when worktree is true)." },
-                    "worktree": { "type": "boolean", "description": "Create a fresh git worktree off cwd and run there (local spawns only)." },
-                    "prompt": { "type": "string", "description": "Initial prompt to send once the agent is ready." },
-                    "name": { "type": "string", "description": "Session title." }
-                },
-                "required": ["cwd"]
-            }),
-        ),
+        create_session_tool_definition(kinds, &display_names),
         tool(
             "list_agents",
             "List all active agent sessions with id, kind, title, status, parent, and cwd.",
@@ -118,6 +97,18 @@ pub fn tool_definitions_for(kinds: &[String]) -> Vec<ToolDefinition> {
                     "max_bytes": { "type": "number", "description": "How much to read from the end. Defaults to 8000." }
                 },
                 "required": ["session_id"]
+            }),
+        ),
+        tool(
+            "screenshot",
+            "Capture a screenshot of a local window (default: the Zeus window hosting this session). USE THIS instead of writing a Playwright script, calling `screencapture`, or using `browser` with `action: \"screenshot\"`. Returns the image directly. For terminal text use `read_output`. For a page inside the session Playwright browser, use `browser`.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "window": { "type": "string", "description": "Substring match on window title. Omit to capture the Zeus window." },
+                    "display": { "type": "integer", "description": "Capture this display id. Do not use unless the user asked for a full display." },
+                    "list": { "type": "boolean", "description": "If true, return capturable windows/displays and take no image." }
+                }
             }),
         ),
         tool(
@@ -238,8 +229,8 @@ mod tests {
         let tools = tool_definitions_for(&kinds);
         let spawn = tools
             .iter()
-            .find(|tool| tool.name == "spawn_agent")
-            .expect("spawn_agent");
+            .find(|tool| tool.name == "create_zeus_session")
+            .expect("create_zeus_session");
 
         let enumerated: Vec<&str> = spawn.input_schema["properties"]["kind"]["enum"]
             .as_array()

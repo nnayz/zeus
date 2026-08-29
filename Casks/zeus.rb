@@ -1,5 +1,5 @@
 cask "zeus" do
-  version "0.1.0"
+  version "0.2.0"
   # Fail closed until the first Zeus release replaces this value with the
   # SHA-256 reported by GitHub. zeus/scripts/publish-homebrew-cask.sh owns it.
   sha256 "0000000000000000000000000000000000000000000000000000000000000000"

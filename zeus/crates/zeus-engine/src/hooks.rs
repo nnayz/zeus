@@ -280,8 +280,8 @@ mod tests {
     #[test]
     fn an_mcp_tool_name_is_made_readable() {
         assert_eq!(
-            permission_summary(Some("mcp__zeus__spawn_agent"), None),
-            "wants to use zeus:spawn_agent"
+            permission_summary(Some("mcp__zeus__create_zeus_session"), None),
+            "wants to use zeus:create_zeus_session"
         );
     }
 

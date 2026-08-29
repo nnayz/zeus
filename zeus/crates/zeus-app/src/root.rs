@@ -338,6 +338,19 @@ impl RootView {
                         surfaces.update(cx, |surfaces, cx| surfaces.open_worktrees(cx));
                     }
                 }
+                NavigationEvent::OpenBranches => {
+                    this.reveal_inspector(cx);
+                    if let Some(inspector) = &this.inspector {
+                        inspector.update(cx, |inspector, cx| inspector.open_branches_picker(cx));
+                    }
+                }
+                NavigationEvent::GoToPullRequest => {
+                    this.reveal_inspector(cx);
+                    if let Some(inspector) = &this.inspector {
+                        inspector
+                            .update(cx, |inspector, cx| inspector.open_pull_request_picker(cx));
+                    }
+                }
                 NavigationEvent::OpenSettings => {
                     if let Some(surfaces) = &this.utility_surfaces {
                         surfaces.update(cx, |surfaces, cx| surfaces.open_settings(cx));
@@ -364,6 +377,15 @@ impl RootView {
                 window,
                 |this, _, event, window, cx| match event {
                     InspectorEvent::Close => this.set_inspector_open(false, cx),
+                    InspectorEvent::SessionActivated => {
+                        if let Some(terminal) = &this.terminal {
+                            terminal.update(cx, |terminal, cx| {
+                                terminal.dismiss_startup_welcome(cx);
+                                terminal.focus(window, cx);
+                            });
+                            this.sync_auxiliary_terminal(window, cx);
+                        }
+                    }
                     InspectorEvent::OpenSettings => {
                         if let Some(surfaces) = &this.utility_surfaces {
                             surfaces.update(cx, |surfaces, cx| surfaces.open_settings(cx));
@@ -378,6 +400,14 @@ impl RootView {
                     }
                     InspectorEvent::Update(command) => {
                         this.services.updates.send(command.clone());
+                    }
+                    InspectorEvent::FocusSession(session_id) => {
+                        this.services
+                            .store
+                            .store
+                            .write()
+                            .expect("session store lock poisoned")
+                            .select(session_id.clone());
                     }
                 },
             )
@@ -771,6 +801,16 @@ impl RootView {
             }
             "b" => self.sidebar.update(cx, |sidebar, cx| sidebar.toggle(cx)),
             "d" if event.keystroke.modifiers.shift => self.toggle_inspector(cx),
+            "e" if event.keystroke.modifiers.shift => {
+                let inspector = self.inspector.clone();
+                self.reveal_inspector(cx);
+                let Some(inspector) = inspector else {
+                    return;
+                };
+                inspector.update(cx, |inspector, cx| {
+                    inspector.focus_code_tree(_window, cx);
+                });
+            }
             key @ ("t" | "n") => match new_session_shortcut(key, event.keystroke.modifiers) {
                 Some(NewSessionShortcut::Default) => {
                     if !self.spawn_default() {

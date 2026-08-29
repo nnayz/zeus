@@ -31,7 +31,7 @@ pub struct RegistryHost {
     holder: Option<crate::session::HolderConfig>,
     /// The session calling these tools, when it identified itself.
     caller: Option<String>,
-    /// Used only when `spawn_agent.kind` is omitted. Explicit tool arguments
+    /// Used only when `create_zeus_session.kind` is omitted. Explicit tool arguments
     /// always win.
     default_agent: String,
 }
@@ -306,8 +306,12 @@ impl ToolHost for RegistryHost {
                 self.wait_for_children(&caller, timeout)
             }
 
-            // spawn_agent is served by the control layer, which owns log paths
-            "spawn_agent" => self.spawn_agent(arguments),
+            "screenshot" => {
+                crate::screenshot::capture(arguments).map_err(|error| error.to_string())
+            }
+
+            // Session creation is served by the control layer, which owns log paths.
+            "create_zeus_session" => self.spawn_agent(arguments),
 
             other => Err(format!("unknown tool {other:?}")),
         }

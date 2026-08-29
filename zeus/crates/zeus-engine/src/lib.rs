@@ -29,6 +29,7 @@ pub mod detect;
 pub mod directories;
 pub mod events;
 pub mod git;
+pub mod git_workspace;
 pub mod governor;
 pub mod history;
 #[cfg(unix)]
@@ -45,6 +46,7 @@ pub mod pty;
 pub mod registry;
 pub mod remote;
 pub mod screen;
+pub mod screenshot;
 pub mod session;
 pub mod status;
 

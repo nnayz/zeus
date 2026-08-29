@@ -11,15 +11,17 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gpui::{
-    Anchor, Animation, AnimationExt, AnyElement, App, Context, DragMoveEvent, Entity, EventEmitter,
-    FocusHandle, Focusable, FontWeight, KeyDownEvent, ListHorizontalSizingBehavior, MouseButton,
-    Render, ScrollStrategy, SharedString, StatefulInteractiveElement, Task,
-    UniformListScrollHandle, Window, anchored, deferred, div, ease_out_quint, point, prelude::*,
-    px, rgba, uniform_list,
+    Anchor, Animation, AnimationExt, AnyElement, App, ClipboardItem, Context, DragMoveEvent,
+    Entity, EventEmitter, FocusHandle, Focusable, FontWeight, KeyDownEvent,
+    ListHorizontalSizingBehavior, MouseButton, Render, ScrollStrategy, SharedString,
+    StatefulInteractiveElement, Task, UniformListScrollHandle, Window, anchored, deferred, div,
+    ease_out_quint, point, prelude::*, px, rgba, uniform_list,
 };
 use zeus_proto::{
-    AgentKind as ProtoAgentKind, ArtifactKind, PrCheck, PrDiscussionItem, PullRequestStatus,
-    SessionArtifact, SessionDiffBase, SessionId, SessionRecord, SessionStatus,
+    AgentKind as ProtoAgentKind, ArtifactKind, GitCheckoutDisposition, GitCheckoutMode,
+    GitRefEntry, GitReviewTarget, GitWorkspaceResult, PrCheck, PrDiscussionItem, PullRequestStatus,
+    SessionArtifact, SessionDiffBase, SessionId, SessionReadDiffResult, SessionRecord,
+    SessionStatus,
 };
 use zeus_ui::{
     AgentKind, AgentLogo, Fill, FloatingSurface, Ink, LoadingIndicator, Metrics, Radius,
@@ -31,15 +33,14 @@ use crate::diff::{
     DiffFile, DiffHunk, DiffLayer, DiffRow, DiffRowKind, DiffSnapshot, load_local_diff,
     preview_diff_snapshot, snapshot_from_read_diff,
 };
-use crate::git_review::{
-    GitRepository, GitReviewError, PatchMutation, ReviewStatus, preview_review_status,
-};
+use crate::file_tree::ChangedSnapshot;
+use crate::git_review::{PatchMutation, ReviewStatus, preview_workspace};
 use crate::macos::sf_symbols::{SymbolWeight, sf_symbol, sf_symbol_weighted};
 use crate::markdown::MarkdownDocument;
 use crate::markdown_view::render_markdown;
 use crate::query_editor::{self, ClipboardEdit, Edit, QueryEditor};
 use crate::review_prompt::{ReviewEvidence, ReviewLayer, ReviewPrompt};
-use crate::store::{InspectorTab, StoreRuntime};
+use crate::store::{InspectorTab, SessionStore, StoreRuntime};
 use crate::updates::{UpdateCommand, UpdatePhase, UpdateState};
 use crate::usage::{UsageFormat, UsageSnapshot};
 
@@ -90,9 +91,11 @@ struct ScrollbarMetrics {
 #[derive(Clone, Debug)]
 pub enum InspectorEvent {
     Close,
+    SessionActivated,
     OpenSettings,
     AddRemoteHost,
     Update(UpdateCommand),
+    FocusSession(SessionId),
 }
 
 impl InspectorTab {
@@ -144,10 +147,16 @@ enum LoadState {
 #[derive(Clone, Debug)]
 enum ReviewLoadState {
     NoSession,
-    Remote,
     Loading,
-    Ready(Arc<ReviewStatus>),
+    Ready(Arc<GitWorkspaceResult>),
     Error(String),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReviewPicker {
+    None,
+    Branches,
+    PullRequest,
 }
 
 #[derive(Clone, Debug)]
@@ -168,6 +177,126 @@ struct AskDraft {
     label: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BriefingHost {
+    name: String,
+    ssh: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BriefingRelation {
+    id: SessionId,
+    title: String,
+    status: &'static str,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum BriefingState {
+    NeedsInput {
+        kind: &'static str,
+        risk: &'static str,
+        summary: String,
+        options: Vec<String>,
+        prompt_excerpt: Option<String>,
+    },
+    Sleeping {
+        reason: &'static str,
+        since: f64,
+    },
+    Ended {
+        summary: String,
+        resumability: &'static str,
+    },
+}
+
+/// Read-only session briefing. This projects the selected record and live
+/// family; it owns no reducer, polling loop, or discovered-object model.
+#[derive(Clone, Debug, PartialEq)]
+struct InfoBriefing {
+    project_name: String,
+    host: Option<BriefingHost>,
+    parent: Option<BriefingRelation>,
+    children: Vec<BriefingRelation>,
+    workbench: Option<BriefingRelation>,
+    sibling_count: usize,
+    state: Option<BriefingState>,
+}
+
+impl InfoBriefing {
+    fn from_store(session: &SessionRecord, store: &SessionStore) -> Self {
+        let project_name = store
+            .projects()
+            .get(&session.project_id)
+            .map(|project| project.name.clone())
+            .unwrap_or_else(|| folder_name(&session.cwd));
+        let host = session.host.as_deref().map(|id| {
+            store.host(id).map_or_else(
+                || BriefingHost {
+                    name: id.to_owned(),
+                    ssh: id.to_owned(),
+                },
+                |host| BriefingHost {
+                    name: host.display_name().to_owned(),
+                    ssh: host.ssh.clone(),
+                },
+            )
+        });
+        let parent = session
+            .parent
+            .as_ref()
+            .and_then(|id| store.sessions().get(id))
+            .map(|parent| briefing_relation(parent));
+        let mut family = store
+            .sessions()
+            .values()
+            .filter(|candidate| {
+                candidate.parent.as_ref() == Some(&session.id)
+                    && !candidate.is_archived()
+                    && !matches!(candidate.status, SessionStatus::Exited(_))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        family.sort_by(|left, right| {
+            left.created_at
+                .partial_cmp(&right.created_at)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| left.id.0.cmp(&right.id.0))
+        });
+        let workbench = family
+            .iter()
+            .rev()
+            .find(|candidate| candidate.is_workbench_terminal())
+            .map(|candidate| briefing_relation(candidate));
+        let children = family
+            .iter()
+            .filter(|candidate| !candidate.is_workbench_terminal())
+            .map(|candidate| briefing_relation(candidate))
+            .collect();
+        let sibling_count = session.parent.as_ref().map_or(0, |parent_id| {
+            store
+                .sessions()
+                .values()
+                .filter(|candidate| {
+                    candidate.id != session.id
+                        && candidate.parent.as_ref() == Some(parent_id)
+                        && !candidate.is_workbench_terminal()
+                        && !candidate.is_archived()
+                        && !matches!(candidate.status, SessionStatus::Exited(_))
+                })
+                .count()
+        });
+        Self {
+            project_name,
+            host,
+            parent,
+            children,
+            workbench,
+            sibling_count,
+            state: briefing_state(session),
+        }
+    }
+}
+
 pub struct WorkbenchInspector {
     runtime: Arc<StoreRuntime>,
     _tokio_owner: Arc<tokio::runtime::Runtime>,
@@ -185,10 +314,21 @@ pub struct WorkbenchInspector {
     state: LoadState,
     review_state: ReviewLoadState,
     review_generation: u64,
+    review_navigation_generation: u64,
+    review_action_generation: u64,
     review_task: Option<Task<()>>,
+    review_navigation_task: Option<Task<()>>,
+    review_loading: bool,
     review_action_task: Option<Task<()>>,
     review_action_busy: bool,
     review_feedback: Option<(bool, String)>,
+    review_target: GitReviewTarget,
+    review_picker: ReviewPicker,
+    branch_query: QueryEditor,
+    pr_query: QueryEditor,
+    branch_refs: Vec<GitRefEntry>,
+    create_branch_open: bool,
+    review_pr: Option<Arc<PullRequestStatus>>,
     ask_draft: Option<AskDraft>,
     ask_query: QueryEditor,
     ask_task: Option<Task<()>>,
@@ -208,6 +348,7 @@ pub struct WorkbenchInspector {
     scrollbar_interaction: ScrollbarInteraction,
     scrollbar_layout_primed: bool,
     account_open: bool,
+    identity_open: bool,
     preview_account: bool,
     usage: Option<UsageSnapshot>,
     update: UpdateState,
@@ -275,10 +416,21 @@ impl WorkbenchInspector {
             state: LoadState::NoSession,
             review_state: ReviewLoadState::NoSession,
             review_generation: 0,
+            review_navigation_generation: 0,
+            review_action_generation: 0,
             review_task: None,
+            review_navigation_task: None,
+            review_loading: false,
             review_action_task: None,
             review_action_busy: false,
             review_feedback: None,
+            review_target: GitReviewTarget::WorkingTree,
+            review_picker: ReviewPicker::None,
+            branch_query: QueryEditor::default(),
+            pr_query: QueryEditor::default(),
+            branch_refs: Vec::new(),
+            create_branch_open: false,
+            review_pr: None,
             ask_draft: None,
             ask_query: QueryEditor::default(),
             ask_task: None,
@@ -298,6 +450,7 @@ impl WorkbenchInspector {
             scrollbar_interaction: ScrollbarInteraction::default(),
             scrollbar_layout_primed: false,
             account_open: false,
+            identity_open: false,
             preview_account: false,
             usage: None,
             update: UpdateState::default(),
@@ -359,7 +512,11 @@ impl WorkbenchInspector {
     }
 
     fn reconcile_diff_polling(&mut self, cx: &mut Context<Self>) {
-        let should_poll = self.visible && self.selected_tab == InspectorTab::Changes;
+        let should_poll = self.visible
+            && matches!(
+                self.selected_tab,
+                InspectorTab::Changes | InspectorTab::Code
+            );
         if !should_poll {
             // Dropping a GPUI Task cancels its timer/future. Info and Artifacts
             // therefore perform no periodic Git work and have no idle wakeup.
@@ -374,8 +531,17 @@ impl WorkbenchInspector {
                 cx.background_executor().timer(REFRESH_INTERVAL).await;
                 if this
                     .update(cx, |this, cx| {
-                        if this.visible && this.selected_tab == InspectorTab::Changes {
-                            this.refresh(false, cx);
+                        if !this.visible {
+                            return;
+                        }
+                        match this.selected_tab {
+                            InspectorTab::Changes => this.refresh(false, cx),
+                            InspectorTab::Code => {
+                                if let Some(context) = this.context.clone() {
+                                    this.refresh_review(&context, false, cx);
+                                }
+                            }
+                            InspectorTab::Info | InspectorTab::Artifacts => {}
                         }
                     })
                     .is_err()
@@ -389,6 +555,22 @@ impl WorkbenchInspector {
     /// Opens a terminal or diff-shaped file reference in the native code tab.
     /// The viewer owns resolution and loading; the inspector only preserves
     /// the workbench's spatial context and selects the destination tab.
+    pub fn open_branches_picker(&mut self, cx: &mut Context<Self>) {
+        self.select_tab(InspectorTab::Changes, cx);
+        self.review_picker = ReviewPicker::Branches;
+        self.branch_query.clear();
+        self.create_branch_open = false;
+        self.load_branch_refs(cx);
+        cx.notify();
+    }
+
+    pub fn open_pull_request_picker(&mut self, cx: &mut Context<Self>) {
+        self.select_tab(InspectorTab::Changes, cx);
+        self.review_picker = ReviewPicker::PullRequest;
+        self.pr_query.clear();
+        cx.notify();
+    }
+
     pub fn open_file_reference(
         &mut self,
         cwd: impl Into<PathBuf>,
@@ -408,6 +590,12 @@ impl WorkbenchInspector {
     /// without weakening the normal session gate for Info/Review/Artifacts.
     pub const fn is_code_destination(&self) -> bool {
         matches!(self.selected_tab, InspectorTab::Code)
+    }
+
+    pub fn focus_code_tree(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.select_tab(InspectorTab::Code, cx);
+        self.code_viewer
+            .update(cx, |viewer, cx| viewer.focus_file_tree(window, cx));
     }
 
     fn selected_context(&self) -> Option<DiffContext> {
@@ -462,10 +650,30 @@ impl WorkbenchInspector {
         }
         self.comparison_menu_open = false;
         self.tab_transition_generation = self.tab_transition_generation.wrapping_add(1);
-        if tab == InspectorTab::Changes {
-            self.refresh(true, cx);
+        match tab {
+            InspectorTab::Changes => self.refresh(true, cx),
+            InspectorTab::Code => {
+                if let Some(context) = self.context.clone() {
+                    self.refresh_review(&context, true, cx);
+                }
+            }
+            InspectorTab::Info | InspectorTab::Artifacts => {}
         }
         self.reconcile_diff_polling(cx);
+        cx.notify();
+    }
+
+    fn activate_related_session(&mut self, id: SessionId, cx: &mut Context<Self>) {
+        self.runtime
+            .store
+            .write()
+            .expect("session store lock poisoned")
+            .select(id);
+        // The direct family-row selection is not delivered through the
+        // StoreRuntime broadcast, so refresh here to keep the one-shot Git
+        // summary tied to the newly selected session.
+        self.refresh(true, cx);
+        cx.emit(InspectorEvent::SessionActivated);
         cx.notify();
     }
 
@@ -530,16 +738,28 @@ impl WorkbenchInspector {
             return;
         }
         let Some(context) = self.selected_context() else {
+            self.review_navigation_generation = self.review_navigation_generation.wrapping_add(1);
+            self.review_action_generation = self.review_action_generation.wrapping_add(1);
+            self.review_action_busy = false;
             self.context = None;
             self.state = LoadState::NoSession;
             self.review_state = ReviewLoadState::NoSession;
-            self.code_viewer
-                .update(cx, |viewer, cx| viewer.set_workspace(None, cx));
+            self.review_generation = self.review_generation.wrapping_add(1);
+            self.review_task = None;
+            self.review_loading = false;
+            self.code_viewer.update(cx, |viewer, cx| {
+                viewer.set_workspace(None, cx);
+                viewer.set_changed_unavailable("Select a local session", cx);
+            });
             cx.notify();
             return;
         };
         let context_changed = self.context.as_ref() != Some(&context);
         if context_changed {
+            self.review_navigation_generation = self.review_navigation_generation.wrapping_add(1);
+            self.review_action_generation = self.review_action_generation.wrapping_add(1);
+            self.review_action_busy = false;
+            self.identity_open = false;
             self.scroll = UniformListScrollHandle::new();
             self.scrollbar_interaction = ScrollbarInteraction::default();
             self.scrollbar_layout_primed = false;
@@ -548,6 +768,10 @@ impl WorkbenchInspector {
             self.ask_draft = None;
             self.ask_feedback = None;
             self.ask_query.clear();
+            self.review_target = GitReviewTarget::WorkingTree;
+            self.review_picker = ReviewPicker::None;
+            self.branch_refs.clear();
+            self.review_pr = None;
             let workspace = (!context.remote).then(|| context.cwd.clone());
             self.code_viewer
                 .update(cx, |viewer, cx| viewer.set_workspace(workspace, cx));
@@ -555,8 +779,16 @@ impl WorkbenchInspector {
         self.context = Some(context.clone());
         if self.preview_account {
             self.loading = false;
+            self.review_generation = self.review_generation.wrapping_add(1);
+            self.review_task = None;
+            self.review_loading = false;
             self.state = LoadState::Ready(Arc::new(preview_diff_snapshot(context.cwd)));
-            self.review_state = ReviewLoadState::Ready(Arc::new(preview_review_status()));
+            let workspace = Arc::new(preview_workspace());
+            let status = ReviewStatus::from_proto(&workspace.status);
+            let tree = ChangedSnapshot::from(&status);
+            self.review_state = ReviewLoadState::Ready(workspace);
+            self.code_viewer
+                .update(cx, |viewer, cx| viewer.set_changed_snapshot(tree, cx));
             self.refresh_task = None;
             cx.notify();
             return;
@@ -578,24 +810,41 @@ impl WorkbenchInspector {
         let remote = context.remote;
         let comparison = self.comparison;
         let layer = self.diff_layer;
+        let review_target = self.review_target.clone();
         let client = Arc::clone(self.runtime.client());
         let tokio = self.tokio.clone();
         self.refresh_task = Some(cx.spawn(async move |this, cx| {
-            let result = if remote {
-                tokio
-                    .spawn(async move { client.read_diff(&session_id, comparison).await })
-                    .await
-                    .map_err(|error| format!("Diff request stopped: {error}"))
-                    .and_then(|result| result.map_err(|error| error.to_string()))
-                    .map(snapshot_from_read_diff)
-                    .map(Arc::new)
-            } else {
-                tokio
+            let result = match review_target {
+                GitReviewTarget::WorkingTree if !remote => tokio
                     .spawn_blocking(move || load_local_diff(&cwd, layer))
                     .await
                     .map_err(|error| format!("Diff worker stopped: {error}"))
                     .and_then(|result| result.map_err(|error| error.to_string()))
-                    .map(Arc::new)
+                    .map(Arc::new),
+                GitReviewTarget::WorkingTree => tokio
+                    .spawn({
+                        let client = Arc::clone(&client);
+                        async move { client.read_diff(&session_id, comparison).await }
+                    })
+                    .await
+                    .map_err(|error| format!("Diff request stopped: {error}"))
+                    .and_then(|result| result.map_err(|error| error.to_string()))
+                    .map(snapshot_from_read_diff)
+                    .map(Arc::new),
+                target => tokio
+                    .spawn(async move { client.git_compare(session_id, target).await })
+                    .await
+                    .map_err(|error| format!("Compare request stopped: {error}"))
+                    .and_then(|result| result.map_err(|error| error.to_string()))
+                    .map(|compare| {
+                        snapshot_from_read_diff(SessionReadDiffResult {
+                            patch: compare.patch,
+                            repo_root: compare.repo_root,
+                            truncated: compare.truncated,
+                            base_ref: compare.base_ref,
+                        })
+                    })
+                    .map(Arc::new),
             };
             let _ = this.update(cx, |this, cx| {
                 if this.generation != generation {
@@ -617,36 +866,68 @@ impl WorkbenchInspector {
 
     fn refresh_review(&mut self, context: &DiffContext, force: bool, cx: &mut Context<Self>) {
         if context.remote {
-            self.review_state = ReviewLoadState::Remote;
-            return;
+            self.code_viewer.update(cx, |viewer, cx| {
+                viewer.set_changed_unavailable(
+                    "Remote file browsing is unavailable in this local Code inspector",
+                    cx,
+                );
+            });
         }
         if self.review_action_busy && !force {
             return;
         }
+        if self.review_loading && !force {
+            return;
+        }
+        self.review_loading = true;
         self.review_generation = self.review_generation.wrapping_add(1);
         let generation = self.review_generation;
-        let cwd = context.cwd.clone();
         if !matches!(self.review_state, ReviewLoadState::Ready(_)) {
             self.review_state = ReviewLoadState::Loading;
+            if !context.remote {
+                self.code_viewer
+                    .update(cx, |viewer, cx| viewer.set_changed_loading(cx));
+            }
         }
+        let client = Arc::clone(self.runtime.client());
+        let session_id = context.id.clone();
+        let target = self.review_target.clone();
+        let remote = context.remote;
         let tokio = self.tokio.clone();
         self.review_task = Some(cx.spawn(async move |this, cx| {
             let result = tokio
-                .spawn_blocking(move || {
-                    let repository = GitRepository::discover(&cwd)?;
-                    repository.status()
-                })
+                .spawn(async move { client.git_workspace(session_id, Some(target)).await })
                 .await
-                .map_err(|error| format!("Git status worker stopped: {error}"))
+                .map_err(|error| format!("Git workspace request stopped: {error}"))
                 .and_then(|result| result.map_err(|error| error.to_string()));
             let _ = this.update(cx, |this, cx| {
                 if this.review_generation != generation {
                     return;
                 }
-                this.review_state = match result {
-                    Ok(status) => ReviewLoadState::Ready(Arc::new(status)),
-                    Err(error) => ReviewLoadState::Error(error),
-                };
+                this.review_loading = false;
+                match result {
+                    Ok(workspace) => {
+                        if let Some(pull_request) = workspace.pull_request.clone() {
+                            this.review_pr = Some(Arc::new(pull_request));
+                        }
+                        if !remote {
+                            let status = ReviewStatus::from_proto(&workspace.status);
+                            let tree = ChangedSnapshot::from(&status);
+                            this.code_viewer.update(cx, |viewer, cx| {
+                                viewer.set_changed_snapshot(tree, cx);
+                            });
+                        }
+                        this.review_state = ReviewLoadState::Ready(Arc::new(workspace));
+                    }
+                    Err(error) => {
+                        this.review_state = ReviewLoadState::Error(error.clone());
+                        if !remote {
+                            this.code_viewer.update(cx, |viewer, cx| {
+                                viewer.set_changed_unavailable(error, cx);
+                            });
+                        }
+                    }
+                }
                 cx.notify();
             });
         }));
@@ -656,34 +937,46 @@ impl WorkbenchInspector {
         if self.review_action_busy {
             return;
         }
-        let Some(context) = self.context.clone().filter(|context| !context.remote) else {
+        let Some(context) = self.context.clone() else {
             return;
         };
         self.review_action_busy = true;
+        self.review_action_generation = self.review_action_generation.wrapping_add(1);
+        let action_generation = self.review_action_generation;
         self.review_feedback = None;
         self.discard_armed = false;
         self.armed_hunk = None;
         cx.notify();
+        let client = Arc::clone(self.runtime.client());
+        let session_id = context.id;
+        let result_session_id = session_id.clone();
         let tokio = self.tokio.clone();
         self.review_action_task = Some(cx.spawn(async move |this, cx| {
             let result = tokio
-                .spawn_blocking(move || -> Result<String, GitReviewError> {
-                    let repository = GitRepository::discover(&context.cwd)?;
+                .spawn(async move {
                     match action {
                         ReviewAction::Stage(paths) => {
-                            repository.stage_paths(&paths)?;
-                            Ok("Changes staged".to_owned())
+                            client
+                                .git_stage(session_id, paths_to_strings(&paths))
+                                .await?;
+                            Ok::<String, zeus_client::ClientError>("Changes staged".to_owned())
                         }
                         ReviewAction::Unstage(paths) => {
-                            repository.unstage_paths(&paths)?;
+                            client
+                                .git_unstage(session_id, paths_to_strings(&paths))
+                                .await?;
                             Ok("Changes moved back to the working tree".to_owned())
                         }
                         ReviewAction::Discard(paths) => {
-                            repository.discard_unstaged(&paths)?;
+                            client
+                                .git_discard(session_id, paths_to_strings(&paths))
+                                .await?;
                             Ok("Unstaged edits discarded".to_owned())
                         }
                         ReviewAction::Patch { patch, mutation } => {
-                            repository.apply_patch(&patch, mutation)?;
+                            client
+                                .git_apply_patch(session_id, patch, mutation.into_proto())
+                                .await?;
                             Ok(match mutation {
                                 PatchMutation::Stage => "Hunk staged",
                                 PatchMutation::Unstage => "Hunk moved back to the working tree",
@@ -692,15 +985,20 @@ impl WorkbenchInspector {
                             .to_owned())
                         }
                         ReviewAction::Commit(message) => {
-                            let commit = repository.commit(&message)?;
+                            let commit = client.git_commit(session_id, message).await?;
                             Ok(format!("Committed {} · {}", commit.oid, commit.summary))
                         }
                     }
                 })
                 .await
-                .map_err(|error| format!("Git action worker stopped: {error}"))
+                .map_err(|error| format!("Git action request stopped: {error}"))
                 .and_then(|result| result.map_err(|error| error.to_string()));
             let _ = this.update(cx, |this, cx| {
+                if this.review_action_generation != action_generation
+                    || this.context.as_ref().map(|context| &context.id) != Some(&result_session_id)
+                {
+                    return;
+                }
                 this.review_action_busy = false;
                 match result {
                     Ok(message) => {
@@ -711,6 +1009,311 @@ impl WorkbenchInspector {
                     Err(message) => this.review_feedback = Some((false, message)),
                 }
                 this.refresh(true, cx);
+                cx.notify();
+            });
+        }));
+    }
+
+    fn set_review_target(&mut self, target: GitReviewTarget, cx: &mut Context<Self>) {
+        self.review_navigation_generation = self.review_navigation_generation.wrapping_add(1);
+        self.review_target = target;
+        self.review_picker = ReviewPicker::None;
+        if !matches!(self.review_target, GitReviewTarget::PullRequest { .. }) {
+            self.review_pr = None;
+        }
+        if !matches!(self.review_target, GitReviewTarget::WorkingTree) {
+            self.diff_layer = DiffLayer::Branch;
+        }
+        self.refresh(true, cx);
+    }
+
+    fn fetch_refs(&mut self, cx: &mut Context<Self>) {
+        let Some(context) = self.context.clone() else {
+            return;
+        };
+        self.review_navigation_generation = self.review_navigation_generation.wrapping_add(1);
+        let navigation_generation = self.review_navigation_generation;
+        let result_session_id = context.id.clone();
+        let client = Arc::clone(self.runtime.client());
+        let tokio = self.tokio.clone();
+        self.review_feedback = Some((true, "Fetching…".into()));
+        cx.notify();
+        self.review_navigation_task = Some(cx.spawn(async move |this, cx| {
+            let result = tokio
+                .spawn(async move { client.git_fetch(context.id, None).await })
+                .await
+                .map_err(|error| format!("Fetch stopped: {error}"))
+                .and_then(|result| result.map_err(|error| error.to_string()));
+            let _ = this.update(cx, |this, cx| {
+                if this.review_navigation_generation != navigation_generation
+                    || this.context.as_ref().map(|context| &context.id) != Some(&result_session_id)
+                {
+                    return;
+                }
+                match result {
+                    Ok(fetch) => {
+                        this.review_feedback = Some((true, fetch.summary));
+                        this.load_branch_refs(cx);
+                    }
+                    Err(message) => this.review_feedback = Some((false, message)),
+                }
+                this.refresh(true, cx);
+            });
+        }));
+    }
+
+    fn load_branch_refs(&mut self, cx: &mut Context<Self>) {
+        let Some(context) = self.context.clone() else {
+            return;
+        };
+        let query = self.branch_query.text().trim().to_owned();
+        let query = (!query.is_empty()).then_some(query);
+        self.review_navigation_generation = self.review_navigation_generation.wrapping_add(1);
+        let navigation_generation = self.review_navigation_generation;
+        let result_session_id = context.id.clone();
+        let client = Arc::clone(self.runtime.client());
+        let tokio = self.tokio.clone();
+        self.review_navigation_task = Some(cx.spawn(async move |this, cx| {
+            let result = tokio
+                .spawn(async move { client.git_list_refs(context.id, query).await })
+                .await
+                .map_err(|error| format!("Ref list stopped: {error}"))
+                .and_then(|result| result.map_err(|error| error.to_string()));
+            let _ = this.update(cx, |this, cx| {
+                if this.review_navigation_generation != navigation_generation
+                    || this.context.as_ref().map(|context| &context.id) != Some(&result_session_id)
+                {
+                    return;
+                }
+                match result {
+                    Ok(list) => this.branch_refs = list.refs,
+                    Err(message) => this.review_feedback = Some((false, message)),
+                }
+                cx.notify();
+            });
+        }));
+    }
+
+    fn compare_with_ref(&mut self, ref_name: String, cx: &mut Context<Self>) {
+        self.set_review_target(GitReviewTarget::Branch { ref_name }, cx);
+    }
+
+    fn checkout_ref(&mut self, ref_name: String, mode: GitCheckoutMode, cx: &mut Context<Self>) {
+        if self.review_action_busy {
+            return;
+        }
+        let Some(context) = self.context.clone() else {
+            return;
+        };
+        self.review_action_generation = self.review_action_generation.wrapping_add(1);
+        let action_generation = self.review_action_generation;
+        let result_session_id = context.id.clone();
+        let client = Arc::clone(self.runtime.client());
+        let tokio = self.tokio.clone();
+        self.review_action_busy = true;
+        cx.notify();
+        self.review_action_task = Some(cx.spawn(async move |this, cx| {
+            let result = tokio
+                .spawn(async move { client.git_checkout(context.id, ref_name, mode).await })
+                .await
+                .map_err(|error| format!("Checkout stopped: {error}"))
+                .and_then(|result| result.map_err(|error| error.to_string()));
+            let _ = this.update(cx, |this, cx| {
+                if this.review_action_generation != action_generation
+                    || this.context.as_ref().map(|context| &context.id) != Some(&result_session_id)
+                {
+                    return;
+                }
+                this.review_action_busy = false;
+                match result {
+                    Ok(result) => {
+                        this.review_picker = ReviewPicker::None;
+                        match result.plan.disposition {
+                            GitCheckoutDisposition::FocusExisting {
+                                session_id: Some(session_id),
+                                ..
+                            } => {
+                                this.review_feedback =
+                                    Some((true, "Focused the existing worktree".into()));
+                                cx.emit(InspectorEvent::FocusSession(session_id));
+                            }
+                            GitCheckoutDisposition::FocusExisting { path, .. } => {
+                                this.review_feedback = Some((
+                                    true,
+                                    format!("Branch is already checked out at {path}"),
+                                ));
+                            }
+                            GitCheckoutDisposition::OpenNewWorktree { path } => {
+                                this.review_feedback =
+                                    Some((true, format!("Opened worktree {path}")));
+                            }
+                            GitCheckoutDisposition::SwitchInPlace => {
+                                this.review_target = GitReviewTarget::WorkingTree;
+                                this.review_pr = None;
+                                this.review_feedback = Some((true, "Switched branch".into()));
+                            }
+                            GitCheckoutDisposition::Blocked => {
+                                let detail = result
+                                    .plan
+                                    .reasons
+                                    .iter()
+                                    .map(|reason| reason.message.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join("; ");
+                                this.review_feedback = Some((false, detail));
+                            }
+                        }
+                        this.refresh(true, cx);
+                    }
+                    Err(message) => this.review_feedback = Some((false, message)),
+                }
+                cx.notify();
+            });
+        }));
+    }
+
+    fn create_branch_from_header(&mut self, cx: &mut Context<Self>) {
+        if self.review_action_busy {
+            return;
+        }
+        let name = self.branch_query.text().trim().to_owned();
+        if name.is_empty() {
+            self.review_feedback = Some((false, "Name the new branch first".into()));
+            cx.notify();
+            return;
+        }
+        let Some(context) = self.context.clone() else {
+            return;
+        };
+        self.review_action_generation = self.review_action_generation.wrapping_add(1);
+        let action_generation = self.review_action_generation;
+        let result_session_id = context.id.clone();
+        let client = Arc::clone(self.runtime.client());
+        let tokio = self.tokio.clone();
+        self.review_action_busy = true;
+        cx.notify();
+        self.review_action_task = Some(cx.spawn(async move |this, cx| {
+            let result = tokio
+                .spawn(async move { client.git_branch_create(context.id, name, false).await })
+                .await
+                .map_err(|error| format!("Create branch stopped: {error}"))
+                .and_then(|result| result.map_err(|error| error.to_string()));
+            let _ = this.update(cx, |this, cx| {
+                if this.review_action_generation != action_generation
+                    || this.context.as_ref().map(|context| &context.id) != Some(&result_session_id)
+                {
+                    return;
+                }
+                this.review_action_busy = false;
+                match result {
+                    Ok(_) => {
+                        this.review_feedback = Some((true, "Branch created".into()));
+                        this.create_branch_open = false;
+                        this.load_branch_refs(cx);
+                    }
+                    Err(message) => this.review_feedback = Some((false, message)),
+                }
+                this.refresh(true, cx);
+            });
+        }));
+    }
+
+    fn go_to_pull_request(&mut self, cx: &mut Context<Self>) {
+        if self.review_action_busy {
+            return;
+        }
+        let input = self.pr_query.text().trim().to_owned();
+        if input.is_empty() {
+            self.review_feedback = Some((false, "Enter #123 or a GitHub pull-request URL".into()));
+            cx.notify();
+            return;
+        }
+        let Some(context) = self.context.clone() else {
+            return;
+        };
+        self.review_action_generation = self.review_action_generation.wrapping_add(1);
+        let action_generation = self.review_action_generation;
+        let result_session_id = context.id.clone();
+        let client = Arc::clone(self.runtime.client());
+        let tokio = self.tokio.clone();
+        self.review_action_busy = true;
+        cx.notify();
+        self.review_action_task = Some(cx.spawn(async move |this, cx| {
+            let result = tokio
+                .spawn(async move { client.git_pr_resolve(context.id, input).await })
+                .await
+                .map_err(|error| format!("PR request stopped: {error}"))
+                .and_then(|result| result.map_err(|error| error.to_string()));
+            let _ = this.update(cx, |this, cx| {
+                if this.review_action_generation != action_generation
+                    || this.context.as_ref().map(|context| &context.id) != Some(&result_session_id)
+                {
+                    return;
+                }
+                this.review_action_busy = false;
+                match result {
+                    Ok(resolved) => {
+                        this.review_pr = Some(Arc::new(resolved.status.clone()));
+                        this.review_picker = ReviewPicker::None;
+                        this.set_review_target(
+                            GitReviewTarget::PullRequest {
+                                url: resolved.status.url,
+                                number: resolved.status.number,
+                            },
+                            cx,
+                        );
+                    }
+                    Err(message) => this.review_feedback = Some((false, message)),
+                }
+                cx.notify();
+            });
+        }));
+    }
+
+    fn open_pull_request_worktree(&mut self, cx: &mut Context<Self>) {
+        if self.review_action_busy {
+            return;
+        }
+        let GitReviewTarget::PullRequest { url, .. } = self.review_target.clone() else {
+            return;
+        };
+        let Some(context) = self.context.clone() else {
+            return;
+        };
+        self.review_action_generation = self.review_action_generation.wrapping_add(1);
+        let action_generation = self.review_action_generation;
+        let result_session_id = context.id.clone();
+        let client = Arc::clone(self.runtime.client());
+        let tokio = self.tokio.clone();
+        self.review_action_busy = true;
+        cx.notify();
+        self.review_action_task = Some(cx.spawn(async move |this, cx| {
+            let result = tokio
+                .spawn(async move { client.git_pr_open(context.id, url).await })
+                .await
+                .map_err(|error| format!("Open PR worktree stopped: {error}"))
+                .and_then(|result| result.map_err(|error| error.to_string()));
+            let _ = this.update(cx, |this, cx| {
+                if this.review_action_generation != action_generation
+                    || this.context.as_ref().map(|context| &context.id) != Some(&result_session_id)
+                {
+                    return;
+                }
+                this.review_action_busy = false;
+                match result {
+                    Ok(result) => {
+                        if let GitCheckoutDisposition::FocusExisting {
+                            session_id: Some(session_id),
+                            ..
+                        } = result.plan.disposition
+                        {
+                            cx.emit(InspectorEvent::FocusSession(session_id));
+                        }
+                        this.review_feedback = Some((true, "Opened pull-request worktree".into()));
+                        this.refresh(true, cx);
+                    }
+                    Err(message) => this.review_feedback = Some((false, message)),
+                }
                 cx.notify();
             });
         }));
@@ -1370,55 +1973,80 @@ impl WorkbenchInspector {
                 .into_any_element();
         };
 
-        let (project_name, host_name) = {
+        let briefing = {
             let store = self
                 .runtime
                 .store
                 .read()
                 .expect("session store lock poisoned");
-            let project_name = store
-                .projects()
-                .get(&session.project_id)
-                .map(|project| project.name.clone())
-                .unwrap_or_else(|| folder_name(&session.cwd));
-            let host_name = session
-                .host
-                .as_deref()
-                .map(|host| store.host_display_name(host));
-            (project_name, host_name)
+            InfoBriefing::from_store(session, &store)
         };
         let kind = ui_agent_kind(session.effective_kind());
         let (status_label, status_color) = session_status(session, colors);
-        let artifact_total = artifact_count(session);
+        let location_name = session.worktree_path.as_deref().unwrap_or(&session.cwd);
+        let mut place_parts = vec![
+            briefing
+                .host
+                .as_ref()
+                .map_or_else(|| "This Mac".to_owned(), |host| host.name.clone()),
+        ];
+        place_parts.push(folder_name(location_name));
+        if let Some(branch) = session.git_branch.as_deref() {
+            place_parts.push(branch.to_owned());
+        }
+        let place = place_parts.join(" · ");
 
         let hero = div()
-            .p(px(14.0))
+            .debug_selector(|| "INFO_HERO".to_owned())
+            .px(px(2.0))
+            .py(px(3.0))
             .flex()
             .flex_col()
-            .gap(px(12.0))
-            .rounded(px(Radius::CARD))
-            .bg(colors.primary.alpha(0.035))
-            .border_1()
-            .border_color(colors.primary.alpha(0.065))
+            .gap(px(4.0))
+            .border_b_1()
+            .border_color(colors.primary.alpha(0.07))
             .child(
                 div()
                     .flex()
-                    .items_start()
-                    .gap(px(11.0))
-                    .child(AgentLogo::new(kind, 36.0, colors))
+                    .items_center()
+                    .gap(px(9.0))
+                    .child(AgentLogo::new(kind, 28.0, colors))
                     .child(
                         div()
                             .min_w(px(0.0))
                             .flex_1()
                             .flex()
                             .flex_col()
-                            .gap(px(3.0))
+                            .gap(px(2.0))
                             .child(
                                 div()
-                                    .text_size(px(Typo::DISPLAY_TITLE.size))
-                                    .font_weight(Typo::DISPLAY_TITLE.weight)
-                                    .text_color(colors.primary)
-                                    .child(session.title.clone()),
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(8.0))
+                                    .child(
+                                        div()
+                                            .min_w(px(0.0))
+                                            .flex_1()
+                                            .truncate()
+                                            .text_size(px(Typo::ROW_EMPHASIZED.size))
+                                            .font_weight(Typo::ROW_EMPHASIZED.weight)
+                                            .text_color(colors.primary)
+                                            .child(session.title.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(5.0))
+                                            .text_size(px(Typo::META.size))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(status_color)
+                                            .child(
+                                                div().size(px(6.0)).rounded_full().bg(status_color),
+                                            )
+                                            .child(status_label),
+                                    ),
                             )
                             .child(
                                 div()
@@ -1429,7 +2057,7 @@ impl WorkbenchInspector {
                                     .text_color(colors.tertiary)
                                     .child(kind.label())
                                     .child("·")
-                                    .child(project_name.clone()),
+                                    .child(briefing.project_name.clone()),
                             ),
                     ),
             )
@@ -1438,20 +2066,30 @@ impl WorkbenchInspector {
                     .flex()
                     .items_center()
                     .justify_between()
+                    .gap(px(10.0))
                     .child(
                         div()
-                            .flex()
-                            .items_center()
-                            .gap(px(7.0))
+                            .id("info-hero-place")
+                            .debug_selector(|| "INFO_HERO_PLACE".to_owned())
+                            .min_w(px(0.0))
+                            .flex_1()
+                            .truncate()
                             .text_size(px(Typo::META.size))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(status_color)
-                            .child(div().size(px(7.0)).rounded_full().bg(status_color))
-                            .child(status_label),
+                            .text_color(colors.secondary)
+                            .when(session.git_branch.is_some(), |line| {
+                                line.cursor_pointer()
+                                    .hover(move |line| line.text_color(colors.primary))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.select_tab(InspectorTab::Changes, cx);
+                                        cx.stop_propagation();
+                                    }))
+                            })
+                            .child(place),
                     )
                     .child(
                         div()
-                            .text_size(px(Typo::META.size))
+                            .flex_none()
+                            .text_size(px(10.0))
                             .text_color(colors.tertiary)
                             .child(format!("Updated {}", relative_time(session.updated_at.0))),
                     ),
@@ -1461,146 +2099,204 @@ impl WorkbenchInspector {
             .id("inspector-info-scroll")
             .size_full()
             .min_h(px(0.0))
-            .px(px(12.0))
-            .pt(px(8.0))
-            .pb(px(18.0))
+            .px(px(14.0))
+            .pt(px(4.0))
+            .pb(px(14.0))
             .flex()
             .flex_col()
-            .gap(px(14.0))
+            .gap(px(11.0))
             .overflow_y_scroll()
             .child(hero);
 
-        if let Some(detail) = &session.needs_input {
-            let risk_color = if detail.risk_hint == zeus_proto::RiskHint::Destructive {
-                Ink::DANGER
-            } else {
-                Ink::ATTENTION
-            };
+        if let Some(state) = briefing.state.as_ref() {
             content = content.child(
                 div()
-                    .p(px(12.0))
                     .flex()
-                    .items_start()
-                    .gap(px(9.0))
-                    .rounded(px(Radius::CARD))
-                    .bg(risk_color.alpha(0.10))
-                    .border_1()
-                    .border_color(risk_color.alpha(0.22))
-                    .child(sf_symbol("questionmark.bubble", 15.0, risk_color))
-                    .child(
-                        div()
-                            .min_w(px(0.0))
-                            .flex_1()
-                            .flex()
-                            .flex_col()
-                            .gap(px(3.0))
-                            .child(
-                                div()
-                                    .text_size(px(Typo::ROW_EMPHASIZED.size))
-                                    .font_weight(Typo::ROW_EMPHASIZED.weight)
-                                    .text_color(colors.primary)
-                                    .child("Needs your input"),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(Typo::META.size))
-                                    .text_color(colors.secondary)
-                                    .child(detail.summary.clone()),
-                            ),
-                    ),
+                    .flex_col()
+                    .gap(px(5.0))
+                    .child(info_section_label(
+                        if matches!(state, BriefingState::NeedsInput { .. }) {
+                            "Attention"
+                        } else {
+                            "Session state"
+                        },
+                        colors,
+                    ))
+                    .child(render_briefing_state(state, colors)),
             );
         }
 
-        content = content
-            .child(section_label("Git status", colors))
-            .child(self.render_git_summary(colors, cx));
-
-        if let Some(pull_requests) = session.pull_requests.as_deref()
-            && !pull_requests.is_empty()
-        {
-            content = content.child(section_label(
-                if pull_requests.len() == 1 {
-                    "Pull request"
-                } else {
-                    "Pull requests"
-                },
+        let mut location = div()
+            .debug_selector(|| "INFO_LOCATION".to_owned())
+            .border_t_1()
+            .border_color(colors.primary.alpha(0.065))
+            .overflow_hidden()
+            .child(detail_row(
+                "Project",
+                briefing.project_name.clone(),
+                false,
+                colors,
+            ))
+            .child(copy_detail_row(
+                "Directory",
+                session.cwd.clone(),
+                session.cwd.clone(),
+                true,
+                "INFO_COPY_CWD",
                 colors,
             ));
-            let inspector = cx.entity();
-            for pull_request in pull_requests.iter().take(2) {
-                let body = pull_request
-                    .body
-                    .as_deref()
-                    .filter(|body| !body.trim().is_empty())
-                    .map(|body| self.markdown_document(body));
-                content = content.child(render_pull_request(
-                    pull_request,
-                    colors,
-                    inspector.clone(),
-                    body,
-                ));
-            }
+        if let Some(worktree) = session
+            .worktree_path
+            .as_deref()
+            .filter(|worktree| *worktree != session.cwd)
+        {
+            location = location.child(copy_detail_row(
+                "Worktree",
+                worktree.to_owned(),
+                worktree.to_owned(),
+                true,
+                "INFO_COPY_WORKTREE",
+                colors,
+            ));
         }
-
-        if artifact_total > 0 {
-            content = content.child(section_label("Artifacts", colors)).child(
+        if let Some(branch) = &session.git_branch {
+            location = location.child(tab_jump_detail_row(
+                "Branch",
+                branch.clone(),
+                true,
+                "INFO_BRANCH_REVIEW",
+                InspectorTab::Changes,
+                colors,
+                cx.entity(),
+            ));
+        }
+        if let Some(host) = &briefing.host {
+            location = location.child(detail_row(
+                "Host",
+                format!("{} · {}", host.name, host.ssh),
+                false,
+                colors,
+            ));
+        } else {
+            location = location.child(detail_row("Host", "This Mac".to_owned(), false, colors));
+        }
+        if let Some(persistence) = session.remote_persistence {
+            let (label, accent) = persistence_briefing(persistence);
+            location = location.child(accent_detail_row(
+                "Persistence",
+                label.to_owned(),
+                accent.unwrap_or(colors.secondary),
+                "INFO_REMOTE_PERSISTENCE",
+                colors,
+            ));
+        }
+        location = location.child(self.render_git_summary(colors, cx));
+        content = content.child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(5.0))
+                .child(info_section_label("Location", colors))
+                .child(location),
+        );
+        content = content.child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(5.0))
+                .child(info_section_label("Timeline", colors))
+                .child(render_timeline(session, colors)),
+        );
+        if briefing.parent.is_some()
+            || !briefing.children.is_empty()
+            || briefing.workbench.is_some()
+        {
+            content = content.child(
                 div()
-                    .id("inspector-artifacts-summary")
-                    .h(px(44.0))
-                    .px(px(11.0))
                     .flex()
-                    .items_center()
-                    .gap(px(9.0))
-                    .rounded(px(Radius::ROW))
-                    .bg(colors.primary.alpha(0.035))
-                    .border_1()
-                    .border_color(colors.primary.alpha(0.06))
-                    .cursor_pointer()
-                    .hover(move |row| row.bg(colors.primary.alpha(0.065)))
-                    .child(sf_symbol("shippingbox", 14.0, colors.secondary))
-                    .child(
-                        div()
-                            .min_w(px(0.0))
-                            .flex_1()
-                            .text_size(px(Typo::ROW.size))
-                            .text_color(colors.primary)
-                            .child(format!(
-                                "{artifact_total} {} discovered",
-                                if artifact_total == 1 {
-                                    "artifact"
-                                } else {
-                                    "artifacts"
-                                }
-                            )),
-                    )
-                    .child(sf_symbol("chevron.right", 11.0, colors.tertiary))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.select_tab(InspectorTab::Artifacts, cx);
-                        cx.stop_propagation();
-                    })),
+                    .flex_col()
+                    .gap(px(5.0))
+                    .child(info_section_label("Lineage", colors))
+                    .child(render_lineage(session, &briefing, colors, cx.entity())),
             );
         }
 
-        let mut details = div()
-            .rounded(px(Radius::CARD))
-            .bg(colors.primary.alpha(0.025))
-            .border_1()
-            .border_color(colors.primary.alpha(0.055))
+        let object_total = discovered_object_count(session);
+        let port_total = session
+            .listening_ports
+            .as_deref()
+            .map_or(0, |ports| ports.len());
+        let mut runtime = div()
+            .debug_selector(|| "INFO_RUNTIME".to_owned())
+            .border_t_1()
+            .border_color(colors.primary.alpha(0.065))
             .overflow_hidden()
-            .child(detail_row("Project", project_name, false, colors))
-            .child(detail_row("Directory", session.cwd.clone(), true, colors));
-        if let Some(branch) = &session.git_branch {
-            details = details.child(detail_row("Branch", branch.clone(), true, colors));
-        }
-        if let Some(host) = host_name {
-            details = details.child(detail_row("Host", host, false, colors));
-        }
-        if let Some(bytes) = session.memory_bytes {
-            details = details.child(detail_row("Memory", format_bytes(bytes), false, colors));
-        }
+            .child(detail_row(
+                "Memory",
+                session
+                    .memory_bytes
+                    .map_or_else(|| "Not reported".to_owned(), format_bytes),
+                false,
+                colors,
+            ));
+        runtime = if object_total > 0 {
+            runtime.child(tab_jump_detail_row(
+                "Artifacts",
+                count_noun(object_total, "artifact", "artifacts"),
+                false,
+                "INFO_ARTIFACTS_JUMP",
+                InspectorTab::Artifacts,
+                colors,
+                cx.entity(),
+            ))
+        } else {
+            runtime.child(detail_row(
+                "Artifacts",
+                "None discovered".to_owned(),
+                false,
+                colors,
+            ))
+        };
+        runtime = if port_total > 0 {
+            runtime.child(tab_jump_detail_row(
+                "Ports",
+                count_noun(port_total, "listening port", "listening ports"),
+                false,
+                "INFO_PORTS_JUMP",
+                InspectorTab::Artifacts,
+                colors,
+                cx.entity(),
+            ))
+        } else {
+            runtime.child(detail_row(
+                "Ports",
+                "None listening".to_owned(),
+                false,
+                colors,
+            ))
+        };
+        content = content.child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(5.0))
+                .child(info_section_label("Runtime", colors))
+                .child(runtime),
+        );
         content
-            .child(section_label("Details", colors))
-            .child(details)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(5.0))
+                    .child(info_section_label("Identity", colors))
+                    .child(render_identity(
+                        session,
+                        self.identity_open,
+                        colors,
+                        cx.entity(),
+                    )),
+            )
             .into_any_element()
     }
 
@@ -1670,24 +2366,22 @@ impl WorkbenchInspector {
             ),
         };
         let status_mark = symbol.map_or_else(
-            || LoadingIndicator::new("inspector-git-loading", 16.0, accent).into_any_element(),
-            |symbol| sf_symbol(symbol, 15.0, accent),
+            || LoadingIndicator::new("inspector-git-loading", 13.0, accent).into_any_element(),
+            |symbol| sf_symbol(symbol, 13.0, accent),
         );
         div()
             .id("inspector-git-summary")
-            .min_h(px(52.0))
-            .px(px(11.0))
-            .py(px(9.0))
+            .debug_selector(|| "INFO_GIT_SUMMARY".to_owned())
+            .h(px(34.0))
+            .px(px(2.0))
             .flex()
             .items_center()
-            .gap(px(10.0))
-            .rounded(px(Radius::CARD))
-            .bg(colors.primary.alpha(0.035))
-            .border_1()
-            .border_color(colors.primary.alpha(0.06))
+            .gap(px(8.0))
+            .border_b_1()
+            .border_color(colors.primary.alpha(0.05))
             .when(can_open, |row| {
                 row.cursor_pointer()
-                    .hover(move |row| row.bg(colors.primary.alpha(0.065)))
+                    .hover(move |row| row.bg(colors.primary.alpha(0.05)))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.select_tab(InspectorTab::Changes, cx);
                         cx.stop_propagation();
@@ -1699,25 +2393,29 @@ impl WorkbenchInspector {
                     .min_w(px(0.0))
                     .flex_1()
                     .flex()
-                    .flex_col()
-                    .gap(px(2.0))
+                    .items_center()
+                    .gap(px(8.0))
                     .child(
                         div()
-                            .text_size(px(Typo::ROW_EMPHASIZED.size))
-                            .font_weight(Typo::ROW_EMPHASIZED.weight)
+                            .min_w(px(0.0))
+                            .flex_1()
+                            .truncate()
+                            .text_size(px(Typo::META.size))
+                            .font_weight(FontWeight::MEDIUM)
                             .text_color(colors.primary)
                             .child(title),
                     )
                     .child(
                         div()
+                            .max_w(px(150.0))
                             .truncate()
-                            .text_size(px(Typo::META.size))
+                            .text_size(px(10.0))
                             .text_color(colors.tertiary)
                             .child(detail),
                     ),
             )
             .when(can_open, |row| {
-                row.child(sf_symbol("chevron.right", 11.0, colors.tertiary))
+                row.child(sf_symbol("chevron.right", 10.0, colors.tertiary))
             })
             .into_any_element()
     }
@@ -2269,13 +2967,9 @@ impl WorkbenchInspector {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let ReviewLoadState::Ready(status) = &self.review_state else {
+        let ReviewLoadState::Ready(workspace) = &self.review_state else {
             let (symbol, label) = match &self.review_state {
                 ReviewLoadState::NoSession => ("minus.circle", "Select an agent to review"),
-                ReviewLoadState::Remote => (
-                    "network",
-                    "Remote changes are view-only until Git actions move into the daemon",
-                ),
                 ReviewLoadState::Loading => ("ellipsis", "Reading index and working tree…"),
                 ReviewLoadState::Error(error) => {
                     return div()
@@ -2309,7 +3003,9 @@ impl WorkbenchInspector {
                 .child(label)
                 .into_any_element();
         };
-        let status = Arc::clone(status);
+        let workspace = Arc::clone(workspace);
+        let status = ReviewStatus::from_proto(&workspace.status);
+        let comparing = !matches!(workspace.target, GitReviewTarget::WorkingTree);
         let staged_paths: Vec<_> = status
             .staged
             .iter()
@@ -2345,7 +3041,7 @@ impl WorkbenchInspector {
         let discard_armed = self.discard_armed;
 
         let mut actions = div().flex().items_center().gap(px(5.0));
-        if self.diff_layer == DiffLayer::Working && !stage_paths.is_empty() {
+        if !comparing && self.diff_layer == DiffLayer::Working && !stage_paths.is_empty() {
             let paths = stage_paths;
             actions = actions.child(
                 div()
@@ -2381,7 +3077,7 @@ impl WorkbenchInspector {
                     .child("Stage all"),
             );
         }
-        if self.diff_layer == DiffLayer::Staged && !staged_paths.is_empty() {
+        if !comparing && self.diff_layer == DiffLayer::Staged && !staged_paths.is_empty() {
             let paths = staged_paths;
             actions = actions.child(
                 div()
@@ -2439,7 +3135,7 @@ impl WorkbenchInspector {
                     .child(if commit_open { "Cancel" } else { "Commit" }),
             );
         }
-        if self.diff_layer == DiffLayer::Working && !discard_paths.is_empty() {
+        if !comparing && self.diff_layer == DiffLayer::Working && !discard_paths.is_empty() {
             let paths = discard_paths;
             actions = actions.child(
                 div()
@@ -2502,67 +3198,267 @@ impl WorkbenchInspector {
                 String::new()
             }
         );
-        let mut panel = div()
-            .flex_none()
-            .px(px(10.0))
-            .py(px(7.0))
-            .flex()
-            .flex_col()
-            .gap(px(7.0))
-            .border_b_1()
-            .border_color(colors.primary.alpha(0.06))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(7.0))
-                    .child(sf_symbol("arrow.branch", 11.0, colors.secondary))
-                    .child(
-                        div()
-                            .min_w(px(0.0))
-                            .flex_1()
-                            .truncate()
-                            .font_family(crate::fonts::mono_family())
-                            .text_size(px(10.5))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(colors.secondary)
-                            .child(branch),
-                    )
-                    .when_some(branch_detail, |row, detail| {
-                        row.child(
-                            div()
-                                .font_family(crate::fonts::mono_family())
-                                .text_size(px(9.5))
-                                .text_color(colors.tertiary)
-                                .child(detail),
-                        )
-                    })
-                    .child(
-                        div()
-                            .text_size(px(9.5))
-                            .text_color(if conflicted_count > 0 {
-                                Ink::DANGER
-                            } else {
-                                colors.tertiary
-                            })
-                            .child(counts),
-                    ),
-            )
-            .when(self.diff_layer != DiffLayer::Branch, |panel| {
-                panel.child(actions)
-            })
-            .when(self.diff_layer == DiffLayer::Branch, |panel| {
-                panel.child(
+        let repository = workspace
+            .repository
+            .clone()
+            .unwrap_or_else(|| workspace.repo_root.clone());
+        let target_label = match &workspace.target {
+            GitReviewTarget::WorkingTree => "Working tree".to_owned(),
+            GitReviewTarget::Branch { ref_name } => format!("Compare {ref_name}"),
+            GitReviewTarget::PullRequest { number, .. } => format!("PR #{number}"),
+        };
+        let owner_label = workspace.owner.as_ref().map(|owner| {
+            if owner.live {
+                format!("owned by {}", owner.title)
+            } else {
+                format!("last owned by {}", owner.title)
+            }
+        });
+        let dirty_label = if workspace.conflicted {
+            Some("conflicted")
+        } else if workspace.dirty {
+            Some("dirty")
+        } else {
+            None
+        };
+        let checkout_name = workspace
+            .worktree_path
+            .rsplit('/')
+            .next()
+            .unwrap_or(workspace.worktree_path.as_str())
+            .to_owned();
+        let mut panel =
+            div()
+                .flex_none()
+                .px(px(10.0))
+                .py(px(7.0))
+                .flex()
+                .flex_col()
+                .gap(px(7.0))
+                .border_b_1()
+                .border_color(colors.primary.alpha(0.06))
+                .child(
                     div()
                         .flex()
                         .items_center()
                         .gap(px(6.0))
-                        .text_size(px(9.5))
-                        .text_color(colors.tertiary)
-                        .child(sf_symbol("scope", 9.5, colors.tertiary))
-                        .child("Overview only · choose Working or Staged to mutate hunks"),
+                        .child(sf_symbol("shippingbox", 11.0, colors.secondary))
+                        .child(
+                            div()
+                                .min_w(px(0.0))
+                                .flex_1()
+                                .truncate()
+                                .font_family(crate::fonts::mono_family())
+                                .text_size(px(10.5))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(colors.secondary)
+                                .child(repository),
+                        )
+                        .child(
+                            div()
+                                .id("review-branches")
+                                .h(px(22.0))
+                                .px(px(7.0))
+                                .flex()
+                                .items_center()
+                                .rounded(px(Radius::BADGE))
+                                .bg(colors.primary.alpha(0.055))
+                                .text_size(px(10.0))
+                                .text_color(colors.secondary)
+                                .cursor_pointer()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.open_branches_picker(cx);
+                                    cx.stop_propagation();
+                                }))
+                                .child("Branches…"),
+                        )
+                        .child(
+                            div()
+                                .id("review-goto-pr")
+                                .h(px(22.0))
+                                .px(px(7.0))
+                                .flex()
+                                .items_center()
+                                .rounded(px(Radius::BADGE))
+                                .bg(colors.primary.alpha(0.055))
+                                .text_size(px(10.0))
+                                .text_color(colors.secondary)
+                                .cursor_pointer()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.open_pull_request_picker(cx);
+                                    cx.stop_propagation();
+                                }))
+                                .child("Go to PR…"),
+                        )
+                        .child(
+                            div()
+                                .id("review-fetch")
+                                .h(px(22.0))
+                                .px(px(7.0))
+                                .flex()
+                                .items_center()
+                                .rounded(px(Radius::BADGE))
+                                .text_size(px(10.0))
+                                .text_color(colors.tertiary)
+                                .cursor_pointer()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.fetch_refs(cx);
+                                    cx.stop_propagation();
+                                }))
+                                .child("Fetch"),
+                        ),
                 )
-            });
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(7.0))
+                        .child(sf_symbol("arrow.branch", 11.0, colors.secondary))
+                        .child(
+                            div()
+                                .min_w(px(0.0))
+                                .flex_1()
+                                .truncate()
+                                .font_family(crate::fonts::mono_family())
+                                .text_size(px(10.5))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(colors.secondary)
+                                .child(format!("{branch} · {checkout_name}")),
+                        )
+                        .when_some(branch_detail, |row, detail| {
+                            row.child(
+                                div()
+                                    .font_family(crate::fonts::mono_family())
+                                    .text_size(px(9.5))
+                                    .text_color(colors.tertiary)
+                                    .child(detail),
+                            )
+                        })
+                        .when_some(owner_label, |row, label| {
+                            row.child(
+                                div()
+                                    .text_size(px(9.5))
+                                    .text_color(colors.tertiary)
+                                    .child(label),
+                            )
+                        })
+                        .when_some(dirty_label, |row, label| {
+                            row.child(
+                                div()
+                                    .text_size(px(9.5))
+                                    .text_color(if workspace.conflicted {
+                                        Ink::DANGER
+                                    } else {
+                                        colors.tertiary
+                                    })
+                                    .child(label),
+                            )
+                        })
+                        .child(
+                            div()
+                                .text_size(px(9.5))
+                                .text_color(if conflicted_count > 0 {
+                                    Ink::DANGER
+                                } else {
+                                    colors.tertiary
+                                })
+                                .child(counts),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .child(sf_symbol("scope", 9.5, colors.tertiary))
+                        .child(
+                            div()
+                                .text_size(px(9.5))
+                                .text_color(colors.tertiary)
+                                .child(target_label),
+                        )
+                        .when(comparing, |row| {
+                            row.child(
+                                div()
+                                    .id("review-return-working-tree")
+                                    .h(px(20.0))
+                                    .px(px(6.0))
+                                    .flex()
+                                    .items_center()
+                                    .rounded(px(Radius::BADGE))
+                                    .text_size(px(9.5))
+                                    .text_color(colors.secondary)
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.set_review_target(GitReviewTarget::WorkingTree, cx);
+                                        cx.stop_propagation();
+                                    }))
+                                    .child("Working tree"),
+                            )
+                        }),
+                )
+                .when_some(self.review_pr.clone(), |panel, pr| {
+                    panel.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(3.0))
+                            .child(
+                                div()
+                                    .text_size(px(10.5))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(colors.secondary)
+                                    .child(format!(
+                                        "#{} {}",
+                                        pr.number,
+                                        pr.title.as_deref().unwrap_or("Pull request")
+                                    )),
+                            )
+                            .child(div().text_size(px(9.5)).text_color(colors.tertiary).child(
+                                format!(
+                                    "{} · {} · +{} −{} · {}",
+                                    pr.state,
+                                    pr.review_decision.as_deref().unwrap_or("no review"),
+                                    pr.additions,
+                                    pr.deletions,
+                                    pr.head_ref_name.as_deref().unwrap_or("head")
+                                ),
+                            ))
+                            .child(
+                                div()
+                                    .id("review-open-pr-worktree")
+                                    .h(px(22.0))
+                                    .px(px(7.0))
+                                    .flex()
+                                    .items_center()
+                                    .rounded(px(Radius::BADGE))
+                                    .bg(colors.primary.alpha(0.055))
+                                    .text_size(px(10.0))
+                                    .text_color(colors.secondary)
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.open_pull_request_worktree(cx);
+                                        cx.stop_propagation();
+                                    }))
+                                    .child("Open PR head worktree"),
+                            ),
+                    )
+                })
+                .when(self.diff_layer != DiffLayer::Branch, |panel| {
+                    panel.child(actions)
+                })
+                .when(self.diff_layer == DiffLayer::Branch, |panel| {
+                    panel.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .text_size(px(9.5))
+                            .text_color(colors.tertiary)
+                            .child(sf_symbol("scope", 9.5, colors.tertiary))
+                            .child("Overview only · choose Working or Staged to mutate hunks"),
+                    )
+                });
 
         if self.commit_open {
             let empty = self.commit_query.is_empty();
@@ -2676,6 +3572,52 @@ impl WorkbenchInspector {
         if self.account_open && event.keystroke.key == "escape" {
             self.account_open = false;
             cx.notify();
+            cx.stop_propagation();
+            return;
+        }
+        if self.review_picker != ReviewPicker::None {
+            match event.keystroke.key.as_str() {
+                "escape" => {
+                    self.review_picker = ReviewPicker::None;
+                    cx.notify();
+                }
+                "enter" if self.review_picker == ReviewPicker::PullRequest => {
+                    self.go_to_pull_request(cx);
+                }
+                "enter" if self.create_branch_open => self.create_branch_from_header(cx),
+                _ => {
+                    let Some(edit) = query_editor::edit_for(&event.keystroke) else {
+                        return;
+                    };
+                    let query = if self.review_picker == ReviewPicker::PullRequest {
+                        &mut self.pr_query
+                    } else {
+                        &mut self.branch_query
+                    };
+                    match edit {
+                        Edit::Local(local) => {
+                            query.apply(local);
+                        }
+                        Edit::Clipboard(ClipboardEdit::Copy) => {
+                            query_editor::copy_selection(query, cx);
+                        }
+                        Edit::Clipboard(ClipboardEdit::Cut) => {
+                            query_editor::cut_selection(query, cx);
+                        }
+                        Edit::Clipboard(ClipboardEdit::Paste) => {
+                            if let Some(text) =
+                                cx.read_from_clipboard().and_then(|item| item.text())
+                            {
+                                query.insert(&text);
+                            }
+                        }
+                    }
+                    if self.review_picker == ReviewPicker::Branches && !self.create_branch_open {
+                        self.load_branch_refs(cx);
+                    }
+                    cx.notify();
+                }
+            }
             cx.stop_propagation();
             return;
         }
@@ -2795,6 +3737,38 @@ impl WorkbenchInspector {
                     error,
                 )
                 .into_any_element(),
+        };
+        let body = if let Some(pull_request) = self.review_pr.clone() {
+            let markdown = pull_request
+                .body
+                .as_deref()
+                .filter(|body| !body.trim().is_empty())
+                .map(|body| self.markdown_document(body));
+            div()
+                .size_full()
+                .min_h(px(0.0))
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .id("review-pr-details")
+                        .max_h(px(340.0))
+                        .flex_none()
+                        .p(px(10.0))
+                        .overflow_y_scroll()
+                        .border_b_1()
+                        .border_color(colors.primary.alpha(0.06))
+                        .child(render_pull_request(
+                            &pull_request,
+                            colors,
+                            cx.entity(),
+                            markdown,
+                        )),
+                )
+                .child(div().min_h(px(0.0)).flex_1().overflow_hidden().child(body))
+                .into_any_element()
+        } else {
+            body
         };
         let comparison_open = remote && self.comparison_menu_open;
         let snapshot = match &self.state {
@@ -2979,6 +3953,265 @@ impl WorkbenchInspector {
             .child(self.render_review_controls(colors, window, cx))
             .child(div().min_h(px(0.0)).flex_1().overflow_hidden().child(body))
             .when_some(menu, |panel, menu| panel.child(menu))
+            .when(self.review_picker != ReviewPicker::None, |panel| {
+                panel.child(self.render_review_picker(colors, cx))
+            })
+            .into_any_element()
+    }
+
+    fn render_review_picker(
+        &mut self,
+        colors: SemanticColors,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let title = match self.review_picker {
+            ReviewPicker::Branches => "Branches",
+            ReviewPicker::PullRequest => "Go to Pull Request",
+            ReviewPicker::None => "",
+        };
+        let query = if self.review_picker == ReviewPicker::PullRequest {
+            self.pr_query.text()
+        } else {
+            self.branch_query.text()
+        };
+        let mut body = div()
+            .id("review-picker-scroll")
+            .max_h(px(370.0))
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .p(px(8.0))
+            .overflow_y_scroll();
+        body = body.child(
+            div()
+                .h(px(28.0))
+                .px(px(8.0))
+                .flex()
+                .items_center()
+                .rounded(px(Radius::CHIP))
+                .bg(colors.background)
+                .border_1()
+                .border_color(colors.primary.alpha(0.10))
+                .font_family(crate::fonts::mono_family())
+                .text_size(px(11.0))
+                .text_color(colors.primary)
+                .child(if query.is_empty() {
+                    if self.review_picker == ReviewPicker::PullRequest {
+                        "#123 or GitHub URL".to_owned()
+                    } else {
+                        "Search branches".to_owned()
+                    }
+                } else {
+                    query.to_owned()
+                }),
+        );
+        if self.review_picker == ReviewPicker::Branches {
+            body = body.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(
+                        div()
+                            .id("review-create-branch")
+                            .h(px(22.0))
+                            .px(px(7.0))
+                            .flex()
+                            .items_center()
+                            .rounded(px(Radius::BADGE))
+                            .text_size(px(10.0))
+                            .text_color(colors.secondary)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.create_branch_open = !this.create_branch_open;
+                                cx.notify();
+                            }))
+                            .child(if self.create_branch_open {
+                                "Cancel"
+                            } else {
+                                "Create branch"
+                            }),
+                    )
+                    .when(self.create_branch_open, |row| {
+                        row.child(
+                            div()
+                                .id("review-create-branch-confirm")
+                                .h(px(22.0))
+                                .px(px(7.0))
+                                .flex()
+                                .items_center()
+                                .rounded(px(Radius::BADGE))
+                                .bg(colors.primary.alpha(0.08))
+                                .text_size(px(10.0))
+                                .text_color(colors.secondary)
+                                .cursor_pointer()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.create_branch_from_header(cx);
+                                }))
+                                .child("Create"),
+                        )
+                    }),
+            );
+            for entry in self.branch_refs.iter().take(40).cloned() {
+                let name = entry.short_name.clone();
+                let identity = entry.name.clone();
+                let kind = match entry.kind {
+                    zeus_proto::GitRefKind::Local => "local",
+                    zeus_proto::GitRefKind::Remote => "remote",
+                };
+                let mut detail = kind.to_owned();
+                if entry.current {
+                    detail.push_str(" · current");
+                }
+                if let Some(path) = &entry.worktree_path {
+                    detail.push_str(" · ");
+                    detail.push_str(path.rsplit('/').next().unwrap_or(path));
+                }
+                let compare_name = name.clone();
+                let switch_name = name.clone();
+                let worktree_name = name.clone();
+                body = body.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(3.0))
+                        .py(px(4.0))
+                        .child(
+                            div()
+                                .font_family(crate::fonts::mono_family())
+                                .text_size(px(11.0))
+                                .text_color(colors.secondary)
+                                .child(name),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(9.5))
+                                .text_color(colors.tertiary)
+                                .child(detail),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(4.0))
+                                .child(self.review_ref_action(
+                                    SharedString::from(format!("review-ref-compare-{identity}")),
+                                    "Compare with…",
+                                    colors,
+                                    cx,
+                                    move |this, cx| this.compare_with_ref(compare_name.clone(), cx),
+                                ))
+                                .child(self.review_ref_action(
+                                    SharedString::from(format!("review-ref-switch-{identity}")),
+                                    "Switch checkout…",
+                                    colors,
+                                    cx,
+                                    move |this, cx| {
+                                        this.checkout_ref(
+                                            switch_name.clone(),
+                                            GitCheckoutMode::Switch,
+                                            cx,
+                                        )
+                                    },
+                                ))
+                                .child(self.review_ref_action(
+                                    SharedString::from(format!("review-ref-worktree-{identity}")),
+                                    "Open in new worktree",
+                                    colors,
+                                    cx,
+                                    move |this, cx| {
+                                        this.checkout_ref(
+                                            worktree_name.clone(),
+                                            GitCheckoutMode::Worktree,
+                                            cx,
+                                        )
+                                    },
+                                )),
+                        ),
+                );
+            }
+        } else {
+            body = body.child(
+                div()
+                    .id("review-pr-go")
+                    .h(px(24.0))
+                    .px(px(8.0))
+                    .flex()
+                    .items_center()
+                    .rounded(px(Radius::BADGE))
+                    .bg(colors.primary.alpha(0.08))
+                    .text_size(px(10.5))
+                    .text_color(colors.secondary)
+                    .cursor_pointer()
+                    .on_click(cx.listener(|this, _, _, cx| this.go_to_pull_request(cx)))
+                    .child("View pull request"),
+            );
+        }
+        div()
+            .absolute()
+            .inset_0()
+            .child(div().absolute().inset_0().occlude().on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.review_picker = ReviewPicker::None;
+                    cx.notify();
+                    cx.stop_propagation();
+                }),
+            ))
+            .child(
+                div()
+                    .id("review-picker")
+                    .absolute()
+                    .top(px(40.0))
+                    .left(px(9.0))
+                    .w(px(360.0))
+                    .max_h(px(420.0))
+                    .occlude()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(FloatingSurface::new(
+                        colors,
+                        div()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .px(px(10.0))
+                                    .py(px(7.0))
+                                    .text_size(px(11.0))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(colors.secondary)
+                                    .child(title),
+                            )
+                            .child(body),
+                    )),
+            )
+            .into_any_element()
+    }
+
+    fn review_ref_action(
+        &self,
+        id: SharedString,
+        label: &'static str,
+        colors: SemanticColors,
+        cx: &mut Context<Self>,
+        on_click: impl Fn(&mut Self, &mut Context<Self>) + 'static,
+    ) -> AnyElement {
+        div()
+            .id(id)
+            .h(px(20.0))
+            .px(px(6.0))
+            .flex()
+            .items_center()
+            .rounded(px(Radius::BADGE))
+            .text_size(px(9.5))
+            .text_color(colors.secondary)
+            .cursor_pointer()
+            .hover(move |button| button.bg(colors.primary.alpha(0.08)))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                on_click(this, cx);
+                cx.stop_propagation();
+            }))
+            .child(label)
             .into_any_element()
     }
 
@@ -3262,6 +4495,13 @@ fn git_is_not_installed(error: &str) -> bool {
         || error.contains("git: not found")
 }
 
+fn paths_to_strings(paths: &[PathBuf]) -> Vec<String> {
+    paths
+        .iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect()
+}
+
 fn should_show_blocking_git_loading(context_changed: bool, state: &LoadState) -> bool {
     context_changed || matches!(state, LoadState::NoSession)
 }
@@ -3328,6 +4568,16 @@ fn section_label(label: &'static str, colors: SemanticColors) -> AnyElement {
         .into_any_element()
 }
 
+fn info_section_label(label: &'static str, colors: SemanticColors) -> AnyElement {
+    div()
+        .px(px(2.0))
+        .text_size(px(9.0))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(colors.tertiary)
+        .child(label.to_ascii_uppercase())
+        .into_any_element()
+}
+
 fn account_section_label(label: &'static str, colors: SemanticColors) -> AnyElement {
     div()
         .px(px(14.0))
@@ -3385,16 +4635,16 @@ fn detail_row(
     colors: SemanticColors,
 ) -> AnyElement {
     div()
-        .min_h(px(38.0))
-        .px(px(11.0))
+        .h(px(32.0))
+        .px(px(2.0))
         .flex()
         .items_center()
-        .gap(px(12.0))
+        .gap(px(8.0))
         .border_b_1()
         .border_color(colors.primary.alpha(0.05))
         .child(
             div()
-                .w(px(64.0))
+                .w(px(68.0))
                 .flex_none()
                 .text_size(px(Typo::META.size))
                 .text_color(colors.tertiary)
@@ -3417,6 +4667,592 @@ fn detail_row(
                 .child(value),
         )
         .into_any_element()
+}
+
+fn copy_detail_row(
+    label: &'static str,
+    value: String,
+    clipboard: String,
+    monospaced: bool,
+    selector: &'static str,
+    colors: SemanticColors,
+) -> AnyElement {
+    div()
+        .id(selector)
+        .debug_selector(move || selector.to_owned())
+        .h(px(32.0))
+        .px(px(2.0))
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .border_b_1()
+        .border_color(colors.primary.alpha(0.05))
+        .cursor_pointer()
+        .hover(move |row| row.bg(colors.primary.alpha(0.05)))
+        .child(
+            div()
+                .w(px(68.0))
+                .flex_none()
+                .text_size(px(Typo::META.size))
+                .text_color(colors.tertiary)
+                .child(label),
+        )
+        .child(
+            div()
+                .min_w(px(0.0))
+                .flex_1()
+                .truncate()
+                .when(monospaced, |value| {
+                    value.font_family(crate::fonts::mono_family())
+                })
+                .text_size(px(if monospaced {
+                    Typo::META_MONO.size
+                } else {
+                    Typo::META.size
+                }))
+                .text_color(colors.secondary)
+                .child(value),
+        )
+        .child(sf_symbol("doc.on.doc", 10.0, colors.tertiary))
+        .on_click(move |_, _, cx| {
+            cx.write_to_clipboard(ClipboardItem::new_string(clipboard.clone()));
+            cx.stop_propagation();
+        })
+        .into_any_element()
+}
+
+fn accent_detail_row(
+    label: &'static str,
+    value: String,
+    accent: gpui::Rgba,
+    selector: &'static str,
+    colors: SemanticColors,
+) -> AnyElement {
+    div()
+        .debug_selector(move || selector.to_owned())
+        .h(px(32.0))
+        .px(px(2.0))
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .border_b_1()
+        .border_color(colors.primary.alpha(0.05))
+        .child(
+            div()
+                .w(px(68.0))
+                .flex_none()
+                .text_size(px(Typo::META.size))
+                .text_color(colors.tertiary)
+                .child(label),
+        )
+        .child(
+            div()
+                .min_w(px(0.0))
+                .flex_1()
+                .truncate()
+                .text_size(px(Typo::META.size))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(accent)
+                .child(value),
+        )
+        .into_any_element()
+}
+
+fn tab_jump_detail_row(
+    label: &'static str,
+    value: String,
+    monospaced: bool,
+    selector: &'static str,
+    tab: InspectorTab,
+    colors: SemanticColors,
+    inspector: Entity<WorkbenchInspector>,
+) -> AnyElement {
+    div()
+        .id(selector)
+        .debug_selector(move || selector.to_owned())
+        .h(px(32.0))
+        .px(px(2.0))
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .border_b_1()
+        .border_color(colors.primary.alpha(0.05))
+        .cursor_pointer()
+        .hover(move |row| row.bg(colors.primary.alpha(0.05)))
+        .child(
+            div()
+                .w(px(68.0))
+                .flex_none()
+                .text_size(px(Typo::META.size))
+                .text_color(colors.tertiary)
+                .child(label),
+        )
+        .child(
+            div()
+                .min_w(px(0.0))
+                .flex_1()
+                .truncate()
+                .when(monospaced, |value| {
+                    value.font_family(crate::fonts::mono_family())
+                })
+                .text_size(px(if monospaced {
+                    Typo::META_MONO.size
+                } else {
+                    Typo::META.size
+                }))
+                .text_color(colors.secondary)
+                .child(value),
+        )
+        .child(sf_symbol("chevron.right", 10.0, colors.tertiary))
+        .on_click(move |_, _, cx| {
+            inspector.update(cx, |inspector, cx| inspector.select_tab(tab, cx));
+            cx.stop_propagation();
+        })
+        .into_any_element()
+}
+
+fn render_briefing_state(state: &BriefingState, colors: SemanticColors) -> AnyElement {
+    match state {
+        BriefingState::NeedsInput {
+            kind,
+            risk,
+            summary,
+            options,
+            prompt_excerpt,
+        } => {
+            let accent = if *risk == "destructive" {
+                Ink::DANGER
+            } else {
+                Ink::ATTENTION
+            };
+            let selector = if *kind == "permission" {
+                "INFO_ATTENTION_PERMISSION"
+            } else {
+                "INFO_ATTENTION_QUESTION"
+            };
+            let mut details = div()
+                .min_w(px(0.0))
+                .flex_1()
+                .flex()
+                .flex_col()
+                .gap(px(5.0))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(4.0))
+                        .child(info_chip(kind, accent))
+                        .when(*risk != "neutral", |row| row.child(info_chip(risk, accent))),
+                )
+                .child(
+                    div()
+                        .whitespace_normal()
+                        .text_size(px(Typo::ROW_EMPHASIZED.size))
+                        .font_weight(Typo::ROW_EMPHASIZED.weight)
+                        .text_color(colors.primary)
+                        .child(summary.clone()),
+                );
+            if !options.is_empty() {
+                details = details.child(
+                    div().flex().flex_wrap().gap(px(4.0)).children(
+                        options
+                            .iter()
+                            .map(|option| info_chip(option, colors.secondary)),
+                    ),
+                );
+            }
+            if let Some(excerpt) = prompt_excerpt {
+                details = details.child(
+                    div()
+                        .p(px(6.0))
+                        .rounded(px(Radius::BADGE))
+                        .bg(colors.primary.alpha(0.035))
+                        .font_family(crate::fonts::mono_family())
+                        .text_size(px(Typo::META_MONO.size))
+                        .text_color(colors.secondary)
+                        .whitespace_normal()
+                        .child(excerpt.clone()),
+                );
+            }
+            div()
+                .debug_selector(move || selector.to_owned())
+                .p(px(9.0))
+                .flex()
+                .items_start()
+                .gap(px(8.0))
+                .rounded(px(Radius::BADGE))
+                .bg(accent.alpha(0.055))
+                .border_l_2()
+                .border_color(accent.alpha(0.55))
+                .child(sf_symbol("questionmark.bubble", 13.0, accent))
+                .child(details)
+                .into_any_element()
+        }
+        BriefingState::Sleeping { reason, since } => div()
+            .debug_selector(|| "INFO_SLEEPING".to_owned())
+            .min_h(px(38.0))
+            .px(px(8.0))
+            .py(px(6.0))
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .rounded(px(Radius::BADGE))
+            .bg(colors.primary.alpha(0.025))
+            .border_l_2()
+            .border_color(colors.secondary.alpha(0.35))
+            .child(sf_symbol("moon.zzz", 13.0, colors.secondary))
+            .child(
+                div()
+                    .min_w(px(0.0))
+                    .flex_1()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .min_w(px(0.0))
+                            .flex_1()
+                            .truncate()
+                            .text_size(px(Typo::META.size))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(colors.primary)
+                            .child(format!("Sleeping · {reason}")),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(px(10.0))
+                            .text_color(colors.tertiary)
+                            .child(format!("Since {}", relative_time(*since))),
+                    ),
+            )
+            .into_any_element(),
+        BriefingState::Ended {
+            summary,
+            resumability,
+        } => div()
+            .debug_selector(|| "INFO_ENDED".to_owned())
+            .min_h(px(38.0))
+            .px(px(8.0))
+            .py(px(6.0))
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .rounded(px(Radius::BADGE))
+            .bg(colors.primary.alpha(0.025))
+            .border_l_2()
+            .border_color(colors.tertiary.alpha(0.35))
+            .child(sf_symbol("stop.circle", 13.0, colors.tertiary))
+            .child(
+                div()
+                    .min_w(px(0.0))
+                    .flex_1()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .min_w(px(0.0))
+                            .flex_1()
+                            .truncate()
+                            .text_size(px(Typo::META.size))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(colors.primary)
+                            .child(summary.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(px(10.0))
+                            .text_color(colors.tertiary)
+                            .child(*resumability),
+                    ),
+            )
+            .into_any_element(),
+    }
+}
+
+fn info_chip(text: &str, accent: gpui::Rgba) -> AnyElement {
+    div()
+        .px(px(6.0))
+        .py(px(1.0))
+        .rounded_full()
+        .bg(accent.alpha(0.09))
+        .text_size(px(9.0))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(accent)
+        .child(text.to_owned())
+        .into_any_element()
+}
+
+fn render_timeline(session: &SessionRecord, colors: SemanticColors) -> AnyElement {
+    let now = now_millis();
+    let mut timeline = div()
+        .debug_selector(|| "INFO_TIMELINE".to_owned())
+        .border_t_1()
+        .border_color(colors.primary.alpha(0.065))
+        .overflow_hidden()
+        .child(timeline_time_row(
+            "Created",
+            session.created_at.0,
+            now,
+            "INFO_TIMELINE_CREATED",
+            colors,
+        ));
+    timeline = if let Some(at) = session.last_turn_completed_at {
+        timeline.child(timeline_time_row(
+            "Last turn",
+            at.0,
+            now,
+            "INFO_TIMELINE_LAST_TURN",
+            colors,
+        ))
+    } else {
+        timeline.child(detail_row(
+            "Last turn",
+            "Not recorded".to_owned(),
+            false,
+            colors,
+        ))
+    };
+    timeline = if let Some(at) = session.last_seen_at {
+        timeline.child(timeline_time_row(
+            "Last seen",
+            at.0,
+            now,
+            "INFO_TIMELINE_LAST_SEEN",
+            colors,
+        ))
+    } else {
+        timeline.child(detail_row(
+            "Last seen",
+            "Not recorded".to_owned(),
+            false,
+            colors,
+        ))
+    };
+    match session.status {
+        SessionStatus::Exited(_) => timeline.child(timeline_time_row(
+            "Ended",
+            session.updated_at.0,
+            now,
+            "INFO_TIMELINE_ENDED",
+            colors,
+        )),
+        _ => timeline.child(copy_detail_row(
+            "Running",
+            format_duration(now - session.created_at.0),
+            absolute_time(session.created_at.0),
+            false,
+            "INFO_TIMELINE_RUNNING",
+            colors,
+        )),
+    }
+    .into_any_element()
+}
+
+fn timeline_time_row(
+    label: &'static str,
+    at: f64,
+    now: f64,
+    selector: &'static str,
+    colors: SemanticColors,
+) -> AnyElement {
+    copy_detail_row(
+        label,
+        relative_time_at(at, now),
+        absolute_time(at),
+        false,
+        selector,
+        colors,
+    )
+}
+
+fn render_lineage(
+    selected: &SessionRecord,
+    briefing: &InfoBriefing,
+    colors: SemanticColors,
+    inspector: Entity<WorkbenchInspector>,
+) -> AnyElement {
+    let mut lineage = div()
+        .debug_selector(|| "INFO_LINEAGE".to_owned())
+        .border_t_1()
+        .border_color(colors.primary.alpha(0.065))
+        .overflow_hidden();
+    if let Some(parent) = &briefing.parent {
+        lineage = lineage.child(related_session_row(
+            if selected.is_workbench_terminal() {
+                "Workbench for"
+            } else {
+                "Parent"
+            },
+            parent,
+            colors,
+            inspector.clone(),
+        ));
+        if !selected.is_workbench_terminal() && briefing.sibling_count > 0 {
+            lineage = lineage.child(detail_row(
+                "Siblings",
+                count_noun(briefing.sibling_count, "live sibling", "live siblings"),
+                false,
+                colors,
+            ));
+        }
+    }
+    for child in &briefing.children {
+        lineage = lineage.child(related_session_row(
+            "Child",
+            child,
+            colors,
+            inspector.clone(),
+        ));
+    }
+    if let Some(workbench) = &briefing.workbench {
+        lineage = lineage.child(related_session_row(
+            "⌘J split",
+            workbench,
+            colors,
+            inspector,
+        ));
+    }
+    lineage.into_any_element()
+}
+
+fn related_session_row(
+    label: &'static str,
+    relation: &BriefingRelation,
+    colors: SemanticColors,
+    inspector: Entity<WorkbenchInspector>,
+) -> AnyElement {
+    let id = relation.id.clone();
+    let selector_id = id.clone();
+    let accent = relation_status_color(relation.status, colors);
+    div()
+        .id(format!("info-lineage:{}", relation.id.0))
+        .debug_selector(move || format!("INFO_LINEAGE_{}", selector_id.0))
+        .h(px(34.0))
+        .px(px(2.0))
+        .flex()
+        .items_center()
+        .gap(px(7.0))
+        .border_b_1()
+        .border_color(colors.primary.alpha(0.05))
+        .cursor_pointer()
+        .hover(move |row| row.bg(colors.primary.alpha(0.05)))
+        .child(
+            div()
+                .w(px(68.0))
+                .flex_none()
+                .text_size(px(Typo::META.size))
+                .text_color(colors.tertiary)
+                .child(label),
+        )
+        .child(div().size(px(5.0)).rounded_full().bg(accent))
+        .child(
+            div()
+                .min_w(px(0.0))
+                .flex_1()
+                .truncate()
+                .text_size(px(Typo::META.size))
+                .text_color(colors.primary)
+                .child(relation.title.clone()),
+        )
+        .child(
+            div()
+                .flex_none()
+                .text_size(px(10.0))
+                .text_color(colors.tertiary)
+                .child(relation.status),
+        )
+        .child(sf_symbol("chevron.right", 10.0, colors.tertiary))
+        .on_click(move |_, _, cx| {
+            inspector.update(cx, |inspector, cx| {
+                inspector.activate_related_session(id.clone(), cx)
+            });
+            cx.stop_propagation();
+        })
+        .into_any_element()
+}
+
+fn render_identity(
+    session: &SessionRecord,
+    open: bool,
+    colors: SemanticColors,
+    inspector: Entity<WorkbenchInspector>,
+) -> AnyElement {
+    let mut identity = div()
+        .debug_selector(|| "INFO_IDENTITY".to_owned())
+        .border_t_1()
+        .border_color(colors.primary.alpha(0.065))
+        .overflow_hidden()
+        .child(
+            div()
+                .id("info-identity-toggle")
+                .debug_selector(|| "INFO_IDENTITY_TOGGLE".to_owned())
+                .h(px(32.0))
+                .px(px(2.0))
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .cursor_pointer()
+                .hover(move |row| row.bg(colors.primary.alpha(0.05)))
+                .child(sf_symbol(
+                    if open {
+                        "chevron.down"
+                    } else {
+                        "chevron.right"
+                    },
+                    10.0,
+                    colors.tertiary,
+                ))
+                .child(
+                    div()
+                        .flex_1()
+                        .text_size(px(Typo::META.size))
+                        .text_color(colors.secondary)
+                        .child("IDs and transcript"),
+                )
+                .on_click(move |_, _, cx| {
+                    inspector.update(cx, |inspector, cx| {
+                        inspector.identity_open = !inspector.identity_open;
+                        cx.notify();
+                    });
+                    cx.stop_propagation();
+                }),
+        );
+    if open {
+        identity = identity.child(copy_detail_row(
+            "Session",
+            session.id.0.clone(),
+            session.id.0.clone(),
+            true,
+            "INFO_COPY_SESSION_ID",
+            colors,
+        ));
+        if let Some(id) = session.agent_session_id.as_ref() {
+            identity = identity.child(copy_detail_row(
+                "Agent",
+                id.clone(),
+                id.clone(),
+                true,
+                "INFO_COPY_AGENT_ID",
+                colors,
+            ));
+        }
+        if let Some(path) = session.transcript_path.as_ref() {
+            identity = identity.child(copy_detail_row(
+                "Transcript",
+                path.clone(),
+                path.clone(),
+                true,
+                "INFO_COPY_TRANSCRIPT",
+                colors,
+            ));
+        }
+    }
+    identity.into_any_element()
 }
 
 fn render_pull_request(
@@ -4289,6 +6125,145 @@ fn artifact_count(session: &SessionRecord) -> usize {
     artifacts.len() + ports.len() + status_only_pull_requests
 }
 
+fn discovered_object_count(session: &SessionRecord) -> usize {
+    artifact_count(session).saturating_sub(
+        session
+            .listening_ports
+            .as_deref()
+            .map_or(0, |ports| ports.len()),
+    )
+}
+
+fn briefing_relation(session: &SessionRecord) -> BriefingRelation {
+    BriefingRelation {
+        id: session.id.clone(),
+        title: session.title.clone(),
+        status: plain_session_status(session),
+    }
+}
+
+fn briefing_state(session: &SessionRecord) -> Option<BriefingState> {
+    if let SessionStatus::NeedsInput(status_kind) = &session.status {
+        let detail = session.needs_input.as_ref();
+        let kind = match detail.map_or(status_kind, |detail| &detail.kind) {
+            zeus_proto::NeedsInputKind::Permission => "permission",
+            zeus_proto::NeedsInputKind::Question => "question",
+            zeus_proto::NeedsInputKind::Unknown => "input",
+        };
+        let risk = match detail.map(|detail| &detail.risk_hint) {
+            Some(zeus_proto::RiskHint::Destructive) => "destructive",
+            Some(zeus_proto::RiskHint::Network) => "network",
+            Some(zeus_proto::RiskHint::FileWrite) => "file write",
+            Some(zeus_proto::RiskHint::Neutral | zeus_proto::RiskHint::Unknown) | None => "neutral",
+        };
+        return Some(BriefingState::NeedsInput {
+            kind,
+            risk,
+            summary: detail.map_or_else(
+                || "The agent is waiting for your input.".to_owned(),
+                |detail| detail.summary.clone(),
+            ),
+            options: detail
+                .and_then(|detail| detail.options.clone())
+                .unwrap_or_default(),
+            prompt_excerpt: detail
+                .and_then(|detail| detail.prompt_excerpt.as_deref())
+                .filter(|excerpt| !excerpt.trim().is_empty())
+                .map(truncate_prompt_excerpt),
+        });
+    }
+    if let Some(hibernation) = session.hibernation.as_ref() {
+        let reason = match hibernation.reason {
+            zeus_proto::HibernationReason::Idle => "Idle",
+            zeus_proto::HibernationReason::MemoryPressure => "Memory pressure",
+            zeus_proto::HibernationReason::Manual => "Manual",
+            zeus_proto::HibernationReason::Unknown => "Unknown reason",
+        };
+        return Some(BriefingState::Sleeping {
+            reason,
+            since: hibernation.since.0,
+        });
+    }
+    if let SessionStatus::Exited(info) = &session.status {
+        let reason = match info.reason {
+            zeus_proto::ExitReason::Exited => "Exited",
+            zeus_proto::ExitReason::Signaled => "Signaled",
+            zeus_proto::ExitReason::DaemonRestart => "Engine restarted",
+            zeus_proto::ExitReason::External => "Ended externally",
+            zeus_proto::ExitReason::Archived => "Archived",
+            zeus_proto::ExitReason::Unknown => "Ended",
+        };
+        let fact = info
+            .code
+            .map(|code| format!("code {code}"))
+            .or_else(|| info.signal.map(|signal| format!("signal {signal}")));
+        return Some(BriefingState::Ended {
+            summary: fact.map_or_else(|| reason.to_owned(), |fact| format!("{reason} · {fact}")),
+            resumability: match session.resumability {
+                zeus_proto::Resumability::Live => "Still live",
+                zeus_proto::Resumability::Resumable => "Can be resumed",
+                zeus_proto::Resumability::TranscriptMissing => "Transcript missing",
+                zeus_proto::Resumability::NotResumable => "Cannot be resumed",
+                zeus_proto::Resumability::Unknown => "Resumability unknown",
+            },
+        });
+    }
+    None
+}
+
+fn truncate_prompt_excerpt(excerpt: &str) -> String {
+    const LIMIT: usize = 220;
+    let mut characters = excerpt.chars();
+    let truncated = characters.by_ref().take(LIMIT).collect::<String>();
+    if characters.next().is_some() {
+        format!("{truncated}…")
+    } else {
+        truncated
+    }
+}
+
+fn plain_session_status(session: &SessionRecord) -> &'static str {
+    if session.hibernation.is_some() {
+        return "Sleeping";
+    }
+    match session.status {
+        SessionStatus::Starting => "Starting",
+        SessionStatus::Working => "Working",
+        SessionStatus::NeedsInput(_) => "Needs input",
+        SessionStatus::Idle if session.attention() == zeus_proto::AttentionLevel::DoneUnseen => {
+            "Finished unseen"
+        }
+        SessionStatus::Idle => "Idle",
+        SessionStatus::Exited(_) => "Ended",
+        SessionStatus::Unknown => "Unknown",
+    }
+}
+
+fn relation_status_color(status: &str, colors: SemanticColors) -> gpui::Rgba {
+    match status {
+        "Working" | "Starting" => rgba(0x4f8ef7ff),
+        "Needs input" => Ink::ATTENTION,
+        "Finished unseen" => Ink::FRESH,
+        _ => colors.tertiary,
+    }
+}
+
+fn persistence_briefing(
+    persistence: zeus_proto::remote_pty::PersistenceCapability,
+) -> (&'static str, Option<gpui::Rgba>) {
+    match persistence {
+        zeus_proto::remote_pty::PersistenceCapability::NativeDetach => ("native-detach", None),
+        zeus_proto::remote_pty::PersistenceCapability::UserSupervisor => ("user-supervisor", None),
+        zeus_proto::remote_pty::PersistenceCapability::NonPersistent => {
+            ("non-persistent · no detach", Some(Ink::DANGER))
+        }
+    }
+}
+
+fn count_noun(count: usize, singular: &str, plural: &str) -> String {
+    format!("{count} {}", if count == 1 { singular } else { plural })
+}
+
 fn ui_agent_kind(kind: &ProtoAgentKind) -> AgentKind {
     AgentKind::from_id(kind.id())
 }
@@ -4451,10 +6426,17 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
-fn relative_time(milliseconds: f64) -> String {
-    let now = SystemTime::now()
+fn now_millis() -> f64 {
+    SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_or(0.0, |duration| duration.as_secs_f64() * 1000.0);
+        .map_or(0.0, |duration| duration.as_secs_f64() * 1000.0)
+}
+
+fn relative_time(milliseconds: f64) -> String {
+    relative_time_at(milliseconds, now_millis())
+}
+
+fn relative_time_at(milliseconds: f64, now: f64) -> String {
     let seconds = ((now - milliseconds).max(0.0) / 1000.0) as u64;
     match seconds {
         0..=59 => "now".to_owned(),
@@ -4462,6 +6444,46 @@ fn relative_time(milliseconds: f64) -> String {
         3_600..=86_399 => format!("{}h ago", seconds / 3_600),
         _ => format!("{}d ago", seconds / 86_400),
     }
+}
+
+fn format_duration(milliseconds: f64) -> String {
+    let seconds = (milliseconds.max(0.0) / 1000.0) as u64;
+    match seconds {
+        0..=59 => "under a minute".to_owned(),
+        60..=3_599 => format!("{}m", seconds / 60),
+        3_600..=86_399 => format!("{}h {}m", seconds / 3_600, seconds % 3_600 / 60),
+        _ => format!("{}d {}h", seconds / 86_400, seconds % 86_400 / 3_600),
+    }
+}
+
+fn absolute_time(milliseconds: f64) -> String {
+    let seconds = (milliseconds / 1000.0).floor() as i64;
+    let days = seconds.div_euclid(86_400);
+    let day_seconds = seconds.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    let hour = day_seconds / 3_600;
+    let minute = day_seconds % 3_600 / 60;
+    let second = day_seconds % 60;
+    format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02} UTC")
+}
+
+fn civil_from_days(days: i64) -> (i64, i64, i64) {
+    let shifted = days + 719_468;
+    let era = if shifted >= 0 {
+        shifted
+    } else {
+        shifted - 146_096
+    } / 146_097;
+    let day_of_era = shifted - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let mut year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    year += i64::from(month <= 2);
+    (year, month, day)
 }
 
 #[derive(Clone)]
@@ -5017,7 +7039,7 @@ mod tests {
     use super::*;
     use crate::sidebar::{PreviewScenario, SidebarPreviewFixture};
     use gpui::{Entity, Modifiers, TestAppContext};
-    use zeus_proto::DateMillis;
+    use zeus_proto::{DateMillis, HostEntry, Resumability};
 
     struct InspectorHarness {
         inspector: Entity<WorkbenchInspector>,
@@ -5038,6 +7060,173 @@ mod tests {
         assert!(InspectorTab::Info.index() < InspectorTab::Changes.index());
         assert!(InspectorTab::Changes.index() < InspectorTab::Code.index());
         assert!(InspectorTab::Code.index() < InspectorTab::Artifacts.index());
+    }
+
+    #[test]
+    fn deterministic_briefing_fixture_covers_session_states_and_lineage() {
+        let mut fixture = SidebarPreviewFixture::make(PreviewScenario::Typical);
+        let codex_id = SessionId::new("preview-codex");
+        let cursor_id = SessionId::new("preview-cursor");
+        let shell_id = SessionId::new("preview-shell");
+
+        let codex = fixture
+            .list
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == codex_id)
+            .expect("codex fixture");
+        codex.host = Some("forge".to_owned());
+        codex.remote_persistence =
+            Some(zeus_proto::remote_pty::PersistenceCapability::NonPersistent);
+        codex.worktree_path = Some("/srv/zeus/worktrees/sidebar-craft".to_owned());
+        codex.agent_session_id = Some("agent-session-61".to_owned());
+        codex.transcript_path = Some("/srv/transcripts/session-61.jsonl".to_owned());
+
+        let workbench = fixture
+            .list
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == shell_id)
+            .expect("shell fixture");
+        workbench.parent = Some(codex_id.clone());
+        workbench.workbench = Some(true);
+
+        let question = fixture
+            .list
+            .sessions
+            .iter_mut()
+            .find(|session| session.id.0 == "preview-question")
+            .expect("question fixture");
+        question
+            .needs_input
+            .as_mut()
+            .expect("question detail")
+            .prompt_excerpt = Some("Choose the compact empty state".repeat(20));
+
+        let permission = fixture
+            .list
+            .sessions
+            .iter()
+            .find(|session| session.id.0 == "preview-claude")
+            .expect("permission fixture");
+        assert!(matches!(
+            briefing_state(permission),
+            Some(BriefingState::NeedsInput {
+                kind: "permission",
+                risk: "network",
+                ..
+            })
+        ));
+
+        let question = fixture
+            .list
+            .sessions
+            .iter()
+            .find(|session| session.id.0 == "preview-question")
+            .expect("question fixture");
+        match briefing_state(question).expect("question state") {
+            BriefingState::NeedsInput {
+                kind,
+                risk,
+                options,
+                prompt_excerpt,
+                ..
+            } => {
+                assert_eq!(kind, "question");
+                assert_eq!(risk, "neutral");
+                assert_eq!(options, ["Editorial", "Compact"]);
+                let excerpt = prompt_excerpt.expect("truncated prompt excerpt");
+                assert_eq!(excerpt.chars().count(), 221);
+                assert!(excerpt.ends_with('…'));
+            }
+            state => panic!("unexpected question state: {state:?}"),
+        }
+
+        let sleeping = fixture
+            .list
+            .sessions
+            .iter()
+            .find(|session| session.id.0 == "preview-sleeping")
+            .expect("sleeping fixture");
+        assert!(matches!(
+            briefing_state(sleeping),
+            Some(BriefingState::Sleeping { reason: "Idle", .. })
+        ));
+
+        let idle = fixture
+            .list
+            .sessions
+            .iter()
+            .find(|session| session.id == shell_id)
+            .expect("idle fixture");
+        assert_eq!(plain_session_status(idle), "Idle");
+        assert_eq!(briefing_state(idle), None);
+
+        let mut ended = fixture
+            .list
+            .sessions
+            .iter()
+            .find(|session| session.id == codex_id)
+            .expect("ended base")
+            .clone();
+        ended.status = SessionStatus::Exited(zeus_proto::ExitInfo {
+            reason: zeus_proto::ExitReason::Exited,
+            code: Some(0),
+            signal: None,
+        });
+        ended.resumability = Resumability::Resumable;
+        assert_eq!(
+            briefing_state(&ended),
+            Some(BriefingState::Ended {
+                summary: "Exited · code 0".to_owned(),
+                resumability: "Can be resumed",
+            })
+        );
+
+        let mut store = fixture.into_store();
+        store.set_hosts(vec![HostEntry {
+            id: "forge".to_owned(),
+            name: Some("Forge".to_owned()),
+            ssh: "builder@forge.example".to_owned(),
+            default_cwd: Some("/srv/zeus".to_owned()),
+            node: None,
+        }]);
+        let codex = store.sessions().get(&codex_id).expect("stored codex");
+        let briefing = InfoBriefing::from_store(codex, &store);
+        assert_eq!(
+            briefing.host,
+            Some(BriefingHost {
+                name: "Forge".to_owned(),
+                ssh: "builder@forge.example".to_owned(),
+            })
+        );
+        assert_ne!(codex.worktree_path.as_deref(), Some(codex.cwd.as_str()));
+        assert_eq!(briefing.children.len(), 2);
+        assert_eq!(
+            briefing.workbench.as_ref().map(|terminal| &terminal.id),
+            Some(&shell_id)
+        );
+
+        let cursor = store.sessions().get(&cursor_id).expect("stored child");
+        let child_briefing = InfoBriefing::from_store(cursor, &store);
+        assert_eq!(
+            child_briefing.parent.as_ref().map(|parent| &parent.id),
+            Some(&codex_id)
+        );
+        assert_eq!(child_briefing.sibling_count, 1);
+    }
+
+    #[test]
+    fn timeline_copy_is_absolute_and_deterministic() {
+        assert_eq!(
+            absolute_time(1_750_000_000_000.0),
+            "2025-06-15 15:06:40 UTC"
+        );
+        assert_eq!(
+            relative_time_at(1_750_000_000_000.0, 1_750_007_200_000.0),
+            "2h ago"
+        );
+        assert_eq!(format_duration(7_500_000.0), "2h 5m");
     }
 
     #[test]
@@ -5223,6 +7412,124 @@ mod tests {
         cx.run_until_parked();
     }
 
+    #[gpui::test]
+    fn info_renders_the_briefing_without_pr_content(cx: &mut TestAppContext) {
+        let runtime = Arc::new(StoreRuntime::inert());
+        let mut fixture = SidebarPreviewFixture::make(PreviewScenario::Artifacts);
+        let selected = fixture
+            .selected_session_id
+            .clone()
+            .expect("selected fixture");
+        let related = SessionId::new("preview-cursor");
+        let workbench_id = SessionId::new("preview-shell");
+        let session = fixture
+            .list
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == selected)
+            .expect("selected session");
+        session.host = Some("forge".to_owned());
+        session.remote_persistence =
+            Some(zeus_proto::remote_pty::PersistenceCapability::NonPersistent);
+        session.worktree_path = Some("/srv/zeus/worktrees/repository-cloning".to_owned());
+        session.agent_session_id = Some("agent-session-61".to_owned());
+        session.transcript_path = Some("/srv/transcripts/session-61.jsonl".to_owned());
+        let workbench = fixture
+            .list
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == workbench_id)
+            .expect("workbench session");
+        workbench.parent = Some(selected.clone());
+        workbench.workbench = Some(true);
+        {
+            let mut store = runtime.store.write().expect("session store lock poisoned");
+            store.hydrate(fixture.list);
+            store.set_hosts(vec![HostEntry {
+                id: "forge".to_owned(),
+                name: Some("Forge".to_owned()),
+                ssh: "builder@forge.example".to_owned(),
+                default_cwd: None,
+                node: None,
+            }]);
+            store.select(selected.clone());
+        }
+        let tokio = Arc::new(
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime"),
+        );
+        let inspector_runtime = Arc::clone(&runtime);
+        let (harness, cx) = cx.add_window_view(move |_window, cx| {
+            let inspector = cx.new(|cx| {
+                let mut inspector = WorkbenchInspector::new(inspector_runtime, tokio, cx);
+                inspector.identity_open = true;
+                inspector.state = LoadState::Error("fatal: not a git repository".to_owned());
+                inspector
+            });
+            InspectorHarness { inspector }
+        });
+        cx.run_until_parked();
+
+        for selector in [
+            "INFO_HERO",
+            "INFO_HERO_PLACE",
+            "INFO_LOCATION",
+            "INFO_COPY_CWD",
+            "INFO_COPY_WORKTREE",
+            "INFO_BRANCH_REVIEW",
+            "INFO_REMOTE_PERSISTENCE",
+            "INFO_GIT_SUMMARY",
+            "INFO_TIMELINE",
+            "INFO_LINEAGE",
+            "INFO_RUNTIME",
+            "INFO_ARTIFACTS_JUMP",
+            "INFO_IDENTITY",
+            "INFO_COPY_SESSION_ID",
+            "INFO_COPY_AGENT_ID",
+            "INFO_COPY_TRANSCRIPT",
+        ] {
+            assert!(cx.debug_bounds(selector).is_some(), "missing {selector}");
+        }
+        assert!(
+            cx.debug_bounds("INSPECTOR_PR_OPEN").is_none(),
+            "Info must not render pull-request content"
+        );
+        for (selector, maximum_height) in [
+            ("INFO_HERO", 72.0),
+            ("INFO_COPY_CWD", 32.0),
+            ("INFO_GIT_SUMMARY", 34.0),
+            ("INFO_LINEAGE_preview-cursor", 34.0),
+            ("INFO_COPY_SESSION_ID", 32.0),
+        ] {
+            let bounds = cx
+                .debug_bounds(selector)
+                .unwrap_or_else(|| panic!("missing compact surface {selector}"));
+            assert!(
+                f32::from(bounds.size.height) <= maximum_height,
+                "{selector} exceeded the compact height budget: {} > {maximum_height}",
+                f32::from(bounds.size.height)
+            );
+        }
+
+        let inspector = harness.read_with(cx, |harness, _| harness.inspector.clone());
+        inspector.update(cx, |inspector, cx| {
+            inspector.activate_related_session(related.clone(), cx);
+            inspector.refresh_task = None;
+            inspector.review_task = None;
+        });
+        assert_eq!(
+            runtime
+                .store
+                .read()
+                .expect("session store lock poisoned")
+                .selected_session_id(),
+            Some(&related)
+        );
+        cx.run_until_parked();
+    }
+
     #[test]
     fn artifact_titles_extract_the_useful_destination() {
         let pull_request = SessionArtifact {
@@ -5403,5 +7710,11 @@ mod tests {
             "internal: git is not installed on this host"
         ));
         assert!(!git_is_not_a_repository("ssh connection timed out"));
+        let no_git = LoadState::Error("fatal: not a git repository".to_owned());
+        assert!(matches!(no_git, LoadState::Error(ref error) if git_is_not_a_repository(error)));
+        assert!(
+            !should_show_blocking_git_loading(false, &no_git),
+            "the settled no-Git fixture must remain a calm Info state"
+        );
     }
 }

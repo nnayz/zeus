@@ -13,6 +13,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use serde_json::json;
+use zeus_proto::orchestration::HOSTED_SESSION_POLICY;
 
 use crate::agent::InjectionSpec;
 
@@ -164,6 +165,12 @@ pub fn injection_args_with_cursor(
             argv.push("--mcp-config".into());
             argv.push(mcp.to_string_lossy().into_owned());
         }
+        argv.push("--append-system-prompt".into());
+        argv.push(HOSTED_SESSION_POLICY.into());
+        // Claude's Agent/Task tools create provider-native workers inside the
+        // parent PTY. The injected policy tells the model where to redirect.
+        argv.push("--disallowedTools".into());
+        argv.push("Agent,Task".into());
     }
     if injection.codex_notify {
         argv.push("-c".into());
@@ -191,10 +198,22 @@ pub fn injection_args_with_cursor(
         argv.push(format!("mcp_servers.zeus.args=[{encoded_args}]"));
         // Codex's built-in collaboration `spawn_agent` creates `/root/…`
         // workers inside this PTY. Those never become Zeus sessions, so the
-        // sidebar stays empty. Disable it and leave MCP `spawn_agent` as the
-        // only spawn path while hosted by Zeus.
+        // sidebar stays empty. Disable it and direct delegation to the
+        // canonical Zeus MCP session-creation tool.
         argv.push("-c".into());
         argv.push("features.multi_agent=false".into());
+        argv.push("-c".into());
+        argv.push(format!(
+            "developer_instructions={}",
+            toml_string(HOSTED_SESSION_POLICY)
+        ));
+    }
+    if injection.grok_mcp {
+        // Grok exposes both an append-only rules channel and a hard native
+        // subagent gate, so hosted sessions can enforce both halves.
+        argv.push("--rules".into());
+        argv.push(HOSTED_SESSION_POLICY.into());
+        argv.push("--no-subagents".into());
     }
     if (injection.cursor_mcp || injection.cursor_hooks)
         && let Some(cursor) = cursor
@@ -311,10 +330,17 @@ fn write_opencode_mcp_overlay(
     let (command, args) = mcp_launch_for_session(cli_path, identity);
     let mut argv = vec![command];
     argv.extend(args);
-    let path = session_inject_dir(inject_dir, identity.session_id).join("opencode.json");
+    let session_dir = session_inject_dir(inject_dir, identity.session_id);
+    let policy = session_dir.join("zeus-orchestration.md");
+    write_atomic(&policy, HOSTED_SESSION_POLICY.as_bytes())?;
+    let path = session_dir.join("opencode.json");
     write_atomic(
         &path,
         &serde_json::to_vec_pretty(&json!({
+            "instructions": [policy],
+            "permission": {
+                "task": "deny"
+            },
             "mcp": {
                 "zeus": {
                     "type": "local",
@@ -341,7 +367,7 @@ fn write_gemini_home(
     if let Some(user) = user.as_ref().filter(|path| path.is_dir()) {
         for entry in std::fs::read_dir(user)? {
             let entry = entry?;
-            if entry.file_name() == "settings.json" {
+            if entry.file_name() == "settings.json" || entry.file_name() == "GEMINI.md" {
                 continue;
             }
             let _ = std::os::unix::fs::symlink(entry.path(), dest.join(entry.file_name()));
@@ -360,6 +386,20 @@ fn write_gemini_home(
         "command": command,
         "args": args,
     });
+    let user_context = user
+        .as_ref()
+        .map(|dir| dir.join("GEMINI.md"))
+        .filter(|path| path.is_file())
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .unwrap_or_default();
+    let context = if user_context.trim().is_empty() {
+        format!("# Zeus hosted-session policy\n\n{HOSTED_SESSION_POLICY}\n")
+    } else {
+        format!(
+            "# Zeus hosted-session policy\n\n{HOSTED_SESSION_POLICY}\n\n# User context\n\n{user_context}"
+        )
+    };
+    write_atomic(&dest.join("GEMINI.md"), context.as_bytes())?;
     write_atomic(
         &dest.join("settings.json"),
         &serde_json::to_vec_pretty(&settings)?,
@@ -419,6 +459,15 @@ pub fn write_cursor_plugin(
                     }
                 }
             }))?,
+        )?;
+
+        std::fs::create_dir_all(staging.join("rules"))?;
+        write_atomic(
+            &staging.join("rules/zeus-orchestration.mdc"),
+            format!(
+                "---\ndescription: Route delegated work to visible Zeus sessions\nalwaysApply: true\n---\n\n{HOSTED_SESSION_POLICY}\n"
+            )
+            .as_bytes(),
         )?;
     }
 
@@ -580,7 +629,7 @@ mod tests {
     }
 
     #[test]
-    fn injection_args_cover_all_four_mechanisms() {
+    fn injection_args_include_provider_policy_and_native_spawn_guards() {
         let temp = tempfile::tempdir().expect("temp");
         let cli = temp.path().join("zeus");
         write_claude_hooks_file(temp.path()).expect("hooks");
@@ -596,6 +645,16 @@ mod tests {
         assert!(args[1].ends_with("claude-hooks.json"));
         assert_eq!(args[2], "--mcp-config");
         assert!(args[3].ends_with("claude-mcp.json"));
+        assert!(
+            args.windows(2).any(|pair| pair[0] == "--append-system-prompt"
+                && pair[1] == HOSTED_SESSION_POLICY),
+            "{args:?}"
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "--disallowedTools" && pair[1] == "Agent,Task"),
+            "{args:?}"
+        );
 
         let codex = InjectionSpec {
             codex_notify: true,
@@ -614,10 +673,27 @@ mod tests {
             args.iter().any(|arg| arg == "features.multi_agent=false"),
             "{args:?}"
         );
+        assert!(
+            args.iter()
+                .any(|arg| arg.starts_with("developer_instructions=")),
+            "{args:?}"
+        );
+
+        let grok = InjectionSpec {
+            grok_mcp: true,
+            ..Default::default()
+        };
+        let args = injection_args(&grok, temp.path(), &cli);
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "--rules" && pair[1] == HOSTED_SESSION_POLICY),
+            "{args:?}"
+        );
+        assert!(args.iter().any(|arg| arg == "--no-subagents"));
     }
 
     #[test]
-    fn codex_mcp_bakes_session_env_so_spawn_agent_nests_in_zeus() {
+    fn codex_mcp_bakes_session_env_so_created_sessions_nest_in_zeus() {
         let temp = tempfile::tempdir().expect("temp");
         let cli = temp.path().join("zeus");
         std::fs::write(&cli, b"#!/bin/sh\n").expect("cli");
@@ -664,6 +740,8 @@ mod tests {
         std::fs::write(home.join(".gemini/settings.json"), br#"{"theme":"dark"}"#)
             .expect("settings");
         std::fs::write(home.join(".gemini/oauth.json"), b"{}").expect("oauth");
+        std::fs::write(home.join(".gemini/GEMINI.md"), b"keep user context")
+            .expect("gemini context");
         let cli = temp.path().join("zeus");
         std::fs::write(&cli, b"#!/bin/sh\n").expect("cli");
         let socket = temp.path().join("d.sock");
@@ -709,6 +787,14 @@ mod tests {
                 .expect("json");
         assert_eq!(opencode_json["mcp"]["zeus"]["enabled"], true);
         assert_eq!(opencode_json["mcp"]["zeus"]["command"][0], "/usr/bin/env");
+        assert_eq!(opencode_json["permission"]["task"], "deny");
+        let opencode_policy = opencode_json["instructions"][0]
+            .as_str()
+            .expect("policy path");
+        assert_eq!(
+            std::fs::read_to_string(opencode_policy).expect("policy"),
+            HOSTED_SESSION_POLICY
+        );
 
         let gemini = env
             .iter()
@@ -725,6 +811,10 @@ mod tests {
             Path::new(&gemini).join("oauth.json").exists(),
             "user auth files are linked into the session home"
         );
+        let gemini_context =
+            std::fs::read_to_string(Path::new(&gemini).join("GEMINI.md")).expect("context");
+        assert!(gemini_context.contains(HOSTED_SESSION_POLICY));
+        assert!(gemini_context.contains("keep user context"));
 
         let claude = injection_args_with_cursor(&spec, temp.path(), &cli, Some(identity));
         let config = claude
@@ -796,6 +886,10 @@ mod tests {
             mcp["mcpServers"]["zeus"]["env"]["ZEUS_SOCKET"],
             socket.to_string_lossy().as_ref()
         );
+        let rule = std::fs::read_to_string(plugin.join("rules/zeus-orchestration.mdc"))
+            .expect("policy rule");
+        assert!(rule.contains("alwaysApply: true"));
+        assert!(rule.contains(HOSTED_SESSION_POLICY));
 
         let hooks: serde_json::Value =
             serde_json::from_slice(&std::fs::read(plugin.join("hooks/hooks.json")).expect("hooks"))
@@ -834,6 +928,7 @@ mod tests {
         let plugin = Path::new(&args[1]);
         assert!(plugin.join("mcp.json").is_file());
         assert!(plugin.join("hooks/hooks.json").is_file());
+        assert!(plugin.join("rules/zeus-orchestration.mdc").is_file());
 
         let hooks_only = InjectionSpec {
             cursor_mcp: false,
@@ -852,6 +947,10 @@ mod tests {
         assert!(
             !plugin.join("mcp.json").exists(),
             "disabled mcp.json must not survive a rewrite"
+        );
+        assert!(
+            !plugin.join("rules/zeus-orchestration.mdc").exists(),
+            "disabled MCP policy rule must not survive a rewrite"
         );
         assert!(plugin.join("hooks/hooks.json").is_file());
     }

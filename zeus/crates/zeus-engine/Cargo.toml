@@ -1,6 +1,6 @@
 [package]
 name = "zeus-engine"
-version = "0.1.0"
+version = "0.2.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 alacritty_terminal.workspace = true
 base64.workspace = true
+image = { workspace = true, features = ["jpeg"] }
 zeus-proto.workspace = true
 zeus-pty.workspace = true
 zeus-terminal-state.workspace = true
@@ -22,6 +23,16 @@ sha2.workspace = true
 libc = "0.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+# scap's native stack buys an in-process ScreenCaptureKit path with no
+# Playwright, Node, or shell screenshot helper. Keep it out of every remote
+# and terminal crate: local Engine capture is its only purpose.
+scap = "=0.1.0-beta.1"
+cidre = { version = "=0.10.1", default-features = false, features = [
+    "async",
+    "macos_13_1",
+    "sc",
+] }
+futures.workspace = true
 objc2 = "=0.6.4"
 objc2-app-kit = { version = "=0.3.2", default-features = false, features = [
     "NSAlert",

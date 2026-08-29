@@ -224,6 +224,20 @@ fn method_name_set_is_complete() {
         Method::WORKTREE_LIST,
         Method::WORKTREE_REMOVE,
         Method::WORKTREE_OVERVIEW,
+        Method::GIT_WORKSPACE,
+        Method::GIT_STAGE,
+        Method::GIT_UNSTAGE,
+        Method::GIT_DISCARD,
+        Method::GIT_APPLY_PATCH,
+        Method::GIT_COMMIT,
+        Method::GIT_LIST_REFS,
+        Method::GIT_FETCH,
+        Method::GIT_COMPARE,
+        Method::GIT_BRANCH_CREATE,
+        Method::GIT_CHECKOUT_PLAN,
+        Method::GIT_CHECKOUT,
+        Method::GIT_PR_RESOLVE,
+        Method::GIT_PR_OPEN,
         Method::PROJECT_ADD,
         Method::CLIENT_SET_ACTIVE,
         Method::GOVERNOR_CONFIGURE,
@@ -232,12 +246,13 @@ fn method_name_set_is_complete() {
         Method::EVENTS_WAIT,
         Method::HOOK_REPORT,
         Method::TEST_RUN,
+        Method::SCREENSHOT_CAPTURE,
         Method::STATE_SNAPSHOT,
         Method::DAEMON_PREPARE_SHUTDOWN,
         Method::DAEMON_SHUTDOWN_IF_IDLE,
         Method::DAEMON_SHUTDOWN,
     ];
-    assert_eq!(methods.len(), 37);
+    assert_eq!(methods.len(), 52);
     assert_eq!(methods[0], "hello");
     assert_eq!(methods.last().copied(), Some("daemon.shutdown"));
 }
@@ -267,6 +282,47 @@ fn session_read_diff_matches_swift_data_and_field_names() {
     assert_eq!(encoded["repoRoot"], json!("/srv/app"));
     assert_eq!(encoded["baseRef"], json!("origin/main"));
     typed_round_trip(&result);
+}
+
+#[test]
+fn git_workspace_types_round_trip() {
+    use zeus_proto::{
+        GitCheckoutDisposition, GitCheckoutMode, GitCheckoutParams, GitPatchMutation,
+        GitPatchParams, GitReviewTarget, GitWorkspaceParams,
+    };
+
+    let params = GitWorkspaceParams {
+        session_id: SessionId::new("s_review"),
+        target: Some(GitReviewTarget::Branch {
+            ref_name: "origin/main".into(),
+        }),
+    };
+    let encoded = serde_json::to_value(&params).unwrap();
+    assert_eq!(encoded["sessionID"], json!("s_review"));
+    assert_eq!(encoded["target"]["kind"], json!("branch"));
+    assert_eq!(encoded["target"]["refName"], json!("origin/main"));
+    typed_round_trip(&params);
+
+    let checkout = GitCheckoutParams {
+        session_id: SessionId::new("s_review"),
+        ref_name: "feature".into(),
+        mode: GitCheckoutMode::Worktree,
+    };
+    assert_eq!(
+        serde_json::to_value(&checkout).unwrap()["mode"],
+        json!("worktree")
+    );
+    typed_round_trip(&checkout);
+
+    let patch = GitPatchParams {
+        session_id: SessionId::new("s_review"),
+        patch: b"diff --git a/a b/a\n".to_vec(),
+        mutation: GitPatchMutation::Stage,
+    };
+    typed_round_trip(&patch);
+
+    let blocked = GitCheckoutDisposition::Blocked;
+    typed_round_trip(&blocked);
 }
 
 #[test]

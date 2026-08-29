@@ -7,6 +7,7 @@ pub mod hosts;
 pub mod methods;
 pub mod model;
 pub mod node;
+pub mod orchestration;
 pub mod paths;
 pub mod remote_pty;
 

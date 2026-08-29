@@ -6,6 +6,9 @@ use std::process;
 use std::time::Duration;
 
 use serde_json::{Map, Value, json};
+use zeus_proto::orchestration::{
+    CREATE_ZEUS_SESSION_TOOL, canonical_tool_name, create_session_tool_definition, mcp_instructions,
+};
 use zeus_proto::{
     AgentKind, EventsSubscribeParams, EventsWaitParams, Method, SendTextParams, SessionId,
     SessionIdParams, SessionRecord, SessionSpawnParams, TestRunParams, WorktreeCreateParams,
@@ -23,13 +26,14 @@ pub fn tools_json() -> Value {
 }
 
 pub fn call(tool: &str, args: &Value) -> Result<Value, CliError> {
-    match tool {
-        "spawn_agent" => spawn_agent(args),
+    match canonical_tool_name(tool) {
+        CREATE_ZEUS_SESSION_TOOL => spawn_agent(args),
         "list_agents" => list_agents(),
         "get_status" => get_status(args),
         "send_prompt" => send_prompt(args),
         "wait_for_agent" => wait_for_agent(args),
         "read_output" => read_output(args),
+        "screenshot" => screenshot(args),
         "get_artifacts" => get_artifacts(args),
         "create_worktree" => create_worktree(args),
         "list_worktrees" => list_worktrees(args),
@@ -94,7 +98,10 @@ fn handle_message(message: Value) -> Option<Value> {
         "tools/list" => id.map(|id| success(id, tools_json())),
         "tools/call" => id.map(|id| {
             let Some(name) = params.get("name").and_then(Value::as_str) else {
-                return success(id, tool_content(Err("tools/call missing 'name'".into())));
+                return success(
+                    id,
+                    tool_content(None, Err("tools/call missing 'name'".into())),
+                );
             };
             let arguments = params
                 .get("arguments")
@@ -102,7 +109,10 @@ fn handle_message(message: Value) -> Option<Value> {
                 .unwrap_or_else(|| json!({}));
             success(
                 id,
-                tool_content(call(name, &arguments).map_err(|error| error.to_string())),
+                tool_content(
+                    Some(name),
+                    call(name, &arguments).map_err(|error| error.to_string()),
+                ),
             )
         }),
         _ if id.is_none() => None,
@@ -119,34 +129,11 @@ fn initialize(params: &Value) -> Value {
         .get("protocolVersion")
         .and_then(Value::as_str)
         .unwrap_or("2025-06-18");
-    let browser = if env::var_os("ZEUS_TEST_RUN_AVAILABLE").is_some() {
-        " To test a web feature, use test_run with a preview URL from get_artifacts."
-    } else {
-        ""
-    };
     json!({
         "protocolVersion": version,
         "capabilities": {"tools":{}},
         "serverInfo": {"name":"zeus","version":env!("CARGO_PKG_VERSION")},
-        "instructions": format!(
-            "This session is running INSIDE Zeus, a macOS orchestrator for coding agents. \
-             These tools control it. Use them proactively whenever the user asks to \
-             open/start/spawn/close another agent, session, tab, or terminal (Claude Code, \
-             Codex, Cursor, Gemini, or a shell), to check what other sessions are doing, to \
-             talk to another session, or to parallelize work across git worktrees — no \
-             extra confirmation of intent needed.\n\nNever use the host agent's built-in \
-             collaboration spawn_agent / subagents: those workers stay inside this terminal \
-             and never appear in the Zeus sidebar. Always call this MCP spawn_agent so the \
-             child is a real Zeus tab. Unless the user explicitly requests multiple agents, \
-             make exactly one spawn_agent call. When the user does not name an agent kind, omit \
-             kind so Zeus uses the configured default; never probe or fan out across kinds.\n\n\
-             Typical orchestration flow: spawn_agent \
-             (optionally worktree:true and an initial prompt) → wait_for_agent(until:\"done\") \
-             → read_output → send_prompt for follow-ups → release_agent when finished. \
-             get_artifacts returns PR/Linear/preview URLs and listening ports a session has \
-             produced; PR entries include live GitHub status (state, review decision, checks, \
-             comment counts, +/- lines).{browser}"
-        )
+        "instructions": mcp_instructions(env::var_os("ZEUS_TEST_RUN_AVAILABLE").is_some()),
     })
 }
 
@@ -154,40 +141,45 @@ fn success(id: Value, result: Value) -> Value {
     json!({"jsonrpc":"2.0","id":id,"result":result})
 }
 
-fn tool_content(result: Result<Value, String>) -> Value {
-    let (value, is_error) = match result {
-        Ok(value) => (value, false),
-        Err(message) => (Value::String(message), true),
+fn tool_content(tool: Option<&str>, result: Result<Value, String>) -> Value {
+    let mut value = match result {
+        Ok(value) => value,
+        Err(message) => {
+            return json!({"content":[{"type":"text","text":message}],"isError":true});
+        }
     };
+    if tool == Some("screenshot")
+        && let Some(object) = value.as_object_mut()
+        && let Some(data) = object.remove("data")
+    {
+        let Some(mime_type) = object.remove("mimeType") else {
+            return json!({"content":[{"type":"text","text":"screenshot result omitted mimeType"}],"isError":true});
+        };
+        if !data.is_string() || !mime_type.is_string() {
+            return json!({"content":[{"type":"text","text":"screenshot result contained invalid image content"}],"isError":true});
+        }
+        let text = serde_json::to_string(&value).unwrap_or_else(|_| "null".into());
+        return json!({
+            "content":[
+                {"type":"text","text":text},
+                {"type":"image","mimeType":mime_type,"data":data}
+            ],
+            "isError":false
+        });
+    }
     let text = value
         .as_str()
         .map(str::to_owned)
         .unwrap_or_else(|| serde_json::to_string(&value).unwrap_or_else(|_| "null".into()));
-    json!({"content":[{"type":"text","text":text}],"isError":is_error})
+    json!({"content":[{"type":"text","text":text}],"isError":false})
 }
 
 fn tool_definitions() -> Vec<Value> {
     let kinds = catalog::spawnable_kind_labels();
     let names = catalog::spawnable_display_names();
+    let spawn = create_session_tool_definition(&kinds, &names);
     let mut tools = vec![
-        tool(
-            "spawn_agent",
-            &format!(
-                "Open ONE new Zeus session tab nested under this one, running {names} — locally or on a configured remote host. This is the ONLY way spawned agents appear in the Zeus sidebar and terminal. Do NOT use built-in collaboration/subagent spawn — those stay hidden inside this PTY. USE THIS whenever the user asks to open/start/spawn/launch another agent, session, or terminal. Unless the user explicitly requests multiple agents, call this exactly once. If the user does not name a kind, omit kind and Zeus will use the configured default; never guess, probe, or fan out across agent kinds."
-            ),
-            json!({
-                "type":"object",
-                "properties":{
-                    "kind":{"type":"string","enum":kinds,"description":"Which agent to run. Omit to use Zeus's configured default agent."},
-                    "cwd":{"type":"string","description":"Working directory."},
-                    "host":{"type":"string","description":"Host id from hosts.json."},
-                    "worktree":{"type":"boolean","description":"Create a fresh git worktree off cwd and run there. Local only."},
-                    "prompt":{"type":"string","description":"Initial prompt to send once the agent is ready."},
-                    "name":{"type":"string","description":"Session title."}
-                },
-                "required":["cwd"]
-            }),
-        ),
+        tool(&spawn.name, &spawn.description, spawn.input_schema),
         tool(
             "list_agents",
             "List all active agent sessions with id, kind, title, status, parent, and cwd.",
@@ -212,6 +204,18 @@ fn tool_definitions() -> Vec<Value> {
             "read_output",
             "Read an agent session's output.",
             json!({"type":"object","properties":{"session_id":{"type":"string"},"mode":{"type":"string","enum":["screen","tail"]},"lines":{"type":"number","default":50}},"required":["session_id"]}),
+        ),
+        tool(
+            "screenshot",
+            "Capture a screenshot of a local window (default: the Zeus window hosting this session). USE THIS instead of writing a Playwright script, calling `screencapture`, or using `browser` with `action: \"screenshot\"`. Returns the image directly. For terminal text use `read_output`. For a page inside the session Playwright browser, use `browser`.",
+            json!({
+                "type":"object",
+                "properties":{
+                    "window":{"type":"string","description":"Substring match on window title. Omit to capture the Zeus window."},
+                    "display":{"type":"integer","description":"Capture this display id. Do not use unless the user asked for a full display."},
+                    "list":{"type":"boolean","description":"If true, return capturable windows/displays and take no image."}
+                }
+            }),
         ),
         tool(
             "create_worktree",
@@ -696,6 +700,12 @@ fn browser(args: &Value) -> Result<Value, CliError> {
     })
 }
 
+fn screenshot(args: &Value) -> Result<Value, CliError> {
+    conn::with_conn(Duration::from_secs(20), |conn| {
+        conn.request_value(Method::SCREENSHOT_CAPTURE, args, Duration::from_secs(20))
+    })
+}
+
 fn test_run(args: &Value) -> Result<Value, CliError> {
     let url = require_string(args, "url")?;
     let steps = args
@@ -1040,9 +1050,10 @@ mod tests {
             .filter_map(|tool| tool["name"].as_str())
             .collect();
         for expected in [
-            "spawn_agent",
+            "create_zeus_session",
             "get_artifacts",
             "browser",
+            "screenshot",
             "whoami",
             "report_to_parent",
             "summarize_children",
@@ -1052,21 +1063,95 @@ mod tests {
                 "{expected} missing from {names:?}"
             );
         }
+        assert!(!names.contains(&"spawn_agent"));
         assert!(!names.contains(&"test_run"));
     }
 
     #[test]
-    fn spawn_agent_omits_kind_to_use_the_configured_default() {
+    fn initialize_uses_the_shared_orchestration_instructions() {
+        let initialized = initialize(&json!({ "protocolVersion": "2025-06-18" }));
+        assert_eq!(
+            initialized["instructions"],
+            mcp_instructions(env::var_os("ZEUS_TEST_RUN_AVAILABLE").is_some())
+        );
+    }
+
+    #[test]
+    fn screenshot_has_a_small_object_schema_and_returns_image_content() {
+        let tools = tool_definitions();
+        let screenshot = tools
+            .iter()
+            .find(|tool| tool["name"] == "screenshot")
+            .expect("screenshot tool");
+        assert_eq!(screenshot["inputSchema"]["type"], "object");
+        assert_eq!(
+            screenshot["inputSchema"]["properties"]
+                .as_object()
+                .expect("properties")
+                .len(),
+            3
+        );
+
+        let content = tool_content(
+            Some("screenshot"),
+            Ok(json!({
+                "target":"zeus",
+                "width":2,
+                "height":1,
+                "mimeType":"image/jpeg",
+                "data":"/9j/2Q=="
+            })),
+        );
+        assert_eq!(content["isError"], false);
+        assert_eq!(content["content"][1]["type"], "image");
+        assert_eq!(content["content"][1]["mimeType"], "image/jpeg");
+        assert_eq!(content["content"][1]["data"], "/9j/2Q==");
+        assert!(
+            !content["content"][0]["text"]
+                .as_str()
+                .expect("metadata")
+                .contains("/9j/2Q==")
+        );
+
+        let listed = tool_content(
+            Some("screenshot"),
+            Ok(json!({"targets":[{"id":11,"title":"Zeus","kind":"window"}]})),
+        );
+        assert_eq!(listed["content"].as_array().expect("content").len(), 1);
+        assert_eq!(listed["content"][0]["type"], "text");
+
+        let denied = tool_content(
+            Some("screenshot"),
+            Err("screen_recording_denied: enable Screen Recording for Zeus".into()),
+        );
+        assert_eq!(denied["isError"], true);
+        assert!(
+            denied["content"][0]["text"]
+                .as_str()
+                .expect("error")
+                .contains("screen_recording_denied")
+        );
+    }
+
+    #[test]
+    fn create_zeus_session_omits_kind_and_keeps_the_legacy_alias_callable() {
         let tools = tool_definitions();
         let spawn = tools
             .iter()
-            .find(|tool| tool["name"] == "spawn_agent")
-            .expect("spawn_agent");
+            .find(|tool| tool["name"] == "create_zeus_session")
+            .expect("create_zeus_session");
         let required = spawn["inputSchema"]["required"]
             .as_array()
             .expect("required");
         assert!(!required.iter().any(|field| field == "kind"));
         assert!(required.iter().any(|field| field == "cwd"));
+        assert_eq!(canonical_tool_name("spawn_agent"), "create_zeus_session");
+        let legacy_error = call("spawn_agent", &json!({ "kind": "not-an-agent" }))
+            .expect_err("invalid legacy spawn call");
+        assert!(
+            legacy_error.to_string().contains("invalid kind"),
+            "the compatibility alias must reach session creation: {legacy_error}"
+        );
 
         assert_eq!(
             default_agent_from_preferences(&json!({"defaultAgent": "codex"})).as_deref(),

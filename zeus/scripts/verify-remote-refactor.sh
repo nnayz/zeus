@@ -75,7 +75,7 @@ check "resume relaunches a session whose Agent died" \
     grep -q 'Evicting the corpse' crates/zeus-engine/src/control.rs
 
 check "toolchain stays on the version main ships" \
-    grep -q 'channel = "1.97.1"' rust-toolchain.toml
+    grep -q 'channel = "1.98.0"' rust-toolchain.toml
 
 # Extracting the terminal crate forked before checkpoint v2 existed.
 check "checkpoints still persist scrollback" \

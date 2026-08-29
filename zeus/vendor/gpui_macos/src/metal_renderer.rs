@@ -623,7 +623,7 @@ impl MetalRenderer {
                     );
 
                     // Convert BGRA to RGBA (swap B and R channels)
-                    for chunk in pixels.chunks_exact_mut(4) {
+                    for chunk in pixels.as_chunks_mut::<4>().0 {
                         chunk.swap(0, 2);
                     }
 
@@ -735,7 +735,7 @@ impl MetalRenderer {
                     );
 
                     // Convert BGRA to RGBA (swap B and R channels)
-                    for chunk in pixels.chunks_exact_mut(4) {
+                    for chunk in pixels.as_chunks_mut::<4>().0 {
                         chunk.swap(0, 2);
                     }
 

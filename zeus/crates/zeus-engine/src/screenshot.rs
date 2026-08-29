@@ -510,7 +510,7 @@ fn encode_bgra_as_jpeg(frame: RawFrame) -> Result<EncodedImage, ScreenshotError>
     }
 
     let mut rgb = Vec::with_capacity(expected / 4 * 3);
-    for pixel in frame.bgra.chunks_exact(4) {
+    for pixel in frame.bgra.as_chunks::<4>().0 {
         rgb.extend_from_slice(&[pixel[2], pixel[1], pixel[0]]);
     }
     let image = image::RgbImage::from_raw(frame.width, frame.height, rgb)

@@ -520,7 +520,7 @@ impl MacTextSystemState {
 
             if params.is_emoji {
                 // Convert from RGBA with premultiplied alpha to BGRA with straight alpha.
-                for pixel in bytes.chunks_exact_mut(4) {
+                for pixel in bytes.as_chunks_mut::<4>().0 {
                     swap_rgba_pa_to_bgra(pixel);
                 }
             }

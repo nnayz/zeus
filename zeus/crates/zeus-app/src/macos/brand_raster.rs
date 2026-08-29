@@ -169,8 +169,10 @@ fn rasterize(kind: BrandMarkKind, size: f32, inset: f32, color: Rgba) -> Option<
         let input_row = &bitmap_bytes[output_y * bytes_per_row..][..pixels * 4];
         let output_row = &mut bgra[output_y * pixels * 4..][..pixels * 4];
         for (source, destination) in input_row
-            .chunks_exact(4)
-            .zip(output_row.chunks_exact_mut(4))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(output_row.as_chunks_mut::<4>().0.iter_mut())
         {
             let alpha = ((f32::from(source[3]) * color_alpha).round()) as u8;
             destination.copy_from_slice(&[blue, green, red, alpha]);

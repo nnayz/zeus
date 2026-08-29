@@ -4,24 +4,25 @@
   --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
     "Segoe UI", sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  --color-background: #0b0e14;
-  --color-surface: #11151c;
-  --color-surface-raised: #151a21;
-  --color-border: #1f2430;
-  --color-text: #bfbdb6;
-  --color-muted: #8a9199;
-  --color-link: #59c2ff;
-  --color-accent: #e6b450;
+  --color-background: #080a0f;
+  --color-surface: #111620;
+  --color-surface-raised: #18202b;
+  --color-border: #374151;
+  --color-text: #f3f4f6;
+  --color-muted: #b4bdc9;
+  --color-link: #7dd3fc;
+  --color-accent: #f8c766;
 }
 
 @layer base {
   html {
     color-scheme: dark;
     font-family: var(--font-sans);
-    font-size: 14px;
-    line-height: 24px;
+    font-size: 16px;
+    line-height: 26px;
     font-weight: 400;
     color: var(--color-text);
+    text-rendering: optimizeLegibility;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
   }
@@ -48,22 +49,50 @@
 
   ::selection {
     color: var(--color-text);
-    background: #273747;
+    background: #28425b;
   }
 
   code {
     font-family: var(--font-mono);
-    font-size: 13px;
+    font-size: 14px;
   }
 }
 
 .markdown-content h1,
 .markdown-content h2 {
-  font-weight: 500;
+  color: var(--color-text);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  text-wrap: balance;
+}
+
+.markdown-content h1 {
+  font-size: 28px;
+  line-height: 36px;
 }
 
 .markdown-content h2 {
-  padding-top: 16px;
+  padding-top: 20px;
+  font-size: 20px;
+  line-height: 28px;
+}
+
+.markdown-content p,
+.markdown-content li {
+  text-wrap: pretty;
+}
+
+.markdown-content strong {
+  color: var(--color-text);
+  font-weight: 600;
+}
+
+.markdown-content a,
+footer a {
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, var(--color-link) 55%, transparent);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
 }
 
 .markdown-content ol,
@@ -96,8 +125,8 @@
   border-radius: 8px;
   padding: 16px;
   font-family: var(--font-mono);
-  font-size: 13px;
-  line-height: 20px;
+  font-size: 14px;
+  line-height: 22px;
   overflow-x: auto;
 }
 
@@ -124,7 +153,7 @@
   border-radius: 6px;
   border: 1px solid var(--color-border);
   background: var(--color-surface-raised);
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 500;
   color: var(--color-text);
   cursor: pointer;
@@ -132,8 +161,8 @@
 }
 
 .command button:hover {
-  border-color: #3d424d;
-  background: #1b2029;
+  border-color: #596579;
+  background: #222b38;
 }
 
 .install-note {
@@ -144,7 +173,7 @@
 
 .install-note strong {
   color: var(--color-text);
-  font-weight: 500;
+  font-weight: 600;
 }
 
 .install-note p {
@@ -167,8 +196,8 @@
 .install-shot figcaption {
   padding-top: 8px;
   color: var(--color-muted);
-  font-size: 12px;
-  line-height: 18px;
+  font-size: 13px;
+  line-height: 20px;
 }
 
 .release-row {
@@ -190,8 +219,8 @@
 
 .release-row__date {
   color: var(--color-muted);
-  font-size: 13px;
-  line-height: 20px;
+  font-size: 14px;
+  line-height: 22px;
   white-space: nowrap;
 }
 
@@ -204,12 +233,12 @@
   background: var(--color-surface);
   color: var(--color-accent);
   font-family: var(--font-mono);
-  font-size: 12px;
-  line-height: 18px;
+  font-size: 13px;
+  line-height: 20px;
 }
 
 .release-row__version:hover {
-  border-color: #3d424d;
+  border-color: #596579;
   background: var(--color-surface-raised);
   text-decoration: none;
 }
@@ -251,7 +280,6 @@
   background: transparent;
   color: var(--color-muted);
   font-family: var(--font-mono);
-  font-size: 11px;
-  line-height: 18px;
-  opacity: 0.7;
+  font-size: 12px;
+  line-height: 20px;
 }

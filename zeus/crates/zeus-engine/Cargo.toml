@@ -27,7 +27,7 @@ libc = "0.2"
 # Playwright, Node, or shell screenshot helper. Keep it out of every remote
 # and terminal crate: local Engine capture is its only purpose.
 scap = "=0.1.0-beta.1"
-cidre = { version = "=0.10.1", default-features = false, features = [
+cidre = { version = "=0.22.1", default-features = false, features = [
     "async",
     "macos_13_1",
     "sc",

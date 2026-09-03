@@ -16,6 +16,19 @@ export const SECURITY_EMAIL = 'hi@nasrul.info';
 
 export const releases: Release[] = [
   {
+    version: '0.3.0',
+    date: '2026-09-03',
+    summary: [
+      'Review is now a complete Git workspace with repository and branch context, pull-request navigation, and staged and working-tree actions. The Code inspector adds a contextual Changed / All files tree for browsing and opening the selected checkout without leaving Zeus.',
+      'The redesigned Info panel turns every session into a compact operational briefing, while startup now restores the active workspace and offers a clearer workspace selector for moving between projects.',
+      'Hosted agents can request native screenshots and delegate through Zeus more reliably. Zeus Dark and Zeus Dark High Contrast add focused monochrome themes, with terminal color handling made consistent across local and remote sessions.'
+    ],
+    unsigned: true,
+    github: `${GITHUB}/releases/tag/v0.3.0`,
+    dmg: `${GITHUB}/releases/download/v0.3.0/zeus-0.3.0-universal.dmg`,
+    zip: `${GITHUB}/releases/download/v0.3.0/zeus-0.3.0-universal.zip`
+  },
+  {
     version: '0.2.0',
     date: '2026-08-24',
     summary: [

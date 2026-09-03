@@ -1,6 +1,6 @@
 {
   "name": "zeus-test-sidecar",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "Playwright browser pool driven by the Zeus daemon over a unix socket.",
   "type": "commonjs",

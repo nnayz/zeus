@@ -17,8 +17,8 @@ stop them, and an Engine restart can recover their conversations.
 
 ## Get Zeus
 
-Zeus requires macOS 15 or later. Version 0.2.0 is available only as a universal
-DMG from the [GitHub release](https://github.com/nnayz/zeus/releases/tag/v0.2.0).
+Zeus requires macOS 15 or later. Version 0.3.0 is available as a universal DMG
+from the [GitHub release](https://github.com/nnayz/zeus/releases/tag/v0.3.0).
 Download it, move Zeus into Applications, then right-click the app and choose
 **Open**. The package supports both Apple silicon and Intel Macs.
 
@@ -26,7 +26,7 @@ The [illustrated macOS install guide](https://nnayz.github.io/zeus/install/)
 shows the complete one-time Gatekeeper flow, including the **Privacy &
 Security → Open Anyway** fallback.
 
-Version 0.2.0 is ad-hoc signed. It is not Developer ID signed or notarized, so
+Version 0.3.0 is ad-hoc signed. It is not Developer ID signed or notarized, so
 Gatekeeper may reject a normal double-click. It cannot be installed through
 Homebrew, and the built-in updater will not accept it. Read the
 [security notes](SECURITY.md) before installing.

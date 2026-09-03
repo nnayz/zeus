@@ -512,14 +512,16 @@ impl WorkbenchInspector {
     }
 
     fn reconcile_diff_polling(&mut self, cx: &mut Context<Self>) {
-        let should_poll = self.visible
+        let should_poll = !self.preview_account
+            && self.visible
             && matches!(
                 self.selected_tab,
                 InspectorTab::Changes | InspectorTab::Code
             );
         if !should_poll {
-            // Dropping a GPUI Task cancels its timer/future. Info and Artifacts
-            // therefore perform no periodic Git work and have no idle wakeup.
+            // Dropping a GPUI Task cancels its timer/future. Info, Artifacts,
+            // and deterministic preview fixtures therefore perform no
+            // periodic Git work and have no idle wakeup.
             self.poll_task = None;
             return;
         }
@@ -7316,6 +7318,39 @@ mod tests {
             true,
             &LoadState::Error("old project".to_owned())
         ));
+    }
+
+    #[gpui::test]
+    fn preview_changes_tab_does_not_install_a_periodic_poll(cx: &mut TestAppContext) {
+        let runtime = Arc::new(StoreRuntime::inert());
+        let fixture = SidebarPreviewFixture::make(PreviewScenario::Typical);
+        {
+            let mut store = runtime.store.write().expect("session store lock poisoned");
+            store.hydrate(fixture.list);
+            if let Some(id) = fixture.selected_session_id {
+                store.select(id);
+            }
+        }
+        let tokio = Arc::new(
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime"),
+        );
+        let inspector_runtime = Arc::clone(&runtime);
+        let (harness, cx) = cx.add_window_view(move |_window, cx| {
+            let inspector = cx.new(|cx| {
+                let mut inspector = WorkbenchInspector::new(inspector_runtime, tokio, cx);
+                inspector.set_preview_account(true);
+                inspector.select_tab(InspectorTab::Changes, cx);
+                inspector.set_visible(true, cx);
+                inspector
+            });
+            InspectorHarness { inspector }
+        });
+        let inspector = harness.read_with(cx, |harness, _| harness.inspector.clone());
+
+        assert!(inspector.read_with(cx, |inspector, _| inspector.poll_task.is_none()));
     }
 
     /// The Info tab renders the Git summary, so it must be refreshed when it

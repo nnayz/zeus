@@ -149,6 +149,111 @@ fn hydrate_restores_the_last_selected_session_instead_of_the_first() {
 
     assert_eq!(store.selected_session_id(), Some(&id("two")));
     assert!(store.terminal_residency().contains(&id("two")));
+    assert_eq!(store.active_workspace_id(), Some(&pid("a")));
+}
+
+#[test]
+fn hydrate_restores_the_workspace_independently_of_the_last_session() {
+    let prefs = Prefs {
+        last_active_workspace: Some(pid("b")),
+        last_selected_session: Some(id("from-a")),
+        ..Prefs::default()
+    };
+    let (store, _) = hydrated(
+        vec![session("from-a", "a", 1.0), session("from-b", "b", 2.0)],
+        vec![project("a", "Alpha"), project("b", "Beta")],
+        prefs,
+    );
+
+    assert_eq!(store.active_workspace_id(), Some(&pid("b")));
+    assert_eq!(store.selected_session_id(), Some(&id("from-b")));
+    assert_eq!(store.preferences().last_active_workspace, Some(pid("b")));
+}
+
+#[test]
+fn an_empty_workspace_is_restored_without_selecting_another_workspaces_session() {
+    let prefs = Prefs {
+        last_active_workspace: Some(pid("empty")),
+        last_selected_session: Some(id("from-a")),
+        ..Prefs::default()
+    };
+    let (store, _) = hydrated(
+        vec![session("from-a", "a", 1.0)],
+        vec![project("a", "Alpha"), project("empty", "Empty")],
+        prefs,
+    );
+
+    assert_eq!(store.active_workspace_id(), Some(&pid("empty")));
+    assert_eq!(store.selected_session_id(), None);
+    assert_eq!(store.preferences().last_selected_session, None);
+}
+
+#[test]
+fn a_missing_remembered_workspace_uses_a_deterministic_catalog_fallback() {
+    let prefs = Prefs {
+        last_active_workspace: Some(pid("removed")),
+        ..Prefs::default()
+    };
+    let (store, _) = hydrated(
+        vec![session("from-b", "b", 2.0), session("from-a", "a", 1.0)],
+        vec![project("b", "Beta"), project("a", "Alpha")],
+        prefs,
+    );
+
+    assert_eq!(store.active_workspace_id(), Some(&pid("a")));
+    assert_eq!(store.selected_session_id(), Some(&id("from-a")));
+    assert_eq!(store.preferences().last_active_workspace, Some(pid("a")));
+}
+
+#[test]
+fn first_launch_without_workspaces_has_no_active_workspace_or_session() {
+    let (store, _) = hydrated(Vec::new(), Vec::new(), Prefs::default());
+
+    assert_eq!(store.active_workspace_id(), None);
+    assert_eq!(store.selected_session_id(), None);
+    assert_eq!(store.preferences().last_active_workspace, None);
+    assert_eq!(store.preferences().last_selected_session, None);
+}
+
+#[test]
+fn switching_workspaces_updates_selection_and_scoped_navigation() {
+    let (mut store, _) = hydrated(
+        vec![
+            session("a-one", "a", 1.0),
+            session("b-one", "b", 2.0),
+            session("b-two", "b", 3.0),
+        ],
+        vec![project("a", "Alpha"), project("b", "Beta")],
+        Prefs::default(),
+    );
+
+    assert!(store.set_active_workspace(pid("b")));
+
+    assert_eq!(store.active_workspace_id(), Some(&pid("b")));
+    assert_eq!(store.selected_session_id(), Some(&id("b-one")));
+    assert_eq!(store.default_new_agent_directory(), "/work/b");
+    assert_eq!(
+        store
+            .active_workspace_sessions()
+            .into_iter()
+            .map(|session| session.id)
+            .collect::<Vec<_>>(),
+        vec![id("b-one"), id("b-two")]
+    );
+}
+
+#[test]
+fn selecting_a_session_also_activates_its_workspace() {
+    let (mut store, _) = hydrated(
+        vec![session("from-a", "a", 1.0), session("from-b", "b", 2.0)],
+        vec![project("a", "Alpha"), project("b", "Beta")],
+        Prefs::default(),
+    );
+
+    store.select(id("from-b"));
+
+    assert_eq!(store.active_workspace_id(), Some(&pid("b")));
+    assert_eq!(store.preferences().last_active_workspace, Some(pid("b")));
 }
 
 #[test]
@@ -275,9 +380,48 @@ fn an_empty_added_project_remains_visible_before_its_first_agent() {
     assert_eq!(projection.projects.len(), 1);
     assert_eq!(projection.projects[0].project.root, "/work/atlas");
     assert!(projection.projects[0].sessions.is_empty());
+    assert_eq!(store.active_workspace_id(), Some(&pid("atlas")));
+    drain(&mut effects);
 
     store.add_project("/work/atlas".to_owned());
     assert!(drain(&mut effects).is_empty(), "project.add is idempotent");
+}
+
+#[test]
+fn adding_an_existing_workspace_selects_it_without_a_duplicate_request() {
+    let (mut store, mut effects) = hydrated(
+        Vec::new(),
+        vec![project("a", "Alpha"), project("b", "Beta")],
+        Prefs::default(),
+    );
+    assert!(store.set_active_workspace(pid("a")));
+    drain(&mut effects);
+
+    assert!(!store.add_project("/work/b".to_owned()));
+
+    assert_eq!(store.active_workspace_id(), Some(&pid("b")));
+    assert!(
+        drain(&mut effects)
+            .into_iter()
+            .all(|effect| !matches!(effect, StoreEffect::AddProject { .. }))
+    );
+}
+
+#[test]
+fn a_failed_workspace_add_clears_pending_state_and_can_be_retried() {
+    let root = "/work/retry".to_owned();
+    let (mut store, mut effects) = hydrated(Vec::new(), Vec::new(), Prefs::default());
+
+    assert!(store.add_project(root.clone()));
+    drain(&mut effects);
+    store.fail_add_project(root.clone(), "permission denied".into());
+
+    assert_eq!(store.pending_project_root(), None);
+    assert_eq!(store.project_add_error(), Some("permission denied"));
+    assert!(store.add_project(root.clone()));
+    assert_eq!(store.pending_project_root(), Some(root.as_str()));
+    assert_eq!(store.project_add_error(), None);
+    assert_eq!(drain(&mut effects), vec![StoreEffect::AddProject { root }]);
 }
 
 /// The order is total, so a row dragged to the end of its group stays there.
@@ -637,7 +781,7 @@ fn multi_select_matches_finder_command_and_visible_shift_ranges() {
 }
 
 #[test]
-fn focus_neighbor_prefers_same_project_below_then_above_then_global() {
+fn focus_neighbor_stays_within_the_active_workspace() {
     let records = vec![
         session("a-top", "a", 1.0),
         session("a-mid", "a", 2.0),
@@ -656,15 +800,17 @@ fn focus_neighbor_prefers_same_project_below_then_above_then_global() {
     above.focus_neighbor(&HashSet::from([id("a-low")]));
     assert_eq!(above.selected_session_id, Some(id("a-mid")));
 
-    let (mut global_below, _) = hydrated(records.clone(), projects.clone(), Prefs::default());
-    global_below.select(id("a-mid"));
-    global_below.focus_neighbor(&HashSet::from([id("a-top"), id("a-mid"), id("a-low")]));
-    assert_eq!(global_below.selected_session_id, Some(id("b-top")));
+    let (mut exhausted, _) = hydrated(records.clone(), projects.clone(), Prefs::default());
+    exhausted.select(id("a-mid"));
+    exhausted.focus_neighbor(&HashSet::from([id("a-top"), id("a-mid"), id("a-low")]));
+    assert_eq!(exhausted.selected_session_id, None);
+    assert_eq!(exhausted.active_workspace_id(), Some(&pid("a")));
 
-    let (mut global_above, _) = hydrated(records, projects, Prefs::default());
-    global_above.select(id("b-top"));
-    global_above.focus_neighbor(&HashSet::from([id("b-top")]));
-    assert_eq!(global_above.selected_session_id, Some(id("a-low")));
+    let (mut other_workspace, _) = hydrated(records, projects, Prefs::default());
+    other_workspace.select(id("b-top"));
+    other_workspace.focus_neighbor(&HashSet::from([id("b-top")]));
+    assert_eq!(other_workspace.selected_session_id, None);
+    assert_eq!(other_workspace.active_workspace_id(), Some(&pid("b")));
 }
 
 #[test]
@@ -798,6 +944,17 @@ fn auto_resume_is_attempted_once_per_run() {
         Prefs::default(),
     );
 
+    assert!(
+        !drain(&mut effects).into_iter().any(|effect| matches!(
+            effect,
+            StoreEffect::Resume {
+                automatic: true,
+                ..
+            }
+        )),
+        "hydration must not resume an agent"
+    );
+    store.select(id("restart"));
     assert_eq!(
         drain(&mut effects)
             .into_iter()
@@ -809,7 +966,8 @@ fn auto_resume_is_attempted_once_per_run() {
                 }
             ))
             .count(),
-        1
+        1,
+        "an explicit selection should attempt one resume"
     );
     store.upsert_session(record);
     assert!(!store.auto_resume_if_needed(&id("restart")));
@@ -817,7 +975,7 @@ fn auto_resume_is_attempted_once_per_run() {
 }
 
 #[test]
-fn cold_boot_only_auto_resumes_the_selected_session() {
+fn cold_boot_restores_without_resuming_until_the_user_selects_a_session() {
     let restart_session = |value: &str, created: f64| {
         let mut record = session(value, "p", created);
         record.status = SessionStatus::Exited(ExitInfo {
@@ -851,10 +1009,9 @@ fn cold_boot_only_auto_resumes_the_selected_session() {
             _ => None,
         })
         .collect();
-    assert_eq!(
-        automatic_resumes,
-        vec![id("oldest")],
-        "cold boot must not revive every previously running agent"
+    assert!(
+        automatic_resumes.is_empty(),
+        "restoring the workspace must not revive an agent"
     );
 
     store.select(id("middle"));
@@ -910,6 +1067,7 @@ fn removing_a_project_takes_its_sessions_and_its_sidebar_prefs_with_it() {
     let prefs = Prefs {
         sidebar_pinned_projects: vec![pid("gone")],
         sidebar_collapsed_projects: vec![pid("gone")],
+        last_active_workspace: Some(pid("gone")),
         ..Prefs::default()
     };
     let (mut store, mut effects) = hydrated(
@@ -935,6 +1093,8 @@ fn removing_a_project_takes_its_sessions_and_its_sidebar_prefs_with_it() {
     assert!(!store.projects().contains_key(&pid("gone")));
     assert!(store.projects().contains_key(&pid("stay")));
     assert!(store.sessions().contains_key(&id("kept")));
+    assert_eq!(store.active_workspace_id(), Some(&pid("stay")));
+    assert_eq!(store.selected_session_id(), Some(&id("kept")));
     // Otherwise re-adding the folder brings it back pinned and collapsed.
     assert!(store.preferences().sidebar_pinned_projects.is_empty());
     assert!(store.preferences().sidebar_collapsed_projects.is_empty());
@@ -1296,6 +1456,7 @@ fn selected_session_persists_across_store_reloads() {
         projects: vec![project("a", "A")],
     });
     assert_eq!(restored.selected_session_id(), Some(&id("two")));
+    assert_eq!(restored.active_workspace_id(), Some(&pid("a")));
 }
 
 #[test]

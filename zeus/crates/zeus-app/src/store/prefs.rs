@@ -142,6 +142,10 @@ pub struct Prefs {
     /// Sessions whose spawned children are folded away.
     pub sidebar_collapsed_sessions: Vec<SessionId>,
     pub sidebar_expanded_archives: Vec<ProjectId>,
+    /// Workspace that should become active after the daemon's initial hydrate.
+    /// This is independent of session selection so an empty workspace can be
+    /// restored across launches.
+    pub last_active_workspace: Option<ProjectId>,
     /// Session that should regain focus after the daemon's initial hydrate.
     pub last_selected_session: Option<SessionId>,
 }
@@ -181,6 +185,7 @@ impl Default for Prefs {
             sidebar_collapsed_projects: Vec::new(),
             sidebar_collapsed_sessions: Vec::new(),
             sidebar_expanded_archives: Vec::new(),
+            last_active_workspace: None,
             last_selected_session: None,
         }
     }
@@ -335,6 +340,18 @@ mod tests {
 
         assert!(prefs.sidebar_on_right);
         assert_eq!(prefs.layout_version, CURRENT_LAYOUT_VERSION);
+    }
+
+    #[test]
+    fn active_workspace_is_optional_for_older_preferences() {
+        let restored: Prefs =
+            serde_json::from_str(r#"{"lastSelectedSession":"session-a"}"#).expect("legacy prefs");
+
+        assert_eq!(restored.last_active_workspace, None);
+        assert_eq!(
+            restored.last_selected_session,
+            Some(zeus_proto::SessionId::new("session-a"))
+        );
     }
 
     #[test]

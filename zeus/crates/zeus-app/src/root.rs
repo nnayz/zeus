@@ -217,9 +217,7 @@ impl RootView {
                 if preview {
                     TerminalPane::new_preview(runtime, tokio, window, cx)
                 } else {
-                    let mut terminal = TerminalPane::new(runtime, tokio, window, cx);
-                    terminal.show_startup_welcome();
-                    terminal
+                    TerminalPane::new(runtime, tokio, window, cx)
                 }
             }))
         };
@@ -267,17 +265,6 @@ impl RootView {
                     this.sidebar.update(cx, |sidebar, cx| sidebar.toggle(cx));
                 }
                 TerminalPaneEvent::ToggleInspector => this.toggle_inspector(cx),
-                TerminalPaneEvent::OpenWorkspace { root } => {
-                    this.services
-                        .store
-                        .store
-                        .write()
-                        .expect("session store lock poisoned")
-                        .add_project(root.clone());
-                    this.sidebar.update(cx, |sidebar, cx| {
-                        sidebar.show_new_agent_in_workspace(root.clone(), cx);
-                    });
-                }
                 TerminalPaneEvent::OpenFileReference { reference, cwd, .. } => {
                     let inspector = this.inspector.clone();
                     this.reveal_inspector(cx);
@@ -291,21 +278,15 @@ impl RootView {
             .detach();
         }
         cx.subscribe_in(&sidebar, window, |this, _, event, window, cx| {
-            if matches!(event, SidebarEvent::SessionActivated)
-                && let Some(terminal) = &this.terminal
+            if matches!(
+                event,
+                SidebarEvent::SessionActivated | SidebarEvent::WorkspaceActivated
+            ) && let Some(terminal) = &this.terminal
             {
                 terminal.update(cx, |terminal, cx| {
-                    terminal.dismiss_startup_welcome(cx);
                     terminal.focus(window, cx);
                 });
                 this.sync_auxiliary_terminal(window, cx);
-            }
-            if matches!(event, SidebarEvent::AgentSpawnRequested)
-                && let Some(terminal) = &this.terminal
-            {
-                terminal.update(cx, |terminal, cx| {
-                    terminal.dismiss_startup_welcome(cx);
-                });
             }
             if let SidebarEvent::Update(command) = event {
                 this.services.updates.send(command.clone());
@@ -380,7 +361,6 @@ impl RootView {
                     InspectorEvent::SessionActivated => {
                         if let Some(terminal) = &this.terminal {
                             terminal.update(cx, |terminal, cx| {
-                                terminal.dismiss_startup_welcome(cx);
                                 terminal.focus(window, cx);
                             });
                             this.sync_auxiliary_terminal(window, cx);
@@ -1175,11 +1155,8 @@ impl RootView {
     }
 
     fn open_workspace(&mut self, _: &OpenWorkspace, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(terminal) = &self.terminal {
-            terminal.update(cx, |terminal, cx| {
-                terminal.choose_workspace_folder(window, cx);
-            });
-        }
+        self.sidebar
+            .update(cx, |sidebar, cx| sidebar.show_add_workspace(window, cx));
     }
 
     fn on_key_up(&mut self, event: &KeyUpEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -1940,10 +1917,6 @@ impl Render for RootView {
         let colors = self.colors();
         let sidebar_visible = self.sidebar.read(cx).is_visible();
         let sidebar_width = self.sidebar.read(cx).width();
-        let startup_welcome_visible = self
-            .terminal
-            .as_ref()
-            .is_some_and(|terminal| terminal.read(cx).is_startup_welcome_visible());
         let (has_selected_session, inspector_word_wrap) = {
             let store = self
                 .services
@@ -1969,8 +1942,7 @@ impl Render for RootView {
             .inspector
             .as_ref()
             .is_some_and(|inspector| inspector.read(cx).is_code_destination());
-        let inspector_available = inspector_has_standalone_destination
-            || (!startup_welcome_visible && has_selected_session);
+        let inspector_available = inspector_has_standalone_destination || has_selected_session;
         let requested_inspector_width = self
             .inspector_width
             .clamp(self.inspector_min_width(), MAX_INSPECTOR_WIDTH);

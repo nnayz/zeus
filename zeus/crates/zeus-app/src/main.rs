@@ -108,7 +108,7 @@ fn install_app_menus(cx: &mut App) {
             MenuItem::action("Quit zeus", Quit),
         ]),
         Menu::new("File").items([
-            MenuItem::action("Open…", root::OpenWorkspace),
+            MenuItem::action("Add Workspace…", root::OpenWorkspace),
             MenuItem::separator(),
             MenuItem::action("New Agent", root::OpenNewAgent),
         ]),

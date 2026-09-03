@@ -1,12 +1,14 @@
 use std::collections::HashMap;
+use std::fs;
+use std::path::Path;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use gpui::{
     Anchor, AnyElement, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle,
-    Focusable, FontWeight, Hsla, IntoElement, MouseButton, Pixels, Point, Render, Rgba,
-    ScrollHandle, SharedString, Task, Window, anchored, deferred, div, linear_color_stop,
-    linear_gradient, point, prelude::*, px,
+    Focusable, FontWeight, Hsla, IntoElement, MouseButton, PathPromptOptions, Pixels, Point,
+    Render, Rgba, Role, ScrollHandle, SharedString, Task, Window, anchored, deferred, div,
+    linear_color_stop, linear_gradient, point, prelude::*, px,
 };
 use tokio::sync::mpsc;
 use zeus_proto::remote_pty::PersistenceCapability;
@@ -51,9 +53,9 @@ pub enum SidebarEvent {
     /// A plain click (or shortcut) selected a session: hand keyboard focus
     /// to its terminal surface so the user can type immediately.
     SessionActivated,
-    /// The compact picker requested a spawn. RootView dismisses the startup
-    /// welcome canvas while the Engine creates and selects the new session.
-    AgentSpawnRequested,
+    /// The active workspace changed, possibly changing or clearing the
+    /// selected session at the same time.
+    WorkspaceActivated,
     /// The user acted on the update pill. The sidebar holds no updater of its
     /// own; RootView owns the handle and forwards these.
     Update(UpdateCommand),
@@ -154,7 +156,13 @@ impl Sidebar {
                 loop {
                     match changes.recv().await {
                         Ok(()) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                            if this.update(cx, |_, cx| cx.notify()).is_err() {
+                            if this
+                                .update(cx, |this, cx| {
+                                    this.reconcile_workspace_add();
+                                    cx.notify();
+                                })
+                                .is_err()
+                            {
                                 return;
                             }
                         }
@@ -312,6 +320,177 @@ impl Sidebar {
         self.open_new_agent_popover_at(Some(directory), None, cx);
     }
 
+    pub fn show_add_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.ensure_visible(cx);
+        self.commit_rename();
+        self.store
+            .write()
+            .expect("session store lock poisoned")
+            .clear_project_add_error();
+        self.ui.popover = Some(Popover::AddWorkspace {
+            root: None,
+            error: None,
+            submitted: false,
+        });
+        self.rename_focus.focus(window, cx);
+        cx.notify();
+    }
+
+    fn activate_workspace(&mut self, id: ProjectId, cx: &mut Context<Self>) {
+        let activated = self
+            .store
+            .write()
+            .expect("session store lock poisoned")
+            .set_active_workspace(id);
+        if !activated {
+            return;
+        }
+        self.ui.popover = None;
+        self.ui.hover_card = None;
+        cx.emit(SidebarEvent::WorkspaceActivated);
+        cx.notify();
+    }
+
+    fn choose_workspace_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let paths = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Choose Workspace".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let selected = match paths.await {
+                Ok(Ok(Some(mut paths))) => paths.pop(),
+                _ => None,
+            };
+            let Some(selected) = selected else {
+                return;
+            };
+            let chosen = selected.to_string_lossy().into_owned();
+            let validation = validate_workspace_root(&chosen);
+            let _ = this.update_in(cx, |this, _window, cx| {
+                if let Some(Popover::AddWorkspace {
+                    root,
+                    error,
+                    submitted,
+                }) = &mut this.ui.popover
+                {
+                    *submitted = false;
+                    match validation {
+                        Ok(validated) => {
+                            *root = Some(validated);
+                            *error = None;
+                        }
+                        Err(message) => {
+                            *root = Some(chosen);
+                            *error = Some(message);
+                        }
+                    }
+                    this.store
+                        .write()
+                        .expect("session store lock poisoned")
+                        .clear_project_add_error();
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn submit_add_workspace(&mut self, cx: &mut Context<Self>) {
+        let root = match &self.ui.popover {
+            Some(Popover::AddWorkspace {
+                root: Some(root),
+                submitted: false,
+                ..
+            }) => root.clone(),
+            Some(Popover::AddWorkspace {
+                root: None,
+                submitted: false,
+                ..
+            }) => {
+                if let Some(Popover::AddWorkspace { error, .. }) = &mut self.ui.popover {
+                    *error = Some("Choose a folder to continue.".into());
+                }
+                cx.notify();
+                return;
+            }
+            _ => return,
+        };
+        let root = match validate_workspace_root(&root) {
+            Ok(root) => root,
+            Err(message) => {
+                if let Some(Popover::AddWorkspace { error, .. }) = &mut self.ui.popover {
+                    *error = Some(message);
+                }
+                cx.notify();
+                return;
+            }
+        };
+        let (requested, already_present) = {
+            let mut store = self.store.write().expect("session store lock poisoned");
+            let already_present = store
+                .projects()
+                .values()
+                .any(|project| project.root == root);
+            (store.add_project(root.clone()), already_present)
+        };
+        if already_present {
+            self.ui.popover = None;
+            cx.emit(SidebarEvent::WorkspaceActivated);
+        } else if requested
+            && let Some(Popover::AddWorkspace {
+                root: selected,
+                error,
+                submitted,
+            }) = &mut self.ui.popover
+        {
+            *selected = Some(root);
+            *error = None;
+            *submitted = true;
+        }
+        cx.notify();
+    }
+
+    fn reconcile_workspace_add(&mut self) {
+        let root = match &self.ui.popover {
+            Some(Popover::AddWorkspace {
+                root: Some(root),
+                submitted: true,
+                ..
+            }) => root.clone(),
+            _ => return,
+        };
+        let (pending, error, added) = {
+            let store = self.store.read().expect("session store lock poisoned");
+            (
+                store.pending_project_root() == Some(&root),
+                store.project_add_error().map(str::to_owned),
+                store
+                    .active_workspace()
+                    .is_some_and(|project| project.root == root),
+            )
+        };
+        if pending {
+            return;
+        }
+        if let Some(message) = error {
+            if let Some(Popover::AddWorkspace {
+                error, submitted, ..
+            }) = &mut self.ui.popover
+            {
+                *error = Some(message);
+                *submitted = false;
+            }
+            self.store
+                .write()
+                .expect("session store lock poisoned")
+                .clear_project_add_error();
+        } else if added {
+            self.ui.popover = None;
+        }
+    }
+
     fn ensure_visible(&mut self, cx: &mut Context<Self>) {
         if !self.ui.visible {
             self.ui.visible = true;
@@ -445,13 +624,39 @@ impl Sidebar {
     fn on_key_down(
         &mut self,
         event: &gpui::KeyDownEvent,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.ui.renaming.is_none() {
-            if self.ui.popover.is_some() && event.keystroke.key.as_str() == "escape" {
-                self.ui.popover = None;
-                cx.notify();
+            match event.keystroke.key.as_str() {
+                "escape" if self.ui.popover.is_some() => {
+                    self.ui.popover = None;
+                    self.store
+                        .write()
+                        .expect("session store lock poisoned")
+                        .clear_project_add_error();
+                    cx.notify();
+                }
+                "enter"
+                    if self.rename_focus.is_focused(window)
+                        && matches!(
+                            self.ui.popover,
+                            Some(Popover::AddWorkspace {
+                                root: None,
+                                submitted: false,
+                                ..
+                            })
+                        ) =>
+                {
+                    self.choose_workspace_folder(window, cx);
+                }
+                "enter"
+                    if self.rename_focus.is_focused(window)
+                        && matches!(self.ui.popover, Some(Popover::AddWorkspace { .. })) =>
+                {
+                    self.submit_add_workspace(cx);
+                }
+                _ => {}
             }
             return;
         }
@@ -628,7 +833,162 @@ impl Sidebar {
             .into_any_element()
     }
 
-    fn empty_state(&self, colors: SemanticColors, cx: &mut Context<Self>) -> AnyElement {
+    fn workspace_row(
+        &self,
+        projection: &crate::store::SidebarProjection,
+        colors: SemanticColors,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let active = self
+            .store
+            .read()
+            .expect("session store lock poisoned")
+            .active_workspace_id()
+            .cloned();
+        let active_project = projection
+            .projects
+            .iter()
+            .find(|group| Some(&group.project.id) == active.as_ref())
+            .map(|group| &group.project);
+        let label = active_project
+            .map(|project| project.name.clone())
+            .unwrap_or_else(|| "Select workspace".into());
+        let selector_accessibility_label = format!("Active workspace: {label}");
+        let selector_hover = self.ui.hovered_control == Some("workspace-selector");
+        let add_hover = self.ui.hovered_control == Some("workspace-add");
+        let selector_open = matches!(self.ui.popover, Some(Popover::WorkspaceSelector));
+
+        div()
+            .id("workspace-control")
+            .debug_selector(|| "WORKSPACE_CONTROL".to_owned())
+            .mx(px(Space::INSET))
+            .mb(px(4.0))
+            .p(px(3.0))
+            .h(px(36.0))
+            .flex_none()
+            .flex()
+            .items_center()
+            .rounded(px(Radius::ROW))
+            .bg(colors.primary.alpha(0.035))
+            .child(
+                div()
+                    .id("workspace-selector")
+                    .debug_selector(|| "WORKSPACE_SELECTOR".to_owned())
+                    .focusable()
+                    .tab_stop(true)
+                    .role(Role::Button)
+                    .aria_label(selector_accessibility_label)
+                    .aria_description("Choose the workspace shown in the sidebar")
+                    .min_w(px(0.0))
+                    .flex_1()
+                    .h_full()
+                    .px(px(5.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(7.0))
+                    .rounded(px(Radius::CHIP))
+                    .bg(if selector_open {
+                        Fill::subtle(colors)
+                    } else {
+                        Fill::hover(colors, selector_hover)
+                    })
+                    .cursor_pointer()
+                    .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                        this.ui.hovered_control = hovered.then_some("workspace-selector");
+                        cx.notify();
+                    }))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.commit_rename();
+                        this.ui.popover =
+                            if matches!(this.ui.popover, Some(Popover::WorkspaceSelector)) {
+                                None
+                            } else {
+                                Some(Popover::WorkspaceSelector)
+                            };
+                        cx.notify();
+                    }))
+                    .child(project_badge(colors))
+                    .child(
+                        div()
+                            .min_w(px(0.0))
+                            .flex_1()
+                            .whitespace_nowrap()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .text_size(px(SIDEBAR_TITLE_SIZE))
+                            .font_weight(Typo::ROW_EMPHASIZED.weight)
+                            .text_color(colors.primary)
+                            .child(label),
+                    )
+                    .child(sf_symbol_weighted(
+                        if selector_open {
+                            "chevron.up"
+                        } else {
+                            "chevron.down"
+                        },
+                        8.0,
+                        SymbolWeight::Bold,
+                        colors.tertiary,
+                    )),
+            )
+            .child(
+                div()
+                    .mx(px(3.0))
+                    .h(px(18.0))
+                    .w(px(1.0))
+                    .flex_none()
+                    .bg(colors.primary.alpha(0.07)),
+            )
+            .child(
+                div()
+                    .id("workspace-add")
+                    .debug_selector(|| "WORKSPACE_ADD".to_owned())
+                    .focusable()
+                    .tab_stop(true)
+                    .role(Role::Button)
+                    .aria_label("Add Workspace")
+                    .aria_keyshortcuts("Meta+O")
+                    .size(px(28.0))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(Radius::CHIP))
+                    .bg(Fill::hover(colors, add_hover))
+                    .cursor_pointer()
+                    .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                        this.ui.hovered_control = hovered.then_some("workspace-add");
+                        cx.notify();
+                    }))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.show_add_workspace(window, cx);
+                    }))
+                    .child(sf_symbol_weighted(
+                        "plus",
+                        11.0,
+                        SymbolWeight::Medium,
+                        colors.secondary,
+                    )),
+            )
+            .into_any_element()
+    }
+
+    fn empty_state(
+        &self,
+        has_workspace: bool,
+        colors: SemanticColors,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let title = if has_workspace {
+            "Bring up your first agent"
+        } else {
+            "Add your first workspace"
+        };
+        let action = if has_workspace {
+            "New Agent"
+        } else {
+            "Add Workspace"
+        };
         div()
             .flex_1()
             .flex()
@@ -648,18 +1008,34 @@ impl Sidebar {
                             .text_size(px(SIDEBAR_TITLE_SIZE))
                             .font_weight(Typo::ROW_EMPHASIZED.weight)
                             .text_color(colors.secondary)
-                            .child("Bring up your first agent"),
+                            .child(title),
                     )
                     .child(
                         div()
                             .text_size(px(SIDEBAR_SUBTITLE_SIZE))
                             .text_color(colors.tertiary)
-                            .child("⌘T"),
+                            .child(if has_workspace { "⌘T" } else { "⌘O" }),
                     ),
             )
             .child(
                 div()
-                    .id("empty-new-agent")
+                    .id(if has_workspace {
+                        "empty-new-agent"
+                    } else {
+                        "empty-add-workspace"
+                    })
+                    .debug_selector(move || {
+                        if has_workspace {
+                            "EMPTY_NEW_AGENT"
+                        } else {
+                            "EMPTY_ADD_WORKSPACE"
+                        }
+                        .to_owned()
+                    })
+                    .focusable()
+                    .tab_stop(true)
+                    .role(Role::Button)
+                    .aria_label(action)
                     .px(px(8.0))
                     .h(px(24.0))
                     .flex()
@@ -669,12 +1045,24 @@ impl Sidebar {
                     .text_color(colors.secondary)
                     .cursor_pointer()
                     .hover(move |element| element.bg(colors.primary.alpha(0.06)))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.open_new_agent_popover(None, cx);
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if has_workspace {
+                            this.open_new_agent_popover(None, cx);
+                        } else {
+                            this.show_add_workspace(window, cx);
+                        }
                     }))
                     .gap(px(6.0))
-                    .child(sf_symbol("square.and.pencil", 13.0, colors.secondary))
-                    .child("New Agent"),
+                    .child(sf_symbol(
+                        if has_workspace {
+                            "square.and.pencil"
+                        } else {
+                            "folder.badge.plus"
+                        },
+                        13.0,
+                        colors.secondary,
+                    ))
+                    .child(action),
             )
             .into_any_element()
     }
@@ -1707,6 +2095,12 @@ impl Sidebar {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         match self.ui.popover.clone()? {
+            Popover::WorkspaceSelector => Some(self.workspace_selector_popover(colors, window, cx)),
+            Popover::AddWorkspace {
+                root,
+                error,
+                submitted,
+            } => Some(self.add_workspace_popover(root, error, submitted, colors, window, cx)),
             Popover::NewAgent { directory, host } => {
                 Some(self.new_agent_popover(directory, host, colors, window, cx))
             }
@@ -1717,6 +2111,347 @@ impl Sidebar {
                 Some(self.session_actions_popover(id, position, colors, cx))
             }
         }
+    }
+
+    fn workspace_selector_popover(
+        &self,
+        colors: SemanticColors,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (projection, active) = {
+            let mut store = self.store.write().expect("session store lock poisoned");
+            (
+                store.sidebar_projection(),
+                store.active_workspace_id().cloned(),
+            )
+        };
+        let mut rows = div()
+            .id("workspace-menu")
+            .debug_selector(|| "WORKSPACE_MENU".to_owned())
+            .role(Role::Menu)
+            .aria_label("Workspaces")
+            .max_h(px(280.0))
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .p(px(4.0))
+            .gap(px(2.0));
+        if projection.projects.is_empty() {
+            rows = rows.child(
+                div()
+                    .px(px(10.0))
+                    .py(px(8.0))
+                    .text_size(px(Typo::META.size))
+                    .text_color(colors.tertiary)
+                    .child("No workspaces yet"),
+            );
+        }
+        for group in &projection.projects {
+            let id = group.project.id.clone();
+            let root = group.project.root.clone();
+            let selected = active.as_ref() == Some(&id);
+            let accessibility_label = format!("{} — {root}", group.project.name);
+            rows = rows.child(
+                div()
+                    .id(SharedString::from(format!("workspace-option-{}", id.0)))
+                    .debug_selector({
+                        let id = id.clone();
+                        move || format!("WORKSPACE_OPTION_{}", id.0)
+                    })
+                    .focusable()
+                    .tab_stop(true)
+                    .role(Role::MenuItem)
+                    .aria_label(accessibility_label)
+                    .px(px(6.0))
+                    .py(px(6.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(7.0))
+                    .rounded(px(Radius::ROW))
+                    .cursor_pointer()
+                    .when(selected, |row| row.bg(Fill::selected(colors, true)))
+                    .hover(move |row| row.bg(Fill::subtle(colors)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.activate_workspace(id.clone(), cx);
+                    }))
+                    .child(project_badge(colors))
+                    .child(
+                        div()
+                            .min_w(px(0.0))
+                            .flex_1()
+                            .flex()
+                            .flex_col()
+                            .gap(px(1.0))
+                            .child(
+                                div()
+                                    .whitespace_nowrap()
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .text_size(px(SIDEBAR_TITLE_SIZE))
+                                    .font_weight(Typo::ROW_EMPHASIZED.weight)
+                                    .text_color(colors.primary)
+                                    .child(group.project.name.clone()),
+                            )
+                            .child(
+                                div()
+                                    .whitespace_nowrap()
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .text_size(px(Typo::META.size))
+                                    .text_color(colors.tertiary)
+                                    .child(root),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .w(px(14.0))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .when(selected, |mark| {
+                                mark.child(sf_symbol_weighted(
+                                    "checkmark",
+                                    10.0,
+                                    SymbolWeight::Semibold,
+                                    colors.secondary,
+                                ))
+                            }),
+                    ),
+            );
+        }
+        let content = div()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .px(px(10.0))
+                    .pt(px(8.0))
+                    .pb(px(6.0))
+                    .text_size(px(Typo::SECTION_HEADER.size))
+                    .font_weight(Typo::SECTION_HEADER.weight)
+                    .text_color(colors.tertiary)
+                    .child("WORKSPACES"),
+            )
+            .child(HairlineDivider::horizontal(colors))
+            .child(rows);
+        self.popover_shell(74.0, content, colors, window, cx)
+    }
+
+    fn add_workspace_popover(
+        &self,
+        root: Option<String>,
+        local_error: Option<String>,
+        submitted: bool,
+        colors: SemanticColors,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (pending, engine_error) = {
+            let store = self.store.read().expect("session store lock poisoned");
+            (
+                submitted
+                    && root
+                        .as_deref()
+                        .is_some_and(|root| store.pending_project_root() == Some(root)),
+                submitted
+                    .then(|| store.project_add_error().map(str::to_owned))
+                    .flatten(),
+            )
+        };
+        let error = local_error.or(engine_error);
+        let selected_name = root
+            .as_deref()
+            .and_then(|root| Path::new(root).file_name())
+            .and_then(|name| name.to_str())
+            .unwrap_or("No folder selected")
+            .to_owned();
+        let browse_disabled = pending;
+        let cancel_disabled = pending;
+        let content = div()
+            .id("add-workspace-dialog")
+            .debug_selector(|| "ADD_WORKSPACE_DIALOG".to_owned())
+            .role(Role::Dialog)
+            .aria_label("Add Workspace")
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .px(px(10.0))
+                    .pt(px(8.0))
+                    .pb(px(6.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .child(
+                        div()
+                            .text_size(px(SIDEBAR_TITLE_SIZE))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(colors.primary)
+                            .child("Add Workspace"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(Typo::META.size))
+                            .text_color(colors.tertiary)
+                            .child("Choose a folder to add to Zeus."),
+                    ),
+            )
+            .child(
+                div()
+                    .mx(px(7.0))
+                    .px(px(8.0))
+                    .py(px(7.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(7.0))
+                    .rounded(px(Radius::ROW))
+                    .border_1()
+                    .border_color(if error.is_some() {
+                        Ink::DANGER.alpha(0.65)
+                    } else {
+                        colors.primary.alpha(0.09)
+                    })
+                    .child(sf_symbol("folder", 12.0, colors.secondary))
+                    .child(
+                        div()
+                            .min_w(px(0.0))
+                            .flex_1()
+                            .flex()
+                            .flex_col()
+                            .gap(px(1.0))
+                            .child(
+                                div()
+                                    .whitespace_nowrap()
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .text_size(px(SIDEBAR_TITLE_SIZE))
+                                    .text_color(colors.primary)
+                                    .child(selected_name),
+                            )
+                            .when_some(root.clone(), |copy, root| {
+                                copy.child(
+                                    div()
+                                        .whitespace_nowrap()
+                                        .overflow_hidden()
+                                        .text_ellipsis()
+                                        .text_size(px(Typo::META.size))
+                                        .text_color(colors.tertiary)
+                                        .child(root),
+                                )
+                            }),
+                    )
+                    .child(
+                        div()
+                            .id("choose-workspace-folder")
+                            .debug_selector(|| "CHOOSE_WORKSPACE_FOLDER".to_owned())
+                            .focusable()
+                            .tab_stop(true)
+                            .role(Role::Button)
+                            .aria_label("Choose workspace folder")
+                            .px(px(6.0))
+                            .h(px(22.0))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .rounded(px(Radius::CHIP))
+                            .bg(colors.primary.alpha(0.06))
+                            .text_size(px(Typo::META.size))
+                            .text_color(colors.secondary)
+                            .when(browse_disabled, |button| button.opacity(0.5))
+                            .when(!browse_disabled, |button| {
+                                button
+                                    .cursor_pointer()
+                                    .hover(move |button| button.bg(colors.primary.alpha(0.10)))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.choose_workspace_folder(window, cx);
+                                    }))
+                            })
+                            .child("Choose…"),
+                    ),
+            )
+            .when_some(error, |content, error| {
+                content.child(
+                    div()
+                        .id("add-workspace-error")
+                        .debug_selector(|| "ADD_WORKSPACE_ERROR".to_owned())
+                        .px(px(10.0))
+                        .pt(px(5.0))
+                        .text_size(px(Typo::META.size))
+                        .text_color(Ink::DANGER)
+                        .child(error),
+                )
+            })
+            .child(
+                div()
+                    .mt(px(7.0))
+                    .px(px(7.0))
+                    .pt(px(7.0))
+                    .pb(px(4.0))
+                    .border_t_1()
+                    .border_color(colors.primary.alpha(0.07))
+                    .flex()
+                    .justify_end()
+                    .gap(px(6.0))
+                    .child(
+                        div()
+                            .id("cancel-add-workspace")
+                            .debug_selector(|| "CANCEL_ADD_WORKSPACE".to_owned())
+                            .focusable()
+                            .tab_stop(true)
+                            .role(Role::Button)
+                            .aria_label("Cancel adding workspace")
+                            .px(px(8.0))
+                            .h(px(24.0))
+                            .flex()
+                            .items_center()
+                            .rounded(px(Radius::CHIP))
+                            .text_size(px(Typo::META.size))
+                            .text_color(colors.secondary)
+                            .when(cancel_disabled, |button| button.opacity(0.5))
+                            .when(!cancel_disabled, |button| {
+                                button
+                                    .cursor_pointer()
+                                    .hover(move |button| button.bg(colors.primary.alpha(0.07)))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.ui.popover = None;
+                                        this.store
+                                            .write()
+                                            .expect("session store lock poisoned")
+                                            .clear_project_add_error();
+                                        cx.notify();
+                                    }))
+                            })
+                            .child("Cancel"),
+                    )
+                    .child(
+                        div()
+                            .id("confirm-add-workspace")
+                            .debug_selector(|| "CONFIRM_ADD_WORKSPACE".to_owned())
+                            .focusable()
+                            .tab_stop(true)
+                            .role(Role::Button)
+                            .aria_label("Add selected workspace")
+                            .px(px(9.0))
+                            .h(px(24.0))
+                            .flex()
+                            .items_center()
+                            .rounded(px(Radius::CHIP))
+                            .bg(Ink::FRESH)
+                            .text_size(px(Typo::META.size))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(colors.background)
+                            .when(pending, |button| button.opacity(0.55))
+                            .when(!pending, |button| {
+                                button.cursor_pointer().on_click(
+                                    cx.listener(|this, _, _, cx| this.submit_add_workspace(cx)),
+                                )
+                            })
+                            .child(if pending { "Adding…" } else { "Add" }),
+                    ),
+            );
+        self.popover_shell(74.0, content, colors, window, cx)
     }
 
     /// Panels that hang off the sidebar's own edge sit 12pt inside the window
@@ -2200,7 +2935,6 @@ impl Sidebar {
                                         },
                                     );
                                 this.ui.popover = None;
-                                cx.emit(SidebarEvent::AgentSpawnRequested);
                                 cx.notify();
                             }))
                     })
@@ -2269,7 +3003,7 @@ impl Sidebar {
                     }),
             );
         }
-        self.popover_shell(70.0, content.pb(px(6.0)), colors, window, cx)
+        self.popover_shell(110.0, content.pb(px(6.0)), colors, window, cx)
     }
 
     fn directory_picker(
@@ -2539,7 +3273,7 @@ impl Sidebar {
             Some(position) => {
                 self.popover_shell_at(position, Anchor::TopLeft, 200.0, content, colors, cx)
             }
-            None => self.popover_shell(96.0, content, colors, window, cx),
+            None => self.popover_shell(136.0, content, colors, window, cx),
         }
     }
 
@@ -3016,7 +3750,7 @@ impl Sidebar {
         let id = {
             let mut store = self.store.write().expect("session store lock poisoned");
             let id = store
-                .ordered_sessions()
+                .active_workspace_sessions()
                 .get(index)
                 .map(|session| session.id.clone());
             if let Some(id) = &id {
@@ -3039,7 +3773,7 @@ impl Sidebar {
             .store
             .write()
             .expect("session store lock poisoned")
-            .ordered_sessions()
+            .active_workspace_sessions()
             .len();
         if count == 0 {
             return false;
@@ -3054,7 +3788,7 @@ impl Sidebar {
         self.commit_rename();
         {
             let mut store = self.store.write().expect("session store lock poisoned");
-            let sessions = store.ordered_sessions();
+            let sessions = store.active_workspace_sessions();
             if sessions.is_empty() {
                 return false;
             }
@@ -3081,7 +3815,7 @@ impl Sidebar {
         self.commit_rename();
         {
             let mut store = self.store.write().expect("session store lock poisoned");
-            let sessions = store.ordered_sessions();
+            let sessions = store.active_workspace_sessions();
             if sessions.is_empty() {
                 return false;
             }
@@ -3234,13 +3968,37 @@ impl Sidebar {
 impl Render for Sidebar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = self.colors();
-        let projection = {
+        let (projection, active_workspace) = {
             let mut store = self.store.write().expect("session store lock poisoned");
-            store.sidebar_projection()
+            (
+                store.sidebar_projection(),
+                store.active_workspace_id().cloned(),
+            )
         };
+        let active_group = projection
+            .projects
+            .iter()
+            .find(|group| Some(&group.project.id) == active_workspace.as_ref());
         self.shortcut_ranks.clear();
-        let session_count = projection.ordered_sessions.len();
-        for (index, session) in projection.ordered_sessions.iter().enumerate() {
+        let selected_session = self
+            .store
+            .read()
+            .expect("session store lock poisoned")
+            .selected_session_id()
+            .cloned();
+        let ordered_sessions: Vec<_> = active_group
+            .into_iter()
+            .flat_map(|group| {
+                group.sessions.iter().map(|row| &row.session).chain(
+                    group
+                        .archived
+                        .iter()
+                        .filter(|session| selected_session.as_ref() == Some(&session.id)),
+                )
+            })
+            .collect();
+        let session_count = ordered_sessions.len();
+        for (index, session) in ordered_sessions.iter().enumerate() {
             let shortcut = if index < 8 {
                 Some(index + 1)
             } else if index + 1 == session_count {
@@ -3252,7 +4010,12 @@ impl Render for Sidebar {
                 self.shortcut_ranks.insert(session.id.clone(), shortcut);
             }
         }
-        retain_live_glyphs(&mut self.glyphs, &projection.display_order);
+        let display_order: Vec<_> = active_group
+            .into_iter()
+            .flat_map(|group| group.active.iter().chain(&group.archived))
+            .map(|session| session.id.clone())
+            .collect();
+        retain_live_glyphs(&mut self.glyphs, &display_order);
         let mut list = div()
             .id("sidebar-list")
             .track_scroll(&self.list_scroll)
@@ -3265,7 +4028,7 @@ impl Render for Sidebar {
             .flex()
             .flex_col()
             .gap(px(3.0));
-        for group in &projection.projects {
+        if let Some(group) = active_group {
             list = list.child(self.project_section(group, colors, window, cx));
         }
 
@@ -3280,9 +4043,12 @@ impl Render for Sidebar {
             .track_focus(&self.rename_focus)
             .on_key_down(cx.listener(Self::on_key_down))
             .child(self.top_bar(colors, cx))
-            .child(self.new_agent_row(colors, cx));
-        if projection.projects.is_empty() {
-            root = root.child(self.empty_state(colors, cx));
+            .child(self.workspace_row(&projection, colors, cx))
+            .when(active_group.is_some(), |root| {
+                root.child(self.new_agent_row(colors, cx))
+            });
+        if active_group.is_none() {
+            root = root.child(self.empty_state(false, colors, cx));
         } else {
             // Rows dissolve into the chrome at both ends of the scroll instead
             // of being sliced off by the container edge.
@@ -3820,6 +4586,22 @@ fn session_title_available_width(
     available.max(36.0)
 }
 
+fn validate_workspace_root(root: &str) -> Result<String, String> {
+    let root = root.trim();
+    if root.is_empty() {
+        return Err("Choose a folder to continue.".into());
+    }
+    let canonical =
+        fs::canonicalize(root).map_err(|error| format!("This folder is unavailable: {error}"))?;
+    let metadata =
+        fs::metadata(&canonical).map_err(|error| format!("This folder is unavailable: {error}"))?;
+    if !metadata.is_dir() {
+        return Err("The selected path is not a folder.".into());
+    }
+    fs::read_dir(&canonical).map_err(|error| format!("Zeus cannot access this folder: {error}"))?;
+    Ok(canonical.to_string_lossy().into_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use gpui::{Modifiers, TestAppContext};
@@ -4050,6 +4832,101 @@ mod tests {
         assert!(glyphs.contains_key(&first));
         assert!(glyphs.contains_key(&second));
         assert!(!glyphs.contains_key(&stale));
+    }
+
+    #[test]
+    fn workspace_validation_rejects_missing_paths_and_files() {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let file = directory.path().join("not-a-directory");
+        std::fs::write(&file, b"test").expect("fixture file");
+
+        assert!(validate_workspace_root("/definitely/missing/zeus-workspace").is_err());
+        assert_eq!(
+            validate_workspace_root(file.to_string_lossy().as_ref()),
+            Err("The selected path is not a folder.".into())
+        );
+        assert_eq!(
+            validate_workspace_root(directory.path().to_string_lossy().as_ref()),
+            Ok(directory
+                .path()
+                .canonicalize()
+                .expect("canonical directory")
+                .to_string_lossy()
+                .into_owned())
+        );
+    }
+
+    #[gpui::test]
+    fn workspace_selector_switches_the_scoped_sidebar_project(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| {
+            let sidebar = cx.new(|cx| Sidebar::new(None, true, PreviewScenario::Typical, cx));
+            SidebarPopoverHarness { sidebar }
+        });
+
+        assert!(cx.debug_bounds("WORKSPACE_SELECTOR").is_some());
+        assert!(cx.debug_bounds("PROJECT_preview-zeus").is_some());
+        assert!(cx.debug_bounds("PROJECT_preview-mldrills").is_none());
+
+        let selector = cx
+            .debug_bounds("WORKSPACE_SELECTOR")
+            .expect("workspace selector");
+        cx.simulate_click(selector.center(), Modifiers::default());
+        let option = cx
+            .debug_bounds("WORKSPACE_OPTION_preview-mldrills")
+            .expect("workspace option");
+        cx.simulate_click(option.center(), Modifiers::default());
+
+        assert!(cx.debug_bounds("PROJECT_preview-zeus").is_none());
+        assert!(cx.debug_bounds("PROJECT_preview-mldrills").is_some());
+        let sidebar = view.read_with(cx, |harness, _| harness.sidebar.clone());
+        assert_eq!(
+            sidebar.read_with(cx, |sidebar, _| sidebar
+                .store
+                .read()
+                .expect("session store lock poisoned")
+                .active_workspace_id()
+                .cloned()),
+            Some(ProjectId::new("preview-mldrills"))
+        );
+    }
+
+    #[gpui::test]
+    fn add_workspace_control_opens_an_explicit_cancelable_dialog(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| {
+            let sidebar = cx.new(|cx| Sidebar::new(None, true, PreviewScenario::Typical, cx));
+            SidebarPopoverHarness { sidebar }
+        });
+
+        let add = cx.debug_bounds("WORKSPACE_ADD").expect("add workspace");
+        cx.simulate_click(add.center(), Modifiers::default());
+
+        assert!(cx.debug_bounds("ADD_WORKSPACE_DIALOG").is_some());
+        assert!(cx.debug_bounds("CHOOSE_WORKSPACE_FOLDER").is_some());
+        assert!(cx.debug_bounds("CONFIRM_ADD_WORKSPACE").is_some());
+        let cancel = cx
+            .debug_bounds("CANCEL_ADD_WORKSPACE")
+            .expect("cancel add workspace");
+        cx.simulate_click(cancel.center(), Modifiers::default());
+
+        assert!(cx.debug_bounds("ADD_WORKSPACE_DIALOG").is_none());
+        let sidebar = view.read_with(cx, |harness, _| harness.sidebar.clone());
+        assert!(!matches!(
+            sidebar.read_with(cx, |sidebar, _| sidebar.ui.popover.clone()),
+            Some(Popover::AddWorkspace { .. })
+        ));
+    }
+
+    #[gpui::test]
+    fn first_launch_sidebar_has_a_clear_add_workspace_action(cx: &mut TestAppContext) {
+        let (_view, cx) = cx.add_window_view(|_, cx| {
+            let sidebar = cx.new(|cx| Sidebar::new(None, true, PreviewScenario::Empty, cx));
+            SidebarPopoverHarness { sidebar }
+        });
+
+        assert!(cx.debug_bounds("WORKSPACE_SELECTOR").is_some());
+        assert!(cx.debug_bounds("WORKSPACE_ADD").is_some());
+        assert!(cx.debug_bounds("EMPTY_ADD_WORKSPACE").is_some());
+        assert!(cx.debug_bounds("EMPTY_NEW_AGENT").is_none());
     }
 
     #[gpui::test]

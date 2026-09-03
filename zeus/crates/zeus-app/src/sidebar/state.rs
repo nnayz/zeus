@@ -24,6 +24,12 @@ pub enum DragItem {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Popover {
+    WorkspaceSelector,
+    AddWorkspace {
+        root: Option<String>,
+        error: Option<String>,
+        submitted: bool,
+    },
     NewAgent {
         directory: Option<String>,
         /// Selected spawn target: `None` = Local, `Some(host id)` = remote.

@@ -10,9 +10,9 @@ use std::time::{Duration, Instant};
 use gpui::{
     AnyElement, App, ClickEvent, ClipboardEntry, ClipboardItem, Context, Entity, EventEmitter,
     FocusHandle, KeyBinding, KeyDownEvent, KeyUpEvent, ModifiersChangedEvent, MouseButton,
-    PathBuilder, PathPromptOptions, Render, Rgba, ScrollDelta, ScrollHandle, ScrollWheelEvent,
-    SharedString, StatefulInteractiveElement, Subscription, Task, Window, actions, canvas, div,
-    font, point, prelude::*, px, rgba,
+    PathBuilder, Render, Rgba, ScrollDelta, ScrollHandle, ScrollWheelEvent, SharedString,
+    StatefulInteractiveElement, Subscription, Task, Window, actions, canvas, div, font, point,
+    prelude::*, px, rgba,
 };
 use tokio::runtime::Handle;
 use tokio::sync::mpsc;
@@ -20,7 +20,7 @@ use zeus_client::attachment::{SessionAttachment, TerminalChunk};
 use zeus_proto::frames::TerminalModes as WireTerminalModes;
 use zeus_proto::grid::{ChangedRow, GridUpdate};
 use zeus_proto::{
-    AgentKind as ProtoAgentKind, ArtifactKind, ExitReason, PrCheck, Project, PullRequestStatus,
+    AgentKind as ProtoAgentKind, ArtifactKind, ExitReason, PrCheck, PullRequestStatus,
     Resumability, RiskHint, SessionArtifact, SessionId, SessionRecord, SessionStatus, TitleSource,
 };
 use zeus_term::buffer::GridBuffer;
@@ -100,7 +100,6 @@ const ANCHOR_SLACK: f32 = 1.0;
 /// caches are rebuilt on promotion — so the ceiling is a memory bound, not a
 /// residency one.
 const PARKED_GRID_CAP: usize = 12;
-const WELCOME_RECENT_LIMIT: usize = 6;
 const LINEAGE_TAB_HEIGHT: f32 = 26.0;
 const LINEAGE_TREE_NODE_WIDTH: f32 = 124.0;
 const LINEAGE_TREE_MARK: f32 = 40.0;
@@ -132,9 +131,6 @@ actions!(
 pub enum TerminalPaneEvent {
     ToggleSidebar,
     ToggleInspector,
-    OpenWorkspace {
-        root: String,
-    },
     OpenFileReference {
         reference: String,
         cwd: String,
@@ -573,10 +569,6 @@ pub struct TerminalPane {
     /// daemon-created id asynchronously, so this transition is also the
     /// reliable point at which keyboard focus can leave the picker.
     observed_selected_id: Option<SessionId>,
-    /// The welcome canvas is an explicit startup destination, not merely the
-    /// absence of a session. RootView enables it for the primary pane so a
-    /// restored selection cannot skip the workspace choice on launch.
-    startup_welcome: bool,
     preview: bool,
     lineage_tree_scroll: ScrollHandle,
     viewport: Option<TerminalViewport>,
@@ -734,7 +726,6 @@ impl TerminalPane {
             repaint_pacer: RepaintPacer::new(ACTIVE_REPAINT_INTERVAL),
             session_source,
             observed_selected_id,
-            startup_welcome: false,
             preview,
             lineage_tree_scroll: ScrollHandle::new(),
             viewport: None,
@@ -953,22 +944,6 @@ impl TerminalPane {
                 .input(if focused { b"\x1b[I" } else { b"\x1b[O" }.to_vec());
         }
         cx.notify();
-    }
-
-    pub fn show_startup_welcome(&mut self) {
-        self.startup_welcome = true;
-    }
-
-    pub fn dismiss_startup_welcome(&mut self, cx: &mut Context<Self>) {
-        if !self.startup_welcome {
-            return;
-        }
-        self.startup_welcome = false;
-        cx.notify();
-    }
-
-    pub const fn is_startup_welcome_visible(&self) -> bool {
-        self.startup_welcome
     }
 
     pub fn set_viewport(&mut self, viewport: TerminalViewport, cx: &mut Context<Self>) {
@@ -1292,255 +1267,40 @@ impl TerminalPane {
             .map(Arc::clone)
     }
 
-    fn recent_workspaces(&self) -> Vec<Project> {
-        let store = self
+    fn render_empty_session(&self, colors: SemanticColors) -> AnyElement {
+        let workspace = self
             .runtime
             .store
             .read()
-            .expect("session store lock poisoned");
-        let mut updated_at = HashMap::new();
-        for session in store.sessions().values() {
-            updated_at
-                .entry(session.project_id.clone())
-                .and_modify(|value: &mut f64| *value = value.max(session.updated_at.0))
-                .or_insert(session.updated_at.0);
-        }
-        let projects = store
-            .projects()
-            .values()
-            .cloned()
-            .map(|project| {
-                let updated = updated_at
-                    .get(&project.id)
-                    .copied()
-                    .unwrap_or(f64::NEG_INFINITY);
-                (project, updated)
-            })
-            .collect();
-        ordered_recent_workspaces(projects)
-    }
-
-    pub(crate) fn choose_workspace_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let paths = cx.prompt_for_paths(PathPromptOptions {
-            files: false,
-            directories: true,
-            multiple: false,
-            prompt: Some("Open Folder".into()),
-        });
-        cx.spawn_in(window, async move |this, cx| {
-            let selected = match paths.await {
-                Ok(Ok(Some(mut paths))) => paths.pop(),
-                _ => None,
-            };
-            let Some(root) = selected.map(|path| path.to_string_lossy().into_owned()) else {
-                return;
-            };
-            let _ = this.update_in(cx, |_, _window, cx| {
-                cx.emit(TerminalPaneEvent::OpenWorkspace { root });
-            });
-        })
-        .detach();
-    }
-
-    fn render_workspace_welcome(
-        &self,
-        colors: SemanticColors,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let workspaces = self.recent_workspaces();
-        let mut recent = div()
-            .id("welcome-recent-workspaces")
-            .w_full()
-            .min_w(px(0.0))
-            .flex()
-            .flex_col()
-            .gap(px(4.0));
-        if workspaces.is_empty() {
-            recent = recent.child(
-                div()
-                    .h(px(44.0))
-                    .px(px(10.0))
-                    .flex()
-                    .items_center()
-                    .rounded(px(Radius::ROW))
-                    .border_1()
-                    .border_color(colors.primary.alpha(0.06))
-                    .text_size(px(Typo::ROW.size))
-                    .text_color(colors.tertiary)
-                    .child("Folders you open will appear here."),
-            );
-        } else {
-            for (index, workspace) in workspaces.into_iter().enumerate() {
-                let root = workspace.root.clone();
-                recent = recent.child(
-                    div()
-                        .id(SharedString::from(format!("welcome-workspace-{index}")))
-                        .h(px(44.0))
-                        .px(px(10.0))
-                        .flex()
-                        .items_center()
-                        .gap(px(8.0))
-                        .rounded(px(Radius::ROW))
-                        .cursor_pointer()
-                        .hover(move |row| row.bg(colors.primary.alpha(0.06)))
-                        .active(move |row| row.bg(colors.primary.alpha(0.09)))
-                        .on_click(cx.listener(move |_, _, _, cx| {
-                            cx.emit(TerminalPaneEvent::OpenWorkspace { root: root.clone() });
-                        }))
-                        .child(
-                            div()
-                                .size(px(26.0))
-                                .flex_none()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded(px(Radius::BADGE))
-                                .bg(colors.primary.alpha(0.06))
-                                .child(sf_symbol("folder", 12.0, colors.secondary)),
-                        )
-                        .child(
-                            div()
-                                .min_w(px(0.0))
-                                .flex_1()
-                                .flex()
-                                .flex_col()
-                                .gap(px(2.0))
-                                .child(
-                                    div()
-                                        .whitespace_nowrap()
-                                        .overflow_hidden()
-                                        .text_ellipsis()
-                                        .text_size(px(Typo::ROW_EMPHASIZED.size))
-                                        .font_weight(Typo::ROW_EMPHASIZED.weight)
-                                        .text_color(colors.primary.alpha(0.90))
-                                        .child(workspace.name),
-                                )
-                                .child(
-                                    div()
-                                        .whitespace_nowrap()
-                                        .overflow_hidden()
-                                        .text_ellipsis()
-                                        .text_size(px(Typo::META.size))
-                                        .text_color(colors.tertiary)
-                                        .child(workspace.root),
-                                ),
-                        )
-                        .child(sf_symbol("chevron.right", 9.0, colors.tertiary)),
-                );
-            }
-        }
-
+            .expect("session store lock poisoned")
+            .active_workspace()
+            .map(|project| project.name.clone());
+        let detail = workspace.map_or_else(
+            || "Add a workspace from the sidebar to get started.".to_owned(),
+            |workspace| format!("Start an agent from the sidebar in {workspace}."),
+        );
         div()
-            .id("workspace-welcome")
-            .debug_selector(|| "workspace-welcome".into())
+            .id("workspace-empty")
+            .debug_selector(|| "WORKSPACE_EMPTY".into())
             .flex_1()
             .h_full()
-            .px(px(32.0))
             .flex()
+            .flex_col()
             .items_center()
             .justify_center()
+            .gap(px(5.0))
             .child(
                 div()
-                    .w_full()
-                    .max_w(px(640.0))
-                    .flex()
-                    .flex_col()
-                    .gap(px(28.0))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(6.0))
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(8.0))
-                                    .child(sf_symbol("sparkle", 18.0, colors.primary))
-                                    .child(
-                                        div()
-                                            .text_size(px(22.0))
-                                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                                            .text_color(colors.primary)
-                                            .child("Welcome to Zeus"),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(Typo::ROW.size))
-                                    .text_color(colors.secondary)
-                                    .child(
-                                        "Open a folder to choose where your agents should work.",
-                                    ),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_wrap()
-                            .items_start()
-                            .gap(px(36.0))
-                            .child(
-                                div()
-                                    .w(px(220.0))
-                                    .flex_none()
-                                    .flex()
-                                    .flex_col()
-                                    .gap(px(8.0))
-                                    .child(welcome_section_label("Start", colors))
-                                    .child(
-                                        div()
-                                            .id("welcome-open-folder")
-                                            .debug_selector(|| "welcome-open-folder".into())
-                                            .h(px(36.0))
-                                            .px(px(10.0))
-                                            .flex()
-                                            .items_center()
-                                            .gap(px(8.0))
-                                            .rounded(px(Radius::ROW))
-                                            .cursor_pointer()
-                                            .border_1()
-                                            .border_color(colors.primary.alpha(0.09))
-                                            .bg(colors.primary.alpha(0.045))
-                                            .hover(move |button| {
-                                                button.bg(colors.primary.alpha(0.08))
-                                            })
-                                            .active(move |button| {
-                                                button.bg(colors.primary.alpha(0.11))
-                                            })
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                this.choose_workspace_folder(window, cx);
-                                            }))
-                                            .child(sf_symbol("folder", 13.0, colors.secondary))
-                                            .child(
-                                                div()
-                                                    .text_size(px(Typo::ROW_EMPHASIZED.size))
-                                                    .font_weight(Typo::ROW_EMPHASIZED.weight)
-                                                    .text_color(colors.primary)
-                                                    .child("Open Folder…"),
-                                            ),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(px(Typo::META.size))
-                                            .line_height(px(15.0))
-                                            .text_color(colors.tertiary)
-                                            .child(
-                                                "Choose a repository or any directory on this Mac.",
-                                            ),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .min_w(px(0.0))
-                                    .flex_1()
-                                    .flex()
-                                    .flex_col()
-                                    .gap(px(8.0))
-                                    .child(welcome_section_label("Recent workspaces", colors))
-                                    .child(recent),
-                            ),
-                    ),
+                    .text_size(px(Typo::ROW_EMPHASIZED.size))
+                    .font_weight(Typo::ROW_EMPHASIZED.weight)
+                    .text_color(colors.secondary)
+                    .child("No active session"),
+            )
+            .child(
+                div()
+                    .text_size(px(Typo::META.size))
+                    .text_color(colors.tertiary)
+                    .child(detail),
             )
             .into_any_element()
     }
@@ -4043,27 +3803,6 @@ impl TerminalPane {
     }
 }
 
-fn ordered_recent_workspaces(mut projects: Vec<(Project, f64)>) -> Vec<Project> {
-    projects.sort_by(|(left, left_updated), (right, right_updated)| {
-        left.pinned_order
-            .unwrap_or(i64::MAX)
-            .cmp(&right.pinned_order.unwrap_or(i64::MAX))
-            .then_with(|| right_updated.total_cmp(left_updated))
-            .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
-            .then_with(|| left.root.cmp(&right.root))
-    });
-    projects.truncate(WELCOME_RECENT_LIMIT);
-    projects.into_iter().map(|(project, _)| project).collect()
-}
-
-fn welcome_section_label(label: &'static str, colors: SemanticColors) -> gpui::Div {
-    div()
-        .text_size(px(Typo::SECTION_HEADER.size))
-        .font_weight(Typo::SECTION_HEADER.weight)
-        .text_color(colors.secondary)
-        .child(label)
-}
-
 impl Render for TerminalPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.reconcile_residency();
@@ -4084,9 +3823,7 @@ impl Render for TerminalPane {
         self.sync_status_glyphs(colors, window, cx);
         self.update_selected_geometry(window, cx);
 
-        let selected = (!self.startup_welcome)
-            .then(|| self.selected_session())
-            .flatten();
+        let selected = self.selected_session();
 
         let content = if let Some(session) = selected {
             let chips = PaneChip::for_session(&session);
@@ -4162,14 +3899,14 @@ impl Render for TerminalPane {
             let welcome_lane = (follows_selection && self.chrome.traffic_light_lane)
                 .then(|| self.render_traffic_light_lane());
             // The strip exists for either control, and for the window buttons
-            // alone when the welcome canvas owns the window's leading edge.
-            let welcome_bar = (sidebar_reveal.is_some() || welcome_lane.is_some()).then_some((
+            // alone when the empty workbench owns the window's leading edge.
+            let empty_bar = (sidebar_reveal.is_some() || welcome_lane.is_some()).then_some((
                 sidebar_reveal,
                 welcome_lane,
                 self.chrome.mirrored,
             ));
             let empty_content = if follows_selection {
-                self.render_workspace_welcome(colors, cx)
+                self.render_empty_session(colors)
             } else {
                 div()
                     .flex_1()
@@ -4187,7 +3924,7 @@ impl Render for TerminalPane {
                 .flex()
                 .flex_col()
                 .bg(theme.background)
-                .when_some(welcome_bar, |pane, (reveal, lane, mirrored)| {
+                .when_some(empty_bar, |pane, (reveal, lane, mirrored)| {
                     pane.child(
                         div()
                             .h(px(Metrics::TITLE_BAR))
@@ -5394,7 +5131,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn an_empty_terminal_pane_shows_workspace_welcome_and_sidebar_control(cx: &mut TestAppContext) {
+    fn an_empty_terminal_pane_shows_neutral_state_and_sidebar_control(cx: &mut TestAppContext) {
         let runtime = Arc::new(StoreRuntime::inert());
         let tokio = Arc::new(
             tokio::runtime::Builder::new_current_thread()
@@ -5413,8 +5150,9 @@ mod tests {
             pane.read_with(cx, |pane, _| pane.selected_session().is_none()),
             "fixture must exercise the empty terminal state"
         );
-        assert!(cx.debug_bounds("workspace-welcome").is_some());
-        assert!(cx.debug_bounds("welcome-open-folder").is_some());
+        assert!(cx.debug_bounds("WORKSPACE_EMPTY").is_some());
+        assert!(cx.debug_bounds("workspace-welcome").is_none());
+        assert!(cx.debug_bounds("welcome-open-folder").is_none());
         assert!(
             cx.debug_bounds("show-sidebar").is_some(),
             "collapsing the sidebar must leave a way to reveal it"
@@ -5657,7 +5395,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn startup_welcome_precedes_a_restored_session_until_dismissed(cx: &mut TestAppContext) {
+    fn restored_session_renders_immediately_without_a_startup_canvas(cx: &mut TestAppContext) {
         let runtime = Arc::new(StoreRuntime::inert());
         let session = fixture_session();
         {
@@ -5672,41 +5410,11 @@ mod tests {
                 .expect("test runtime"),
         );
 
-        let (pane, cx) = cx.add_window_view(move |window, cx| {
-            let mut pane = TerminalPane::new(runtime, tokio, window, cx);
-            pane.show_startup_welcome();
-            pane
-        });
-
-        assert!(cx.debug_bounds("workspace-welcome").is_some());
-        assert!(pane.read_with(cx, |pane, _| pane.is_startup_welcome_visible()));
-
-        pane.update(cx, |pane, cx| pane.dismiss_startup_welcome(cx));
+        let (_pane, cx) =
+            cx.add_window_view(move |window, cx| TerminalPane::new(runtime, tokio, window, cx));
 
         assert!(cx.debug_bounds("workspace-welcome").is_none());
-        assert!(!pane.read_with(cx, |pane, _| pane.is_startup_welcome_visible()));
-    }
-
-    #[test]
-    fn workspace_welcome_prioritizes_pins_and_bounds_the_recent_list() {
-        let mut projects: Vec<_> = (0..8)
-            .map(|index| Project {
-                id: zeus_proto::ProjectId::new(format!("project-{index}")),
-                root: format!("/work/project-{index}"),
-                name: format!("Project {index}"),
-                pinned_order: None,
-            })
-            .zip(0..8)
-            .map(|(project, updated)| (project, f64::from(updated)))
-            .collect();
-        projects[7].0.name = "Pinned".to_owned();
-        projects[7].0.pinned_order = Some(0);
-
-        let recent = ordered_recent_workspaces(projects);
-
-        assert_eq!(recent.len(), WELCOME_RECENT_LIMIT);
-        assert_eq!(recent[0].name, "Pinned");
-        assert_eq!(recent[1].name, "Project 6");
+        assert!(cx.debug_bounds("WORKSPACE_EMPTY").is_none());
     }
 
     #[gpui::test]

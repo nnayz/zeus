@@ -1,4 +1,6 @@
-<h1><img src="docs/src/images/zeus-pixel-art.png" alt="Zeus" width="300"></h1>
+<div align="center">
+    <h1><img src="docs/src/images/pixel-art-zeus.png" alt="Zeus" width="300"></h1>
+</div>
 
 [![CI](https://github.com/nnayz/zeus/actions/workflows/ci.yml/badge.svg)](https://github.com/nnayz/zeus/actions/workflows/ci.yml)
 [![GitHub release](https://img.shields.io/github/v/release/nnayz/zeus)](https://github.com/nnayz/zeus/releases/latest)

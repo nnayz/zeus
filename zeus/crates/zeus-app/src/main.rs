@@ -1,6 +1,5 @@
 mod agent_catalog;
 mod app_theme;
-mod clipboard_transfer;
 mod code_intelligence;
 mod code_viewer;
 #[cfg(unix)]
@@ -12,6 +11,7 @@ pub mod fonts;
 pub mod fuzzy;
 mod git_review;
 pub mod history;
+mod image_attachment;
 mod inspector;
 pub mod markdown;
 mod markdown_view;

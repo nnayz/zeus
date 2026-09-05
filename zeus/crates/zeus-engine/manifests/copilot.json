@@ -35,7 +35,13 @@
     "envScrubPrefixes": [
       "ZEUS_",
       "ZEUS_"
-    ]
+    ],
+    "attachments": {
+      "images": {
+        "strategy": "path",
+        "multiple": true
+      }
+    }
   },
   "rules": [
     {

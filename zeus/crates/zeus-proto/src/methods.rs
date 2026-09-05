@@ -24,6 +24,7 @@ impl Method {
     pub const SESSION_RENAME: &'static str = "session.rename";
     pub const SESSION_RESUME: &'static str = "session.resume";
     pub const SESSION_SEND_TEXT: &'static str = "session.send_text";
+    pub const SESSION_UPLOAD_ATTACHMENT: &'static str = "session.upload_attachment";
     pub const SESSION_RESIZE: &'static str = "session.resize";
     pub const SESSION_READ_SCREEN: &'static str = "session.read_screen";
     pub const SESSION_READ_SCROLLBACK: &'static str = "session.read_scrollback";
@@ -216,6 +217,49 @@ pub struct AgentDescriptor {
     /// compatible.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub setup: Option<AgentSetup>,
+    /// Optional image-input capability from the Agent manifest. Missing means
+    /// the agent does not accept image attachments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachments: Option<AgentAttachments>,
+}
+
+/// Agent-declared attachment capabilities. Unknown future keys are ignored.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentAttachments {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub images: Option<ImageAttachmentCapability>,
+}
+
+/// How an agent consumes image files dropped or pasted into a session.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageAttachmentCapability {
+    /// Currently `"path"`: insert a host-valid file path. Other values are
+    /// reserved; clients must not invent a delivery strategy for them.
+    #[serde(default)]
+    pub strategy: String,
+    #[serde(default)]
+    pub multiple: bool,
+}
+
+impl ImageAttachmentCapability {
+    pub const PATH_STRATEGY: &'static str = "path";
+
+    /// True when Zeus should insert a staged file path into the prompt.
+    #[must_use]
+    pub fn inserts_path(&self) -> bool {
+        self.strategy == Self::PATH_STRATEGY
+    }
+}
+
+impl AgentDescriptor {
+    /// Image path insertion declared by this agent's manifest, if any.
+    #[must_use]
+    pub fn image_path_capability(&self) -> Option<&ImageAttachmentCapability> {
+        let images = self.attachments.as_ref()?.images.as_ref()?;
+        images.inserts_path().then_some(images)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -311,6 +355,24 @@ pub struct SessionIdParams {
 
 /// Swift spelling retained for protocol-oriented callers.
 pub use SessionIdParams as SessionIDParams;
+
+/// Asks the Engine to copy a locally staged image onto a remote session host.
+///
+/// The file is already on the Engine's machine. This is not a Remote Holder
+/// protocol message and does not send image bytes on the control channel.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionUploadAttachmentParams {
+    #[serde(rename = "sessionID")]
+    pub session_id: SessionId,
+    pub local_path: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionUploadAttachmentResult {
+    pub remote_path: String,
+}
 
 pub type SessionKillParams = SessionIdParams;
 pub type SessionRemoveParams = SessionIdParams;

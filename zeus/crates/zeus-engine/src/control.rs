@@ -472,7 +472,7 @@ impl ControlServer {
         else {
             return false;
         };
-        if !is_git_method(&method) {
+        if !is_git_method(&method) && method != Method::SESSION_UPLOAD_ATTACHMENT {
             return false;
         }
         let server = Arc::clone(self);
@@ -489,12 +489,14 @@ impl ControlServer {
                 let _ = write_message(&response_writer, &response);
             }));
         if !queued {
+            let message = if method == Method::SESSION_UPLOAD_ATTACHMENT {
+                "an attachment upload is already in progress; wait and retry"
+            } else {
+                "Git workspace is busy; wait for the current requests and try again"
+            };
             let response = ControlMessage::Response {
                 id,
-                result: Err(ControlError::new(
-                    "busy",
-                    "Git workspace is busy; wait for the current requests and try again",
-                )),
+                result: Err(ControlError::new("busy", message)),
             };
             let _ = write_message(writer, &response);
         }
@@ -657,6 +659,7 @@ impl ControlServer {
             Method::SESSION_SPAWN => self.session_spawn(params),
             Method::SESSION_LIST | Method::STATE_SNAPSHOT => self.session_list(),
             Method::SESSION_SEND_TEXT => self.session_send_text(params),
+            Method::SESSION_UPLOAD_ATTACHMENT => self.session_upload_attachment(params),
             Method::SESSION_RESIZE => self.session_resize(params),
             Method::SESSION_READ_SCREEN => self.session_read_screen(params),
             Method::SESSION_READ_SCROLLBACK => self.session_read_scrollback(params),
@@ -1620,6 +1623,60 @@ impl ControlServer {
             .send_text(&p.text, p.submit)
             .map_err(|error| ControlError::internal(error.to_string()))?;
         Ok(json!({}))
+    }
+
+    fn session_upload_attachment(
+        &self,
+        params: Option<JsonValue>,
+    ) -> Result<JsonValue, ControlError> {
+        let p: zeus_proto::SessionUploadAttachmentParams = decode(params)?;
+        let (host_id, session_id) = {
+            let registry = self.registry.lock().map_err(poisoned)?;
+            let record = registry
+                .records()
+                .into_iter()
+                .find(|record| record.id.0 == p.session_id.0)
+                .ok_or_else(|| ControlError::not_found(p.session_id.0.clone()))?;
+            let host_id = record.host.clone().ok_or_else(|| {
+                ControlError::bad_request("image upload is only for remote sessions")
+            })?;
+            (host_id, record.id.0)
+        };
+        let manager = self
+            .remote
+            .as_ref()
+            .ok_or_else(crate::remote::transport_unavailable)?;
+        let host = self.resolve_host(&host_id)?;
+        let bytes = crate::attachment::read_local_image(std::path::Path::new(&p.local_path))?;
+        let kind = crate::attachment::sniff_image(&bytes).ok_or_else(|| {
+            ControlError::bad_request("file is not a supported PNG, JPEG, GIF, or WebP image")
+        })?;
+        let file_name = crate::attachment::unique_file_name(kind)?;
+        let payload = crate::attachment::upload_payload(&session_id, &file_name, &bytes)?;
+        let output = manager
+            .run_fixed_script(
+                &host,
+                crate::attachment::UPLOAD_SCRIPT,
+                payload,
+                crate::attachment::UPLOAD_TIMEOUT,
+                crate::attachment::MAX_STDOUT,
+            )
+            .map_err(|error| ControlError::new("upload_failed", error.to_string()))?;
+        if output.stdout_truncated {
+            return Err(ControlError::new(
+                "upload_failed",
+                "remote upload response was truncated",
+            ));
+        }
+        if !output.status.success() {
+            return Err(ControlError::new(
+                "upload_failed",
+                crate::attachment::upload_failure(&output.stderr),
+            ));
+        }
+        encode(&zeus_proto::SessionUploadAttachmentResult {
+            remote_path: crate::attachment::parse_remote_path(&output.stdout)?,
+        })
     }
 
     fn session_resize(&self, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
@@ -3715,6 +3772,55 @@ mod tests {
                 .unwrap_or(false),
             "the raw manifest descriptor rides along: {claude}"
         );
+    }
+
+    #[test]
+    fn upload_attachment_fails_closed_without_a_remote_host() {
+        let temp = tempfile::tempdir().expect("temp");
+        let registry = Arc::new(Mutex::new(Registry::new(
+            engine(),
+            temp.path().join("state.json"),
+        )));
+        {
+            let mut guard = registry.lock().expect("registry");
+            let mut local = test_record("s_local");
+            local.host = None;
+            guard.insert_record(local);
+            let mut remote = test_record("s_remote");
+            remote.host = Some("forge".into());
+            guard.insert_record(remote);
+        }
+        let server = ControlServer::new(registry, temp.path().join("daemon.sock"));
+
+        let missing = err_of(call(
+            &server,
+            Method::SESSION_UPLOAD_ATTACHMENT,
+            Some(json!({
+                "sessionID": "s_missing",
+                "localPath": "/tmp/none.png"
+            })),
+        ));
+        assert_eq!(missing.code, "not_found");
+
+        let local = err_of(call(
+            &server,
+            Method::SESSION_UPLOAD_ATTACHMENT,
+            Some(json!({
+                "sessionID": "s_local",
+                "localPath": "/tmp/none.png"
+            })),
+        ));
+        assert_eq!(local.code, "bad_request");
+
+        let remote = err_of(call(
+            &server,
+            Method::SESSION_UPLOAD_ATTACHMENT,
+            Some(json!({
+                "sessionID": "s_remote",
+                "localPath": "/tmp/none.png"
+            })),
+        ));
+        assert_eq!(remote.code, "remote_transport_unavailable");
     }
 
     #[test]

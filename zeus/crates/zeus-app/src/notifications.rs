@@ -586,6 +586,7 @@ mod tests {
                 submit: true,
             }),
             setup: None,
+            attachments: None,
         };
         let current = session(
             amp.clone(),

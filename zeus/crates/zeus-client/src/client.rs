@@ -561,6 +561,25 @@ impl DaemonClient {
         .await
     }
 
+    pub async fn upload_attachment(
+        &self,
+        session_id: &SessionId,
+        local_path: impl Into<String>,
+    ) -> Result<String, ClientError> {
+        let result: SessionUploadAttachmentResult = self
+            .core
+            .request_typed(
+                Method::SESSION_UPLOAD_ATTACHMENT,
+                Some(&SessionUploadAttachmentParams {
+                    session_id: session_id.clone(),
+                    local_path: local_path.into(),
+                }),
+                Some(Duration::from_secs(90)),
+            )
+            .await?;
+        Ok(result.remote_path)
+    }
+
     pub async fn resize(
         &self,
         session_id: &SessionId,

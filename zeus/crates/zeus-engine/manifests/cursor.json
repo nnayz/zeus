@@ -44,6 +44,12 @@
     "deny": {
       "text": "n",
       "submit": false
+    },
+    "attachments": {
+      "images": {
+        "strategy": "path",
+        "multiple": true
+      }
     }
   },
   "rules": [

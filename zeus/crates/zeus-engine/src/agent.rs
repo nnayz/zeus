@@ -136,6 +136,28 @@ pub struct AgentDescriptor {
     pub approve: Option<ApproveSpec>,
     #[serde(default)]
     pub setup: Option<SetupSpec>,
+    /// Optional image-input capability. Missing means the agent does not
+    /// accept image attachments. Unknown future keys are ignored.
+    #[serde(default)]
+    pub attachments: Option<AttachmentsSpec>,
+}
+
+/// Additive attachment capability block from an Agent manifest.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentsSpec {
+    #[serde(default)]
+    pub images: Option<ImageAttachmentSpec>,
+}
+
+/// How an agent consumes dropped or pasted images.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageAttachmentSpec {
+    #[serde(default)]
+    pub strategy: String,
+    #[serde(default)]
+    pub multiple: bool,
 }
 
 impl AgentDescriptor {
@@ -351,6 +373,18 @@ mod tests {
         // An agent added by dropping in a JSON file gets the right authority
         // with no code change at all.
         assert_eq!(descriptor("opencode").authority(), Authority::ScreenPrimary);
+    }
+
+    #[test]
+    fn image_attachments_are_opt_in_and_missing_means_unsupported() {
+        assert!(descriptor("shell").attachments.is_none());
+        assert!(descriptor("generic").attachments.is_none());
+        let claude = descriptor("claude-code")
+            .attachments
+            .and_then(|attachments| attachments.images);
+        let claude = claude.expect("claude-code declares image path attachments");
+        assert_eq!(claude.strategy, "path");
+        assert!(claude.multiple);
     }
 
     #[test]

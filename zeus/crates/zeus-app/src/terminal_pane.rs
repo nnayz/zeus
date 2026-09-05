@@ -8,11 +8,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, App, ClickEvent, ClipboardEntry, ClipboardItem, Context, Entity, EventEmitter,
-    FocusHandle, KeyBinding, KeyDownEvent, KeyUpEvent, ModifiersChangedEvent, MouseButton,
-    PathBuilder, Render, Rgba, ScrollDelta, ScrollHandle, ScrollWheelEvent, SharedString,
-    StatefulInteractiveElement, Subscription, Task, Window, actions, canvas, div, font, point,
-    prelude::*, px, rgba,
+    AnyElement, App, ClickEvent, ClipboardEntry, ClipboardItem, Context, DragMoveEvent, Entity,
+    EventEmitter, ExternalPaths, FocusHandle, KeyBinding, KeyDownEvent, KeyUpEvent,
+    ModifiersChangedEvent, MouseButton, PathBuilder, Render, Rgba, ScrollDelta, ScrollHandle,
+    ScrollWheelEvent, SharedString, StatefulInteractiveElement, Subscription, Task, Window,
+    actions, canvas, div, font, point, prelude::*, px, rgba,
 };
 use tokio::runtime::Handle;
 use tokio::sync::mpsc;
@@ -43,7 +43,10 @@ use zeus_ui::{
     SemanticColors, StatusGlyph, StatusState, Typo, WorkingOrbit,
 };
 
-use crate::clipboard_transfer::StagedClipboardImage;
+use crate::image_attachment::{
+    AttachmentDecision, ImageStore, StagedImage, capability_from_descriptor, decide_drop,
+    keep_staged, paste_paths, stage_bytes, stage_drop, unsupported_message,
+};
 use crate::macos::sf_symbols::{SymbolWeight, sf_symbol, sf_symbol_weighted};
 use crate::navigation::{NavigationOverlay, ToggleCommandPalette, ToggleQuickOpen, query_label};
 use crate::preview_terminal::{preview_session_grid, preview_session_grid_sized};
@@ -445,7 +448,22 @@ enum PaneEvent {
     FindSnapshot(SessionId, SearchRequest, FindSnapshot),
     ScrollbackCells(SessionId, zeus_proto::ReadScrollbackCellsResult, usize),
     ScrollbackFailed(SessionId),
-    ClipboardUploadFinished(SessionId, Result<String, String>),
+    AttachmentUploadFinished(SessionId, Result<Vec<String>, String>, Vec<String>),
+}
+
+#[derive(Clone, Debug)]
+enum AttachmentUi {
+    Hover { names: Vec<String>, message: String },
+    Progress { message: String },
+    Success { message: String },
+    Failed { message: String },
+    Unsupported { message: String },
+}
+
+struct PendingUpload {
+    session_id: SessionId,
+    local_paths: Vec<String>,
+    display_names: Vec<String>,
 }
 
 struct ResidentTerminal {
@@ -575,7 +593,9 @@ pub struct TerminalPane {
     chrome: ShellChrome,
     navigation: Option<Entity<NavigationOverlay>>,
     utility_surfaces: Option<Entity<UtilitySurfaces>>,
-    local_clipboard_images: Vec<StagedClipboardImage>,
+    staged_images: ImageStore,
+    attachment_ui: Option<AttachmentUi>,
+    pending_upload: Option<PendingUpload>,
     _pane_events: Task<()>,
     _store_changes: Task<()>,
     _focus_subscriptions: Vec<Subscription>,
@@ -735,7 +755,9 @@ impl TerminalPane {
             },
             navigation: None,
             utility_surfaces: None,
-            local_clipboard_images: Vec::new(),
+            staged_images: ImageStore::default(),
+            attachment_ui: None,
+            pending_upload: None,
             _pane_events: pane_events,
             _store_changes: store_changes,
             _focus_subscriptions: vec![focus_in, focus_out],
@@ -1103,16 +1125,9 @@ impl TerminalPane {
                     cx.notify();
                 }
             }
-            PaneEvent::ClipboardUploadFinished(id, result) => match result {
-                Ok(remote_path) => {
-                    if let Some(resident) = self.residents.get(&id) {
-                        resident
-                            .attachment
-                            .input(paste(&remote_path, resident.input_modes.bracketed_paste));
-                    }
-                }
-                Err(error) => eprintln!("zeus: clipboard image upload failed: {error}"),
-            },
+            PaneEvent::AttachmentUploadFinished(id, result, local_paths) => {
+                self.finish_remote_upload(id, result, local_paths, cx);
+            }
         }
     }
 
@@ -1565,47 +1580,14 @@ impl TerminalPane {
             if in_find {
                 return;
             }
-
-            let staged = match StagedClipboardImage::stage(bytes, extension) {
-                Ok(staged) => staged,
-                Err(error) => {
-                    eprintln!("zeus: could not stage clipboard image: {error}");
-                    return;
-                }
-            };
-            let ssh = {
-                let store = self
-                    .runtime
-                    .store
-                    .read()
-                    .expect("session store lock poisoned");
-                store
-                    .selected_session()
-                    .and_then(|session| session.host.as_deref())
-                    .and_then(|host_id| store.host(host_id))
-                    .map(|host| host.ssh.clone())
-            };
-
-            if let Some(ssh) = ssh {
-                let pane_tx = self.pane_tx.clone();
-                let upload_id = id.clone();
-                self.tokio.spawn(async move {
-                    let result = tokio::task::spawn_blocking(move || staged.upload(&ssh))
-                        .await
-                        .unwrap_or_else(|error| Err(format!("upload task failed: {error}")));
-                    let _ = pane_tx.send(PaneEvent::ClipboardUploadFinished(upload_id, result));
-                });
-            } else {
-                let local_path = staged.path().to_string_lossy().into_owned();
-                if let Some(resident) = self.residents.get(&id) {
-                    resident
-                        .attachment
-                        .input(paste(&local_path, resident.input_modes.bracketed_paste));
-                }
-                self.local_clipboard_images.push(staged);
-                if self.local_clipboard_images.len() > 32 {
-                    self.local_clipboard_images.remove(0);
-                }
+            match stage_bytes(bytes, format!("clipboard.{extension}")) {
+                Ok(staged) => self.deliver_images(id, vec![staged], window, cx),
+                Err(error) => self.set_attachment_ui(
+                    AttachmentUi::Failed {
+                        message: error.user_message().to_owned(),
+                    },
+                    cx,
+                ),
             }
             cx.stop_propagation();
             cx.notify();
@@ -1631,6 +1613,236 @@ impl TerminalPane {
         }
         cx.stop_propagation();
         cx.notify();
+    }
+
+    fn set_attachment_ui(&mut self, ui: AttachmentUi, cx: &mut Context<Self>) {
+        self.attachment_ui = Some(ui);
+        cx.notify();
+    }
+
+    fn session_image_capability(
+        &self,
+        id: &SessionId,
+    ) -> (Option<zeus_proto::AgentDescriptor>, bool) {
+        let store = self
+            .runtime
+            .store
+            .read()
+            .expect("session store lock poisoned");
+        let Some(session) = store.sessions().get(id) else {
+            return (None, false);
+        };
+        let descriptor = store.agent_descriptor(&session.kind).cloned();
+        let remote = session.host.is_some();
+        (descriptor, remote)
+    }
+
+    fn deliver_images(
+        &mut self,
+        id: SessionId,
+        images: Vec<StagedImage>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (descriptor, remote) = self.session_image_capability(&id);
+        if capability_from_descriptor(descriptor.as_ref()).is_none() {
+            let name = descriptor
+                .as_ref()
+                .map(|descriptor| descriptor.display_name.as_str())
+                .filter(|name| !name.is_empty())
+                .unwrap_or("This agent");
+            self.set_attachment_ui(
+                AttachmentUi::Unsupported {
+                    message: unsupported_message(name),
+                },
+                cx,
+            );
+            return;
+        }
+        let display_names: Vec<String> = images
+            .iter()
+            .map(|image| image.original_name.clone())
+            .collect();
+        let local_paths = keep_staged(&mut self.staged_images, images);
+        if remote {
+            self.start_remote_upload(id, local_paths, display_names, cx);
+            return;
+        }
+        self.insert_attachment_paths(&id, &local_paths);
+        self.set_attachment_ui(
+            AttachmentUi::Success {
+                message: attachment_success_message(&display_names),
+            },
+            cx,
+        );
+        self.focus(window, cx);
+    }
+
+    fn insert_attachment_paths(&mut self, id: &SessionId, paths: &[String]) {
+        let payload = paste_paths(paths);
+        if let Some(resident) = self.residents.get(id) {
+            resident
+                .attachment
+                .input(paste(&payload, resident.input_modes.bracketed_paste));
+        }
+    }
+
+    fn start_remote_upload(
+        &mut self,
+        id: SessionId,
+        local_paths: Vec<String>,
+        display_names: Vec<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.pending_upload = Some(PendingUpload {
+            session_id: id.clone(),
+            local_paths: local_paths.clone(),
+            display_names: display_names.clone(),
+        });
+        self.set_attachment_ui(
+            AttachmentUi::Progress {
+                message: format!("Uploading {}…", attachment_count(&display_names)),
+            },
+            cx,
+        );
+        let client = Arc::clone(self.runtime.client());
+        let pane_tx = self.pane_tx.clone();
+        let upload_id = id;
+        self.tokio.spawn(async move {
+            let mut remote_paths = Vec::with_capacity(local_paths.len());
+            for path in local_paths.clone() {
+                match client.upload_attachment(&upload_id, path).await {
+                    Ok(remote) => remote_paths.push(remote),
+                    Err(error) => {
+                        let _ = pane_tx.send(PaneEvent::AttachmentUploadFinished(
+                            upload_id,
+                            Err(error.to_string()),
+                            local_paths,
+                        ));
+                        return;
+                    }
+                }
+            }
+            let _ = pane_tx.send(PaneEvent::AttachmentUploadFinished(
+                upload_id,
+                Ok(remote_paths),
+                local_paths,
+            ));
+        });
+    }
+
+    fn finish_remote_upload(
+        &mut self,
+        id: SessionId,
+        result: Result<Vec<String>, String>,
+        local_paths: Vec<String>,
+        cx: &mut Context<Self>,
+    ) {
+        match result {
+            Ok(remote_paths) => {
+                self.insert_attachment_paths(&id, &remote_paths);
+                let names = self
+                    .pending_upload
+                    .as_ref()
+                    .filter(|pending| pending.session_id == id)
+                    .map(|pending| pending.display_names.clone())
+                    .unwrap_or_default();
+                self.pending_upload = None;
+                self.set_attachment_ui(
+                    AttachmentUi::Success {
+                        message: attachment_success_message(&names),
+                    },
+                    cx,
+                );
+            }
+            Err(error) => {
+                self.pending_upload = Some(PendingUpload {
+                    session_id: id,
+                    local_paths,
+                    display_names: self
+                        .pending_upload
+                        .as_ref()
+                        .map(|pending| pending.display_names.clone())
+                        .unwrap_or_default(),
+                });
+                self.set_attachment_ui(
+                    AttachmentUi::Failed {
+                        message: format!("Upload failed: {error}"),
+                    },
+                    cx,
+                );
+            }
+        }
+    }
+
+    fn retry_pending_upload(&mut self, cx: &mut Context<Self>) {
+        let Some(pending) = self.pending_upload.take() else {
+            return;
+        };
+        self.start_remote_upload(
+            pending.session_id,
+            pending.local_paths,
+            pending.display_names,
+            cx,
+        );
+    }
+
+    fn cancel_pending_upload(&mut self, cx: &mut Context<Self>) {
+        self.pending_upload = None;
+        self.attachment_ui = None;
+        cx.notify();
+    }
+
+    fn handle_external_paths(
+        &mut self,
+        paths: &ExternalPaths,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(id) = self.selected_id() else {
+            return;
+        };
+        let (descriptor, _) = self.session_image_capability(&id);
+        match stage_drop(descriptor.as_ref(), paths.paths()) {
+            Ok(images) => self.deliver_images(id, images, window, cx),
+            Err(AttachmentDecision::Unsupported { message }) => {
+                self.set_attachment_ui(AttachmentUi::Unsupported { message }, cx);
+            }
+            Err(AttachmentDecision::Rejected { message }) => {
+                self.set_attachment_ui(AttachmentUi::Failed { message }, cx);
+            }
+            Err(AttachmentDecision::Ready { .. }) => {}
+        }
+        self.focus(window, cx);
+    }
+
+    fn preview_external_paths(&mut self, paths: &ExternalPaths, cx: &mut Context<Self>) {
+        let Some(id) = self.selected_id() else {
+            return;
+        };
+        let (descriptor, _) = self.session_image_capability(&id);
+        match decide_drop(descriptor.as_ref(), paths.paths()) {
+            AttachmentDecision::Ready { display_names } => {
+                let message = format!("Drop {} to attach", attachment_count(&display_names));
+                self.set_attachment_ui(
+                    AttachmentUi::Hover {
+                        names: display_names,
+                        message,
+                    },
+                    cx,
+                );
+            }
+            AttachmentDecision::Unsupported { message }
+            | AttachmentDecision::Rejected { message } => {
+                self.set_attachment_ui(
+                    AttachmentUi::Hover {
+                        names: Vec::new(),
+                        message,
+                    },
+                    cx,
+                );
+            }
+        }
     }
 
     fn handle_key_down(
@@ -3010,6 +3222,24 @@ impl TerminalPane {
             .px(px(12.0))
             .bg(theme.background)
             .track_focus(&self.focus)
+            .can_drop(|value, _, _| value.downcast_ref::<ExternalPaths>().is_some())
+            .drag_over::<ExternalPaths>(|style, _, _, _| {
+                style
+                    .border_1()
+                    .border_dashed()
+                    .border_color(rgba(0x6aa6ffff))
+                    .bg(rgba(0x6aa6ff14))
+            })
+            .on_drag_move(
+                cx.listener(|this, event: &DragMoveEvent<ExternalPaths>, _, cx| {
+                    if let Some(paths) = event.dragged_item().downcast_ref::<ExternalPaths>() {
+                        this.preview_external_paths(paths, cx);
+                    }
+                }),
+            )
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                this.handle_external_paths(paths, window, cx);
+            }))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
@@ -3328,6 +3558,9 @@ impl TerminalPane {
         if exited {
             body = body.child(self.render_exit_pill(session, cx));
         }
+        if let Some(banner) = self.render_attachment_banner(cx) {
+            body = body.child(banner);
+        }
         body.into_any_element()
     }
 
@@ -3389,6 +3622,74 @@ impl TerminalPane {
             .justify_center()
             .child(pill)
             .into_any_element()
+    }
+
+    fn render_attachment_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let ui = self.attachment_ui.as_ref()?;
+        let (message, failed) = match ui {
+            AttachmentUi::Hover { message, .. }
+            | AttachmentUi::Progress { message }
+            | AttachmentUi::Success { message }
+            | AttachmentUi::Unsupported { message } => (message.as_str(), false),
+            AttachmentUi::Failed { message } => (message.as_str(), true),
+        };
+        let names = match ui {
+            AttachmentUi::Hover { names, .. } => names.clone(),
+            _ => Vec::new(),
+        };
+        let mut banner = div()
+            .id("attachment-banner")
+            .absolute()
+            .top(px(12.0))
+            .left_0()
+            .right_0()
+            .flex()
+            .justify_center()
+            .child(
+                div()
+                    .max_w(px(520.0))
+                    .rounded(px(10.0))
+                    .px(px(12.0))
+                    .py(px(8.0))
+                    .bg(rgba(0x1b1d24f2))
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(rgba(0xffffffe6))
+                            .child(message.to_owned()),
+                    )
+                    .when(!names.is_empty(), |banner| {
+                        banner.child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(rgba(0xffffff99))
+                                .child(names.join(", ")),
+                        )
+                    }),
+            );
+        if failed && self.pending_upload.is_some() {
+            banner = banner.child(
+                div()
+                    .flex()
+                    .justify_center()
+                    .gap(px(8.0))
+                    .mt(px(4.0))
+                    .child(attachment_action_button(
+                        "attachment-retry",
+                        "Retry",
+                        cx.listener(|this, _, _, cx| this.retry_pending_upload(cx)),
+                    ))
+                    .child(attachment_action_button(
+                        "attachment-cancel",
+                        "Cancel",
+                        cx.listener(|this, _, _, cx| this.cancel_pending_upload(cx)),
+                    )),
+            );
+        }
+        Some(banner.into_any_element())
     }
 
     fn render_find_bar(
@@ -4787,6 +5088,38 @@ fn estimated_grid_size(
     )
 }
 
+fn attachment_count(names: &[String]) -> String {
+    match names.len() {
+        0 => "images".to_owned(),
+        1 => names[0].clone(),
+        n => format!("{n} images"),
+    }
+}
+
+fn attachment_success_message(names: &[String]) -> String {
+    format!("Attached {}", attachment_count(names))
+}
+
+fn attachment_action_button(
+    id: &'static str,
+    label: &'static str,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    div()
+        .id(id)
+        .rounded(px(999.0))
+        .px(px(10.0))
+        .py(px(4.0))
+        .bg(rgba(0xffffff1a))
+        .hover(|style| style.bg(rgba(0xffffff2e)))
+        .cursor_pointer()
+        .text_size(px(11.5))
+        .text_color(rgba(0xffffffe6))
+        .child(label)
+        .on_click(on_click)
+        .into_any_element()
+}
+
 fn clipboard_image(item: &ClipboardItem) -> Option<(&[u8], &'static str)> {
     item.entries().iter().find_map(|entry| match entry {
         ClipboardEntry::Image(image) => Some((image.bytes.as_slice(), image.format.extension())),
@@ -5748,6 +6081,30 @@ mod tests {
         assert_eq!(bytes, b"clipboard png");
         assert_eq!(extension, "png");
         assert_eq!(item.text(), None);
+    }
+
+    #[test]
+    fn unsupported_agents_get_an_explanation_instead_of_paths() {
+        let shell = zeus_proto::AgentDescriptor {
+            id: "shell".into(),
+            display_name: "Shell".into(),
+            ..zeus_proto::AgentDescriptor::default()
+        };
+        match decide_drop(Some(&shell), &[std::path::PathBuf::from("/tmp/a.png")]) {
+            AttachmentDecision::Unsupported { message } => {
+                assert!(message.contains("does not accept image attachments"));
+            }
+            other => panic!("expected unsupported, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn remote_upload_failure_does_not_build_a_local_paste_payload() {
+        let failed: Result<Vec<String>, String> = Err("scp failed".into());
+        assert!(failed.is_err());
+        let success = vec!["/home/dev/.cache/zeus/sessions/s_abc/attachments/img-1.png".to_owned()];
+        assert!(!paste_paths(&success).starts_with("/tmp/"));
+        assert!(!paste_paths(&success).contains("/var/folders"));
     }
 
     #[test]

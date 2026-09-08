@@ -25,6 +25,7 @@
 
 # Reference
 
+- [Companion architecture](companion-architecture.md)
 - [Support](support.md)
 - [Screenshot soak test](screenshot-soak.md)
 - [Roadmap](roadmap.md)

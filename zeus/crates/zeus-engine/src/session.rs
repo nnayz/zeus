@@ -282,7 +282,7 @@ struct GridWakeState {
 const INTERACTIVE_GRID_BUDGET: u8 = 2;
 
 impl GridWake {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             inner: Arc::new(GridWakeInner {
                 state: Mutex::new(GridWakeState {

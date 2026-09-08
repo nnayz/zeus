@@ -508,6 +508,14 @@ impl Registry {
         changed
     }
 
+    /// Cheap authoritative grid change sources for the existing event watcher.
+    /// Cloning a wake does not inspect terminal state or construct a snapshot.
+    pub(crate) fn grid_sources(&self) -> impl Iterator<Item = (&str, crate::session::GridWake)> {
+        self.sessions
+            .iter()
+            .map(|(id, session)| (id.as_str(), session.grid_wake()))
+    }
+
     /// Ends a session but keeps its record, which is what archiving means here.
     pub fn terminate(
         &mut self,

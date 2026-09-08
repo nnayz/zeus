@@ -136,13 +136,24 @@ impl SubscriberQueue {
         }
         if state.queue.len() >= state.capacity {
             if let Some(evicted) = state.queue.pop_front() {
+                // A queued recovery marker can itself be displaced by a new
+                // burst. Preserve its hole instead of counting sentinel seq 0.
+                let (count, first, last) = if evicted.name == EVENTS_DROPPED {
+                    (
+                        evicted.params["dropped"].as_u64().unwrap_or(0),
+                        evicted.params["fromSeq"].as_u64().unwrap_or(0),
+                        evicted.params["toSeq"].as_u64().unwrap_or(0),
+                    )
+                } else {
+                    (1, evicted.seq, evicted.seq)
+                };
                 if state.dropped == 0 {
-                    state.first_dropped_seq = evicted.seq;
+                    state.first_dropped_seq = first;
                 }
-                state.last_dropped_seq = evicted.seq;
-                state.dropped += 1;
+                state.last_dropped_seq = last;
+                state.dropped = state.dropped.saturating_add(count);
             }
-        } else if state.dropped > 0 {
+        } else if state.dropped > 0 && state.queue.len() + 2 <= state.capacity {
             let marker = Event {
                 name: EVENTS_DROPPED.into(),
                 seq: 0,
@@ -177,6 +188,7 @@ struct BusInner {
     ring_bytes: usize,
     subscribers: HashMap<u64, Arc<SubscriberQueue>>,
     next_subscriber: u64,
+    companion_subscribers: usize,
 }
 
 /// The bus itself; cheap to clone, shared by the control server and the
@@ -215,12 +227,14 @@ impl EventBus {
                 ring_bytes: 0,
                 subscribers: HashMap::new(),
                 next_subscriber: 0,
+                companion_subscribers: 0,
             })),
             ring_capacity,
             ring_byte_capacity,
             subscriber_capacity: subscriber_capacity
                 .unwrap_or(ring_capacity.max(1) * 2)
-                .max(1),
+                // A recovery marker and the newest event must fit together.
+                .max(2),
         }
     }
 
@@ -294,6 +308,7 @@ impl EventBus {
                     "session.removed".into(),
                     "project.updated".into(),
                     "session.output".into(),
+                    "terminal.control_changed".into(),
                 ]),
             ),
             true,
@@ -333,11 +348,19 @@ impl EventBus {
         let id = inner.next_subscriber;
         inner.next_subscriber += 1;
         inner.subscribers.insert(id, Arc::clone(&queue));
+        if projection {
+            inner.companion_subscribers += 1;
+        }
         EventStream {
             bus: Arc::clone(&self.inner),
             id,
             queue,
+            projection,
         }
+    }
+
+    fn has_companion_subscribers(&self) -> bool {
+        self.inner.lock().expect("bus").companion_subscribers > 0
     }
 
     pub fn current_seq(&self) -> u64 {
@@ -355,6 +378,7 @@ pub struct EventStream {
     bus: Arc<Mutex<BusInner>>,
     id: u64,
     queue: Arc<SubscriberQueue>,
+    projection: bool,
 }
 
 impl EventStream {
@@ -390,6 +414,9 @@ impl Drop for EventStream {
         self.queue.state.lock().expect("queue").closed = true;
         if let Ok(mut inner) = self.bus.lock() {
             inner.subscribers.remove(&self.id);
+            if self.projection {
+                inner.companion_subscribers -= 1;
+            }
         }
     }
 }
@@ -430,12 +457,16 @@ pub fn spawn_registry_watcher(
             // cloned and JSON-serialized every record (live and archived) on
             // every pass, all under the registry lock.
             let mut published: HashMap<String, u64> = HashMap::new();
+            let mut screens = ScreenChanges::default();
             while !stop.load(Ordering::SeqCst) {
-                let changed = {
+                let observe_screens = events.has_companion_subscribers();
+                let (changed, screen_changed) = {
                     let Ok(mut registry) = registry.lock() else {
                         break;
                     };
-                    registry.changed_since(&mut published)
+                    let changed = registry.changed_since(&mut published);
+                    let screen_changed = screens.sample(observe_screens, registry.grid_sources());
+                    (changed, screen_changed)
                 };
                 for (id, record) in changed {
                     events.publish_encoded(
@@ -444,10 +475,74 @@ pub fn spawn_registry_watcher(
                         Some(&id),
                     );
                 }
+                if screen_changed {
+                    // Coalesce all screens into one payload-free invalidation.
+                    // No terminal snapshot or diff is built by this watcher.
+                    events.publish("session.output", JsonValue::Null, None);
+                }
                 std::thread::sleep(Duration::from_millis(150));
             }
         })
         .expect("spawn watcher")
+}
+
+/// Opt-in screen observation on the existing 150 ms registry cadence. The map
+/// contains only live grid sources, never terminal data. PTY pumps are unchanged;
+/// quiet sessions cost one small generation read and allocate nothing per tick.
+#[derive(Default)]
+struct ScreenChanges {
+    observed: HashMap<String, ObservedScreen>,
+}
+
+struct ObservedScreen {
+    source: crate::session::GridWake,
+    generation: u64,
+    present: bool,
+}
+
+impl ScreenChanges {
+    fn sample<'a>(
+        &mut self,
+        enabled: bool,
+        sources: impl Iterator<Item = (&'a str, crate::session::GridWake)>,
+    ) -> bool {
+        if !enabled {
+            self.observed.clear();
+            return false;
+        }
+        for previous in self.observed.values_mut() {
+            previous.present = false;
+        }
+        let mut changed = false;
+        for (id, source) in sources {
+            let generation = source.generation();
+            match self.observed.get_mut(id) {
+                Some(previous) => {
+                    changed |=
+                        previous.generation != generation || !previous.source.same_source(&source);
+                    previous.generation = generation;
+                    previous.source = source;
+                    previous.present = true;
+                }
+                None => {
+                    changed = true;
+                    self.observed.insert(
+                        id.to_owned(),
+                        ObservedScreen {
+                            source,
+                            generation,
+                            present: true,
+                        },
+                    );
+                }
+            }
+        }
+        self.observed.retain(|_, previous| {
+            changed |= !previous.present;
+            previous.present
+        });
+        changed
+    }
 }
 
 #[cfg(test)]
@@ -535,6 +630,134 @@ mod tests {
         drop(stream);
         assert_eq!(bus.subscriber_count(), 0);
         bus.publish("into the void", json!({}), None); // must not panic
+    }
+
+    #[test]
+    fn companion_invalidations_strip_payloads_and_include_control_changes() {
+        let bus = EventBus::new();
+        assert!(!bus.has_companion_subscribers());
+        let stream = bus.subscribe_companion();
+        assert!(bus.has_companion_subscribers());
+        for name in [
+            "session.output",
+            "terminal.control_changed",
+            "session.updated",
+        ] {
+            bus.publish(
+                name,
+                json!({"prompt": "sensitive", "token": "secret"}),
+                Some("private"),
+            );
+            let event = stream.try_recv().expect("invalidation");
+            assert_eq!(event.name, "companion.changed");
+            assert!(event.params.is_null());
+            assert!(event.session_id.is_none());
+        }
+        bus.publish("unrelated.internal", json!({}), None);
+        assert!(stream.try_recv().is_none());
+        drop(stream);
+        assert!(!bus.has_companion_subscribers());
+    }
+
+    #[test]
+    fn recovery_marker_never_exceeds_the_queue_bound() {
+        let bus = EventBus::new();
+        let stream = bus.subscribe_companion();
+        for _ in 0..20 {
+            bus.publish("session.output", JsonValue::Null, None);
+        }
+        assert_eq!(stream.queue.state.lock().unwrap().queue.len(), 16);
+        stream.try_recv(); // One free slot cannot hold both marker and event.
+        bus.publish("session.output", JsonValue::Null, None);
+        assert_eq!(stream.queue.state.lock().unwrap().queue.len(), 16);
+        stream.try_recv();
+        stream.try_recv(); // Two slots can now hold marker and event.
+        bus.publish("session.output", JsonValue::Null, None);
+        let state = stream.queue.state.lock().unwrap();
+        assert_eq!(state.queue.len(), 16);
+        assert_eq!(
+            state
+                .queue
+                .iter()
+                .filter(|event| event.name == EVENTS_DROPPED)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn evicted_recovery_marker_retains_its_original_hole() {
+        let bus = EventBus::with_capacities(0, 0, Some(2));
+        let stream = bus.subscribe(None, Filter::all());
+        for _ in 0..3 {
+            bus.publish("event", JsonValue::Null, None);
+        }
+        stream.try_recv();
+        stream.try_recv();
+        bus.publish("event", JsonValue::Null, None); // marker for seq 1, seq 4
+        bus.publish("event", JsonValue::Null, None); // marker evicted
+        stream.try_recv();
+        stream.try_recv();
+        bus.publish("event", JsonValue::Null, None);
+        let marker = stream.try_recv().unwrap();
+        assert_eq!(marker.name, EVENTS_DROPPED);
+        assert_eq!(
+            marker.params,
+            json!({"dropped": 1, "fromSeq": 1, "toSeq": 1})
+        );
+    }
+
+    #[test]
+    fn output_invalidation_is_independent_of_status_and_reseeds_new_sources() {
+        use crate::session::GridWake;
+        let source = GridWake::new();
+        let mut screens = ScreenChanges::default();
+        let sample = |source: &GridWake| [("s_1", source.clone())].into_iter();
+        assert!(screens.sample(true, sample(&source)));
+        assert!(!screens.sample(true, sample(&source)));
+        // The same signal used by local and remote PTY pumps; no status/title
+        // change or SessionRecord clone is required for the view to refresh.
+        source.notify();
+        assert!(screens.sample(true, sample(&source)));
+        assert!(!screens.sample(true, sample(&source)));
+        let replacement = GridWake::new();
+        replacement.notify(); // same generation, different session incarnation
+        assert!(screens.sample(true, sample(&replacement)));
+        assert!(screens.sample(true, std::iter::empty()));
+        assert!(screens.observed.is_empty());
+        assert!(screens.sample(true, sample(&source)));
+        assert!(!screens.sample(
+            false,
+            std::iter::once_with(|| panic!("disabled source inspected"))
+        ));
+        assert!(screens.observed.is_empty());
+        assert!(screens.sample(true, sample(&source)));
+    }
+
+    #[test]
+    #[ignore = "manual registry screen-observation overhead measurement"]
+    fn measure_companion_screen_observation_overhead() {
+        let sources: Vec<_> = (0..1000)
+            .map(|id| (format!("s_{id}"), crate::session::GridWake::new()))
+            .collect();
+        let mut screens = ScreenChanges::default();
+        let mut samples = Vec::new();
+        for _ in 0..1001 {
+            let started = Instant::now();
+            screens.sample(
+                true,
+                sources
+                    .iter()
+                    .map(|(id, source)| (id.as_str(), source.clone())),
+            );
+            samples.push(started.elapsed());
+        }
+        samples.remove(0); // Warm map: no per-tick allocation for quiet sessions.
+        samples.sort_unstable();
+        eprintln!(
+            "1000 quiet Companion screen sources: p50={:?}, p90={:?}, p99={:?} per existing 150ms tick",
+            samples[500], samples[900], samples[990]
+        );
     }
 
     #[test]

@@ -12,9 +12,9 @@ use zeus_proto::{
 use crate::notifications::NotificationSound;
 
 use super::{
-    ClickModifiers, EventEnvelope, InspectorTab, LineageView, Prefs, SessionStore,
-    SidebarProjection, StoreEffect, StoreEventChange, TerminalResidency, WindowMode,
-    WindowPlacement, event_publication_policy,
+    ClickModifiers, EventEnvelope, InspectorTab, LaunchRecipe, LineageView, Prefs, RecipeOverrides,
+    RecipeProject, RecipeWorktree, SessionStore, SidebarProjection, StoreEffect, StoreEventChange,
+    TerminalResidency, WindowMode, WindowPlacement, event_publication_policy,
 };
 use crate::switcher::{OverviewFilter, OverviewLane, SwitcherKey};
 
@@ -2091,4 +2091,205 @@ fn preview_runtime_hydrates_fixture_and_publishes_changes() {
         .expect("session store lock poisoned")
         .select(other);
     assert!(changes.try_recv().is_ok());
+}
+
+fn claude_catalog() -> AgentReadinessResult {
+    AgentReadinessResult {
+        agents: vec![AgentReadinessItem {
+            kind: AgentKind::CLAUDE_CODE,
+            binary: "claude".into(),
+            path: Some("/bin/claude".into()),
+            descriptor: Some(AgentDescriptor {
+                id: AgentKind::CLAUDE_CODE_ID.into(),
+                display_name: "Claude Code".into(),
+                first_class: true,
+                ..AgentDescriptor::default()
+            }),
+        }],
+    }
+}
+
+fn review_recipe() -> LaunchRecipe {
+    LaunchRecipe {
+        id: "recipe-review".into(),
+        name: "Review this PR".into(),
+        agent: AgentKind::CLAUDE_CODE,
+        project: RecipeProject::Project { id: pid("p") },
+        host: None,
+        worktree: Some(RecipeWorktree {
+            create: true,
+            branch: Some("review/{name}".into()),
+        }),
+        initial_prompt: "Review the PR.".into(),
+        title: Some("PR review".into()),
+    }
+}
+
+fn spawn_params(
+    effects: &mut mpsc::UnboundedReceiver<StoreEffect>,
+) -> zeus_proto::SessionSpawnParams {
+    match drain(effects).into_iter().next() {
+        Some(StoreEffect::Spawn(params)) => params,
+        other => panic!("expected spawn effect, got {other:?}"),
+    }
+}
+
+#[test]
+fn launch_recipes_persist_reorder_duplicate_and_delete() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("prefs.json");
+    let (mut store, _) = SessionStore::load(&path).expect("store");
+    store.save_launch_recipe(review_recipe()).expect("save");
+    store
+        .save_launch_recipe(LaunchRecipe {
+            id: "recipe-tests".into(),
+            name: "Fix failing tests".into(),
+            agent: AgentKind::CLAUDE_CODE,
+            project: RecipeProject::Path {
+                path: "/work/p".into(),
+            },
+            host: None,
+            worktree: None,
+            initial_prompt: "fix tests".into(),
+            title: None,
+        })
+        .expect("save second");
+
+    assert!(
+        store
+            .reorder_launch_recipe("recipe-tests", -1)
+            .expect("reorder")
+    );
+    assert_eq!(
+        store
+            .launch_recipes()
+            .iter()
+            .map(|recipe| recipe.id.as_str())
+            .collect::<Vec<_>>(),
+        ["recipe-tests", "recipe-review"]
+    );
+
+    let copy = store
+        .duplicate_launch_recipe("recipe-review")
+        .expect("duplicate")
+        .expect("copied");
+    assert_eq!(copy.name, "Copy of Review this PR");
+    assert_ne!(copy.id, "recipe-review");
+    assert_eq!(store.launch_recipes().len(), 3);
+    assert_eq!(store.launch_recipes()[2].id, copy.id);
+
+    assert!(store.delete_launch_recipe("recipe-tests").expect("delete"));
+    assert_eq!(store.launch_recipes().len(), 2);
+
+    let reloaded = Prefs::load(&path).expect("reload");
+    assert_eq!(reloaded.launch_recipes.len(), 2);
+    assert_eq!(reloaded.launch_recipes[0].id, "recipe-review");
+    assert_eq!(reloaded.launch_recipes[1].name, "Copy of Review this PR");
+}
+
+#[test]
+fn spawn_launch_recipe_uses_the_canonical_spawn_path() {
+    let (mut store, mut effects) = hydrated(
+        vec![session("one", "p", 1.0)],
+        vec![project("p", "Project")],
+        Prefs::default(),
+    );
+    store.set_agent_catalog(claude_catalog());
+    drain(&mut effects);
+
+    store
+        .spawn_launch_recipe(&review_recipe(), &RecipeOverrides::default())
+        .expect("spawn");
+    let params = spawn_params(&mut effects);
+    assert_eq!(params.kind, AgentKind::CLAUDE_CODE);
+    assert_eq!(params.cwd, "/work/p");
+    assert_eq!(params.new_worktree, Some(true));
+    assert_eq!(
+        params.worktree_branch.as_deref(),
+        Some("review/review-this-pr")
+    );
+    assert_eq!(params.initial_prompt.as_deref(), Some("Review the PR."));
+    assert_eq!(params.title.as_deref(), Some("PR review"));
+    assert_eq!(params.host, None);
+}
+
+#[test]
+fn recipe_overrides_leave_the_saved_recipe_unchanged() {
+    let (mut store, mut effects) = hydrated(
+        vec![session("one", "p", 1.0)],
+        vec![project("p", "Project")],
+        Prefs {
+            launch_recipes: vec![review_recipe()],
+            ..Prefs::default()
+        },
+    );
+    store.set_agent_catalog(claude_catalog());
+    drain(&mut effects);
+
+    let recipe = store
+        .launch_recipe("recipe-review")
+        .cloned()
+        .expect("recipe");
+    store
+        .spawn_launch_recipe(
+            &recipe,
+            &RecipeOverrides {
+                initial_prompt: Some("Just this run.".into()),
+                worktree: Some(None),
+                title: Some(None),
+                ..RecipeOverrides::default()
+            },
+        )
+        .expect("spawn");
+    let params = spawn_params(&mut effects);
+    assert_eq!(params.initial_prompt.as_deref(), Some("Just this run."));
+    assert_eq!(params.new_worktree, None);
+    assert_eq!(params.title, None);
+    let saved = store.launch_recipe("recipe-review").expect("saved");
+    assert_eq!(saved.initial_prompt, "Review the PR.");
+    assert!(saved.worktree.is_some());
+    assert_eq!(saved.title.as_deref(), Some("PR review"));
+}
+
+#[test]
+fn remote_recipe_spawn_does_not_invoke_local_worktree_behavior() {
+    let (mut store, mut effects) = hydrated(
+        vec![session("one", "p", 1.0)],
+        vec![project("p", "Project")],
+        Prefs::default(),
+    );
+    store.set_agent_catalog(claude_catalog());
+    store.set_hosts(vec![zeus_proto::HostEntry {
+        id: "forge".into(),
+        name: Some("Forge".into()),
+        ssh: "cristi@forge".into(),
+        default_cwd: Some("~/code".into()),
+        node: None,
+    }]);
+    drain(&mut effects);
+
+    let remote = LaunchRecipe {
+        project: RecipeProject::Path {
+            path: "~/src/zeus".into(),
+        },
+        host: Some("forge".into()),
+        worktree: None,
+        ..review_recipe()
+    };
+    store
+        .spawn_launch_recipe(&remote, &RecipeOverrides::default())
+        .expect("remote spawn");
+    let params = spawn_params(&mut effects);
+    assert_eq!(params.host.as_deref(), Some("forge"));
+    assert_eq!(params.cwd, "~/src/zeus");
+    assert_eq!(params.new_worktree, None);
+
+    let invalid = LaunchRecipe {
+        worktree: Some(RecipeWorktree {
+            create: true,
+            branch: None,
+        }),
+        ..remote
+    };
+    assert!(store.diagnose_launch_recipe(&invalid).is_err());
 }

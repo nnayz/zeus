@@ -12,6 +12,7 @@ nth visible session. `⌘9` jumps to the last.
 Useful moves:
 
 - **New Agent** at the top of the sidebar, or `⌘N`, opens the composer.
+  `⌘N` can also load a saved launch recipe.
 - **Pin** a project or session you always want at the top.
 - **Collapse** a lead session to hide its spawned children when the tree is
   loud.

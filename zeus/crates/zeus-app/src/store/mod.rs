@@ -2,6 +2,7 @@
 
 mod prefs;
 mod projection;
+mod recipes;
 mod residency;
 
 use std::collections::{HashMap, HashSet};
@@ -32,6 +33,11 @@ use crate::switcher::{
 
 pub use prefs::{InspectorTab, LineageView, Prefs, WindowMode, WindowPlacement};
 pub use projection::{SidebarProject, SidebarProjection, SidebarRow};
+pub use recipes::{
+    LaunchRecipe, RecipeIssue, RecipeOverrides, RecipeProject, RecipeRepair, RecipeWorktree,
+    ResolvedRecipe, duplicate_recipe_name, launch_project_ref, new_recipe_id, recipe_project_for,
+    resolve_recipe,
+};
 pub use residency::{ResidencyUpdate, TerminalResidency};
 
 pub const AUXILIARY_TERMINAL_TITLE: &str = "Terminal";
@@ -979,6 +985,111 @@ impl SessionStore {
         if matches!(self.daemon_state, DaemonState::Connected) {
             self.emit(StoreEffect::ConfigureGovernor(self.governor_settings()));
         }
+        Ok(())
+    }
+
+    pub fn launch_recipes(&self) -> &[LaunchRecipe] {
+        &self.prefs.launch_recipes
+    }
+
+    pub fn launch_recipe(&self, id: &str) -> Option<&LaunchRecipe> {
+        self.prefs
+            .launch_recipes
+            .iter()
+            .find(|recipe| recipe.id == id)
+    }
+
+    pub fn save_launch_recipe(&mut self, recipe: LaunchRecipe) -> io::Result<()> {
+        self.update_preferences(|prefs| {
+            if let Some(existing) = prefs
+                .launch_recipes
+                .iter_mut()
+                .find(|item| item.id == recipe.id)
+            {
+                *existing = recipe;
+            } else {
+                prefs.launch_recipes.push(recipe);
+            }
+        })
+    }
+
+    pub fn delete_launch_recipe(&mut self, id: &str) -> io::Result<bool> {
+        let mut removed = false;
+        self.update_preferences(|prefs| {
+            let before = prefs.launch_recipes.len();
+            prefs.launch_recipes.retain(|recipe| recipe.id != id);
+            removed = prefs.launch_recipes.len() != before;
+        })?;
+        Ok(removed)
+    }
+
+    pub fn duplicate_launch_recipe(&mut self, id: &str) -> io::Result<Option<LaunchRecipe>> {
+        let Some(source) = self.launch_recipe(id).cloned() else {
+            return Ok(None);
+        };
+        let mut copy = source;
+        copy.id = new_recipe_id();
+        copy.name = duplicate_recipe_name(&copy.name);
+        let saved = copy.clone();
+        self.update_preferences(|prefs| {
+            let insert_at = prefs
+                .launch_recipes
+                .iter()
+                .position(|recipe| recipe.id == id)
+                .map(|index| index + 1)
+                .unwrap_or(prefs.launch_recipes.len());
+            prefs.launch_recipes.insert(insert_at, copy);
+        })?;
+        Ok(Some(saved))
+    }
+
+    pub fn reorder_launch_recipe(&mut self, id: &str, delta: isize) -> io::Result<bool> {
+        let Some(index) = self
+            .prefs
+            .launch_recipes
+            .iter()
+            .position(|recipe| recipe.id == id)
+        else {
+            return Ok(false);
+        };
+        let last = self.prefs.launch_recipes.len().saturating_sub(1) as isize;
+        let target = (index as isize + delta).clamp(0, last) as usize;
+        if target == index {
+            return Ok(false);
+        }
+        self.update_preferences(|prefs| {
+            let recipe = prefs.launch_recipes.remove(index);
+            prefs.launch_recipes.insert(target, recipe);
+        })?;
+        Ok(true)
+    }
+
+    pub fn diagnose_launch_recipe(&self, recipe: &LaunchRecipe) -> Result<(), RecipeIssue> {
+        self.resolve_launch_recipe(recipe, &RecipeOverrides::default())
+            .map(|_| ())
+    }
+
+    pub fn resolve_launch_recipe(
+        &self,
+        recipe: &LaunchRecipe,
+        overrides: &RecipeOverrides,
+    ) -> Result<ResolvedRecipe, RecipeIssue> {
+        resolve_recipe(
+            recipe,
+            overrides,
+            self.agent_catalog(),
+            self.projects(),
+            self.hosts(),
+        )
+    }
+
+    pub fn spawn_launch_recipe(
+        &mut self,
+        recipe: &LaunchRecipe,
+        overrides: &RecipeOverrides,
+    ) -> Result<(), RecipeIssue> {
+        let resolved = self.resolve_launch_recipe(recipe, overrides)?;
+        self.spawn_kind(resolved.kind, resolved.options);
         Ok(())
     }
 

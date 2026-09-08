@@ -73,11 +73,15 @@ impl TerminalControl {
 
 impl Session {
     pub fn terminal_control_state(&self) -> ControlState {
-        self.terminal_control
-            .lock()
-            .expect("terminal control")
-            .state
-            .clone()
+        let exited = self.view().exited;
+        let mut control = self.terminal_control.lock().expect("terminal control");
+        if exited && control.state.owner.is_some() {
+            // Even at counter exhaustion, an exited process has no controller.
+            if control.advance(None).is_err() {
+                control.state.owner = None;
+            }
+        }
+        control.state.clone()
     }
 
     /// Must be called under the Registry lock held through the subsequent
@@ -87,6 +91,7 @@ impl Session {
         expected: &ControlEpoch,
         owner_id: &str,
     ) -> Result<(), ControlError> {
+        self.terminal_control_state();
         self.terminal_control
             .lock()
             .expect("terminal control")
@@ -105,6 +110,12 @@ impl Session {
         }
         let mut control = self.terminal_control.lock().expect("terminal control");
         control.check_epoch(expected)?;
+        if !self.ready_for_control_transfer() {
+            return Err(ControlError::new(
+                "terminal_unavailable",
+                "wait for remote input recovery before taking control",
+            ));
+        }
         if control.state.owner.is_some() && !takeover {
             return Err(ControlError::new(
                 "controller_busy",
@@ -152,6 +163,7 @@ impl Session {
         &self,
         params: &TerminalSendTextParams,
     ) -> Result<ControlState, ControlError> {
+        self.terminal_control_state();
         if params.text.len() > MAX_TEXT_BYTES
             || params
                 .text
@@ -194,6 +206,7 @@ impl Session {
                 "unsupported Engine terminal protocol",
             ));
         }
+        self.terminal_control_state();
         let (grid, modes, signature) = self.terminal_snapshot_sample()?;
         validate_snapshot(&grid)?;
         let mut control = self.terminal_control.lock().expect("terminal control");

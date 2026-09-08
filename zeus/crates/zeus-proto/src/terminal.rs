@@ -108,6 +108,45 @@ impl TerminalSnapshot {
         let cols = u16::from_be_bytes([bytes[0], bytes[1]]);
         let rows = u16::from_be_bytes([bytes[2], bytes[3]]);
         validate_geometry(cols, rows)?;
+        // RLE can expand a tiny payload into many cells. Validate every run
+        // before delegating to the existing compatibility decoder.
+        let invalid = || ControlError::bad_request("invalid snapshot RLE geometry");
+        let u16_at = |offset: usize| -> Result<u16, ControlError> {
+            let pair = bytes.get(offset..offset + 2).ok_or_else(invalid)?;
+            Ok(u16::from_be_bytes([pair[0], pair[1]]))
+        };
+        if u16_at(9)? != rows || bytes[8] & 2 == 0 || u16_at(4)? >= cols || u16_at(6)? >= rows {
+            return Err(invalid());
+        }
+        let mut offset = 11;
+        for y in 0..rows {
+            if u16_at(offset)? != y {
+                return Err(invalid());
+            }
+            let runs = u16_at(offset + 2)?;
+            if runs == 0 || runs > cols {
+                return Err(invalid());
+            }
+            offset += 4;
+            let mut cells = 0usize;
+            for _ in 0..runs {
+                let repeat = u16_at(offset)?;
+                cells += usize::from(repeat);
+                if repeat == 0
+                    || cells > usize::from(cols)
+                    || bytes.get(offset..offset + 16).is_none()
+                {
+                    return Err(invalid());
+                }
+                offset += 16;
+            }
+            if cells != usize::from(cols) {
+                return Err(invalid());
+            }
+        }
+        if offset != bytes.len() {
+            return Err(invalid());
+        }
         let grid = GridUpdate::decode(bytes)
             .map_err(|_| ControlError::bad_request("invalid snapshot grid"))?;
         validate_snapshot(&grid)?;
@@ -327,5 +366,21 @@ mod tests {
         grid.cursor_col = 0;
         grid.changed_rows[0].y = 1;
         assert!(validate_snapshot(&grid).is_err());
+    }
+
+    #[test]
+    fn malicious_rle_expansion_and_trailing_bytes_are_rejected() {
+        let mut value = snapshot();
+        value.grid.as_mut().unwrap()[9..11].copy_from_slice(&u16::MAX.to_be_bytes());
+        assert!(value.decode_grid().is_err());
+        let mut value = snapshot();
+        value.grid.as_mut().unwrap()[15..17].copy_from_slice(&u16::MAX.to_be_bytes());
+        assert!(value.decode_grid().is_err());
+        let mut value = snapshot();
+        value.grid.as_mut().unwrap().push(0);
+        assert!(value.decode_grid().is_err());
+        let mut value = snapshot();
+        value.grid.as_mut().unwrap()[15..17].copy_from_slice(&0u16.to_be_bytes());
+        assert!(value.decode_grid().is_err());
     }
 }

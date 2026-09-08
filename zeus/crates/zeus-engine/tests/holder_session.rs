@@ -93,6 +93,19 @@ fn a_held_session_survives_its_session_object_and_is_adoptable() {
     wait_until("first write in log", Duration::from_secs(5), || {
         log_contains(&logs, "s_sur", b"before the crash")
     });
+    let before = session.terminal_control_state();
+    let lease = session
+        .acquire_terminal_control(
+            &before.epoch,
+            zeus_proto::terminal::Controller {
+                id: "phone".into(),
+                label: "Phone".into(),
+                role: zeus_proto::ClientRole::Mobile,
+            },
+            false,
+        )
+        .unwrap();
+    let child_pid = session.child_pid();
     drop(session);
 
     // The holder — a separate process — still owns a live child.
@@ -109,6 +122,19 @@ fn a_held_session_survives_its_session_object_and_is_adoptable() {
         engine,
     )
     .expect("adopt");
+    assert_eq!(adopted.child_pid(), child_pid);
+    assert_ne!(
+        adopted.terminal_control_state().epoch.incarnation,
+        lease.epoch.incarnation
+    );
+    assert!(adopted.terminal_control_state().owner.is_none());
+    assert_eq!(
+        adopted
+            .validate_terminal_control(&lease.epoch, "phone")
+            .unwrap_err()
+            .code,
+        "stale_controller_epoch"
+    );
     adopted.write_input(b"after the restart\n").expect("write");
     wait_until("second write in log", Duration::from_secs(5), || {
         log_contains(&logs, "s_sur", b"after the restart")

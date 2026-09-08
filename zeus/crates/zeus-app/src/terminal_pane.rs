@@ -400,6 +400,7 @@ enum AttachmentState {
 }
 
 enum AttachmentCommand {
+    TakeControl,
     Input(Vec<u8>),
     Resize(u16, u16),
     Close,
@@ -452,6 +453,7 @@ struct ResidentTerminal {
     element: TerminalElement,
     attachment: AttachmentControl,
     attachment_state: AttachmentState,
+    controller: Option<zeus_proto::terminal::AttachmentControlState>,
     input_modes: TermInputModes,
     mouse_modes: MouseModes,
     /// Suppresses a release/motion sequence when a platform-click was consumed
@@ -852,6 +854,7 @@ impl TerminalPane {
                     element,
                     attachment,
                     attachment_state,
+                    controller: None,
                     input_modes: TermInputModes::default(),
                     mouse_modes: MouseModes::default(),
                     suppress_left_report: false,
@@ -1068,6 +1071,29 @@ impl TerminalPane {
                 if selected {
                     cx.notify();
                 }
+            }
+            PaneEvent::Chunk(id, TerminalChunk::Control(state)) => {
+                if let Some(resident) = self.residents.get_mut(&id) {
+                    let owned = state
+                        .control
+                        .owner
+                        .as_ref()
+                        .is_some_and(|o| o.id == state.client_id);
+                    let was_owned = resident.controller.as_ref().is_some_and(|previous| {
+                        previous
+                            .control
+                            .owner
+                            .as_ref()
+                            .is_some_and(|o| o.id == previous.client_id)
+                    });
+                    resident.controller = Some(state);
+                    if owned && !was_owned && resident.last_size.0 > 0 && resident.last_size.1 > 0 {
+                        resident
+                            .attachment
+                            .resize(resident.last_size.0, resident.last_size.1);
+                    }
+                }
+                cx.notify();
             }
             PaneEvent::Chunk(_, TerminalChunk::Pong) => {}
             PaneEvent::FindSnapshot(id, request, snapshot) => {
@@ -2277,6 +2303,43 @@ impl TerminalPane {
             .flex()
             .items_center()
             .gap(px(Metrics::TOOLBAR_COMPACT_GAP));
+        if let Some(resident) = self.residents.get(&session.id)
+            && let Some(state) = &resident.controller
+        {
+            let owned = state
+                .control
+                .owner
+                .as_ref()
+                .is_some_and(|owner| owner.id == state.client_id);
+            let label = if owned {
+                "Desktop control".to_owned()
+            } else {
+                format!(
+                    "{} · Take Control",
+                    state
+                        .control
+                        .owner
+                        .as_ref()
+                        .map_or("Read only", |owner| owner.label.as_str())
+                )
+            };
+            let id = session.id.clone();
+            toolbar_links = toolbar_links.child(
+                div()
+                    .id("terminal-controller")
+                    .px(px(6.0))
+                    .text_size(px(Typo::META.size))
+                    .text_color(colors.secondary)
+                    .when(!owned, |button| button.cursor_pointer())
+                    .child(label)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if !owned && let Some(resident) = this.residents.get(&id) {
+                            let _ = resident.attachment.tx.send(AttachmentCommand::TakeControl);
+                        }
+                        cx.stop_propagation();
+                    })),
+            );
+        }
         for chip in chips.iter().take(visible_chip_count).cloned() {
             toolbar_links = toolbar_links.child(self.render_chip(chip, colors, cx));
         }
@@ -4224,6 +4287,7 @@ fn spawn_attachment(
                     }
                     command = commands.recv() => {
                         match command {
+                            Some(AttachmentCommand::TakeControl) => { let _ = writer.take_control(); }
                             Some(AttachmentCommand::Input(bytes)) => {
                                 let _ = writer.send_input(bytes);
                             }
@@ -4264,7 +4328,7 @@ async fn wait_for_retry(
             command = commands.recv() => match command {
                 Some(AttachmentCommand::Resize(cols, rows)) => *last_resize = Some((cols, rows)),
                 Some(AttachmentCommand::Close) | None => return true,
-                Some(AttachmentCommand::Input(_)) => {}
+                Some(AttachmentCommand::Input(_) | AttachmentCommand::TakeControl) => {}
             }
         }
     }

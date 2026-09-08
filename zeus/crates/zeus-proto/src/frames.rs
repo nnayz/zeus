@@ -361,6 +361,8 @@ mod tests {
             FrameType::Grid,
             FrameType::Scroll,
             FrameType::Modes,
+            FrameType::Controller,
+            FrameType::Controlled,
         ];
         for (index, frame_type) in types.into_iter().enumerate() {
             assert_eq!(frame_type as u8, index as u8 + 1);
@@ -371,8 +373,8 @@ mod tests {
             Err(FrameCodecError::UnknownFrameType(0))
         );
         assert_eq!(
-            FrameType::try_from(11),
-            Err(FrameCodecError::UnknownFrameType(11))
+            FrameType::try_from(13),
+            Err(FrameCodecError::UnknownFrameType(13))
         );
     }
 

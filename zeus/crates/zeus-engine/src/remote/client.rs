@@ -185,6 +185,15 @@ impl RemoteSessionClient {
     }
 
     /// Never queue/replay a Companion mutation across a transport generation.
+    pub fn ready_for_control_transfer(&self) -> bool {
+        let writer = self.writer.lock().expect("remote writer");
+        writer.controller_epoch.is_some()
+            && writer.input.is_some()
+            && writer.queued_input.is_empty()
+            && writer.queued_resize.is_none()
+    }
+
+    /// Never queue/replay a Companion mutation across a transport generation.
     pub fn write_once(&self, bytes: &[u8]) -> io::Result<()> {
         let mut writer = self.writer.lock().expect("remote writer");
         if writer.controller_epoch.is_none() || writer.input.is_none() {

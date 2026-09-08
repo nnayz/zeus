@@ -1167,6 +1167,13 @@ impl Session {
         Ok(())
     }
 
+    pub(crate) fn ready_for_control_transfer(&self) -> bool {
+        match &self.transport {
+            Transport::Remote(client) => client.ready_for_control_transfer(),
+            _ => true,
+        }
+    }
+
     /// A coherent full snapshot and change-generation baseline for a freshly
     /// attached sink. Sampling the generation on both sides closes the race
     /// where output lands between the seed and pump registration.

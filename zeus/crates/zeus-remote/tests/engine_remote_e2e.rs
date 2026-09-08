@@ -23,6 +23,79 @@ fn helper() -> &'static str {
     env!("CARGO_BIN_EXE_zeus-remote")
 }
 
+#[path = "../../zeus-engine/tests/support/terminal_contract.rs"]
+mod terminal_contract;
+
+#[test]
+fn companion_contract_matches_fake_ssh_remote_holder() {
+    let temporary = tempfile::tempdir().unwrap();
+    let remote_home = temporary.path().join("remote-home");
+    let remote_state = temporary.path().join("remote-state");
+    fs::create_dir(&remote_home).unwrap();
+    let manager = Arc::new(
+        RemoteManager::new(
+            ProcessExecutor::new(write_fake_ssh(
+                temporary.path(),
+                &remote_home,
+                &remote_state,
+            )),
+            ArtifactCatalog::from_native_helper(Path::new(helper())).unwrap(),
+            temporary.path().join("ssh-control"),
+        )
+        .unwrap(),
+    );
+    let host = HostEntry {
+        id: "fixture".into(),
+        name: None,
+        ssh: "fixture-host".into(),
+        default_cwd: None,
+        node: None,
+    };
+    let installed = manager.ensure_helper(&host).unwrap();
+    let bindings = RemoteBindingStore::new(temporary.path().join("bindings")).unwrap();
+    let argv = vec![
+        "/bin/sh".into(),
+        "-c".into(),
+        terminal_contract::SCRIPT.into(),
+    ];
+    let session = Session::spawn(
+        SessionSpec {
+            id: "remote-terminal-contract".into(),
+            pty: PtySpec::new(argv.clone(), "/").size(80, 24),
+            manifest_id: "shell".into(),
+            authority: Authority::ProcessOnly,
+            logs_dir: temporary.path().join("logs"),
+            holder: None,
+            defer_launch: false,
+            remote: Some(RemoteSessionSpec {
+                manager,
+                helper: installed,
+                host_id: host.id,
+                binding_store: bindings,
+                launch: LaunchRequest {
+                    session_id: "remote-terminal-contract".into(),
+                    session_token: SessionToken::new("0123456789abcdef0123456789abcdef").unwrap(),
+                    argv,
+                    cwd: "/".into(),
+                    environment: vec![EnvironmentVariable {
+                        name: "TERM".into(),
+                        value: "xterm-256color".into(),
+                    }],
+                    cols: 80,
+                    rows: 24,
+                    persistence: PersistenceCapability::NativeDetach,
+                },
+            }),
+        },
+        Arc::new(ManifestEngine::new(Vec::new())),
+    )
+    .unwrap();
+    let mut session = terminal_contract::Cleanup(session);
+    terminal_contract::assert_contract(&session.0);
+    session.0.terminate(Duration::from_millis(200)).unwrap();
+    assert!(terminal_contract::snapshot(&session.0, None).exited);
+}
+
 #[test]
 fn engine_lists_remote_directories_through_the_verified_helper() {
     let temporary = tempfile::tempdir().expect("temp");
@@ -168,6 +241,14 @@ fn engine_bootstraps_detaches_and_adopts_the_same_remote_process() {
         zeus_proto::remote_pty::RemoteProcessState::Running { pid } => pid,
         state => panic!("unexpected process state: {state:?}"),
     };
+    let before_control = session.terminal_control_state();
+    let lease = session
+        .acquire_terminal_control(
+            &before_control.epoch,
+            terminal_contract::owner("phone", zeus_proto::ClientRole::Mobile),
+            false,
+        )
+        .unwrap();
     drop(session);
 
     let binding = bindings
@@ -204,6 +285,18 @@ fn engine_bootstraps_detaches_and_adopts_the_same_remote_process() {
         Some((SessionStatus::Idle, None)),
     )
     .expect("adopt remote Session");
+    assert_ne!(
+        session.terminal_control_state().epoch.incarnation,
+        lease.epoch.incarnation
+    );
+    assert!(session.terminal_control_state().owner.is_none());
+    assert_eq!(
+        session
+            .validate_terminal_control(&lease.epoch, "phone")
+            .unwrap_err()
+            .code,
+        "stale_controller_epoch"
+    );
     assert_eq!(
         session.view().status,
         SessionStatus::Idle,

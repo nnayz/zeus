@@ -433,6 +433,16 @@ impl ControlServer {
             if first {
                 first = false;
                 if let Ok(attach) = serde_json::from_slice::<zeus_proto::AttachRequest>(&line) {
+                    if attach.role != zeus_proto::ClientRole::Desktop
+                        || attach
+                            .control_protocol
+                            .is_some_and(|v| v != zeus_proto::terminal::TERMINAL_PROTOCOL)
+                    {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::PermissionDenied,
+                            "Companion must use the Engine terminal snapshot API",
+                        ));
+                    }
                     // Attaching means this session is visible. Reconcile the
                     // actual process first: an adopted holder can be stopped
                     // even when stale persisted metadata says it is awake.
@@ -453,7 +463,7 @@ impl ControlServer {
                     let buffered = reader.buffer().to_vec();
                     self.attach.serve(
                         &self.registry,
-                        &attach.attach.0,
+                        &attach,
                         reader.into_inner(),
                         buffered,
                         writer,

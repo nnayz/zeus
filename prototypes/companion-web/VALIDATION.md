@@ -63,6 +63,52 @@ fences. `command_sequence`, `input_unconfirmed`, and `outcome_unknown` are treat
 as uncertain delivery. Old asynchronous refreshes cannot restore deleted data or
 overwrite newer projections.
 
+## Actual Rust gateway smoke
+
+On 2026-09-08, `test/rust-smoke.mjs` passed with exit status 0 against #73's
+compiled `zeus-companion` fixture example: a real local Rust Engine, real echo
+PTY, auth enrollment store, and gateway. The committed JavaScript adapter was
+used without compatibility changes. This closes the previously pending actual
+gateway adapter smoke; it does not replace real iPhone/SSH/TLS validation.
+
+Build the example from `zeus/` after integrating #73:
+
+```sh
+rtk cargo build --offline -p zeus-companion --example fixture
+```
+
+Run from the repository root with the absolute path to that example binary:
+
+```sh
+rtk proxy env COMPANION_RUST_FIXTURE=/absolute/path/to/zeus/target/debug/examples/fixture \
+  node prototypes/companion-web/test/rust-smoke.mjs
+```
+
+The harness starts its own fixture. It creates an owner-only temporary directory,
+reads the enrollment file without following a symlink, verifies ownership/mode,
+keeps credentials out of argv/output, and only mutates the single known `fixture`
+echo session. It holds the fixture's stdin open and closes it for teardown;
+temporary enrollment files are deleted. It never attaches to a running user's
+gateway. The optional command is separate from ordinary `npm test`.
+
+The passing smoke verified:
+
+- Expected server identity, pairing, hello, projects, and session discovery.
+- Real screen projection and explicit mobile controller acquisition.
+- Prompt echo in the PTY, increasing screen sequence, unchanged incarnation,
+  and exactly one increment of the guarded command sequence.
+- Authenticated WebSocket events and a rename-triggered invalidation.
+- Reconnect preserving incarnation/command sequence and rejection of a duplicate
+  prompt without another command-sequence increment.
+- Confirmed live Archive and device self-revocation; an HTTP request using the
+  retained, now-revoked credential returned 401, proving server-side rejection.
+
+The smoke makes bounded screen reads to observe PTY echo. It does not separately
+prove that delayed terminal output alone (without a session/status mutation)
+produces a new invalidation. That remains a #73/#75 event-integration concern.
+Its transport is the explicit loopback HTTP fixture exception; no deployment
+TLS, private overlay, real SSH host, browser, or physical iPhone is involved.
+
 ## Numeric sample
 
 Recorded 2026-09-07 on macOS arm64, Node v26.5.0. The fixture and client ran in

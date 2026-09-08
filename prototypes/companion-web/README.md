@@ -144,7 +144,11 @@ the UI says so for recent output instead of inventing an endpoint. Full terminal
 parity, push/APNs, background delivery, cloud relays, persistent browser tokens,
 and arbitrary desktop controls are outside this prototype.
 
-Production backlog: real Rust gateway smoke, private HTTPS/overlay soak,
+The opt-in [actual Rust gateway smoke](VALIDATION.md#actual-rust-gateway-smoke)
+also passed using the #73 fixture Engine and echo PTY; it needed no adapter
+changes. It does not establish physical-device or deployment readiness.
+
+Production backlog: private HTTPS/overlay soak,
 real-device Safari/PWA portrait/landscape and large-text/VoiceOver checks,
 controller handoff with an active desktop, revocation during suspension,
 app-switcher capture audit/native client decision, battery/energy measurements,

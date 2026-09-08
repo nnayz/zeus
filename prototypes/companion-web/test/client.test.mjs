@@ -110,7 +110,7 @@ test('a lost prompt response is uncertain and reconnect never repeats the mutati
   assert.equal(fixture.stats.prompts, 1);
   fixture.setMode('online'); client.disconnect(); await client.connect();
   const after = await client.screen(session.id); assert.equal(after.incarnation, screen.incarnation); assert.equal(after.control.command_seq, 1); assert.equal(fixture.stats.prompts, 1);
-  await assert.rejects(client.sendPrompt(session, screen, 'A stale duplicate'), code('duplicate_command'));
+  await assert.rejects(client.sendPrompt(session, screen, 'A stale duplicate'), code('mutation_unknown'));
   assert.equal(fixture.stats.prompts, 1);
 });
 
@@ -142,11 +142,17 @@ test('WebSocket authenticates without URL secrets and reconnect supplies acknowl
 const copyCursor = value => structuredClone(value);
 
 test('request deadlines abort reads and disconnect cancels in-flight responses', async t => {
-  const { client } = await setup(t, { deadline: 30, fetch: async (url, options) => {
-    if (url.endsWith('/screen')) return new Promise((resolve, reject) => options.signal.addEventListener('abort', () => reject(new Error('aborted'))));
+  let started;
+  const { client } = await setup(t, { fetch: async (url, options) => {
+    if (url.endsWith('/screen')) return new Promise((resolve, reject) => { options.signal.addEventListener('abort', () => reject(new Error('aborted'))); started?.(); });
     return fetch(url, options);
   } });
+  client.deadline = 30;
   await assert.rejects(client.screen('session_local'), code('timeout'));
+  client.deadline = 10000;
+  const requestStarted = new Promise(resolve => { started = resolve; });
+  const pending = client.screen('session_local'); await requestStarted; client.disconnect();
+  await assert.rejects(pending, code('timeout'));
 });
 
 test('fixture rejects foreign origins, arbitrary paths, unauthorized API and hidden files', async t => {
@@ -155,4 +161,36 @@ test('fixture rejects foreign origins, arbitrary paths, unauthorized API and hid
   assert.equal((await fetch(fixture.origin + '/', { headers: { Origin: 'https://evil.example' } })).status, 403);
   assert.equal((await fetch(fixture.origin + '/.git/config')).status, 401);
   assert.equal((await fetch(fixture.origin + '/v1/rpc')).status, 401);
+});
+
+test('resync events validate and acknowledge their cursor before projections are invalidated', async t => {
+  let socket;
+  class FakeSocket {
+    constructor(url) { assert.ok(!url.includes('token')); this.url = url; socket = this; queueMicrotask(() => this.onopen?.()); }
+    send() {} close() {}
+  }
+  const { client } = await setup(t, { WebSocket: FakeSocket }); const events = [], errors = [];
+  client.subscribe(event => events.push(event.kind), error => errors.push(error.code));
+  socket.onmessage({ data: JSON.stringify({ cursor: { stream_id: 'events', sequence: 7 }, kind: 'resync_required' }) });
+  assert.deepEqual(client.cursor.value, { stream_id: 'events', sequence: 7 }); assert.deepEqual(events, ['resync_required']);
+  socket.onmessage({ data: JSON.stringify({ cursor: { stream_id: 'events', sequence: Number.MAX_SAFE_INTEGER + 1 }, kind: 'resync_required' }) });
+  assert.deepEqual(client.cursor.value, { stream_id: 'events', sequence: 7 }); assert.deepEqual(errors, ['incompatible_response']);
+});
+
+test('gateway command-sequence or unconfirmed delivery errors remain uncertain', async t => {
+  let failure;
+  const { client } = await setup(t, { fetch: async (url, options) => {
+    if (url.endsWith('/text') && failure) return new Response(JSON.stringify({ code: failure }), { status: 409, headers: { 'content-type': 'application/json' } });
+    return fetch(url, options);
+  } });
+  const session = await client.session('session_local'); await client.takeControl(session, await client.screen(session.id)); const screen = await client.screen(session.id);
+  for (const value of ['command_sequence', 'input_unconfirmed', 'outcome_unknown', 'replayed_mutation']) { failure = value; await assert.rejects(client.sendPrompt(session, screen, 'Synthetic content'), code('mutation_unknown')); }
+});
+
+test('gateway WebSocket connect deadline bounds a stalled handshake', async t => {
+  class StalledSocket { close() {} }
+  const { client } = await setup(t, { WebSocket: StalledSocket }); const errors = [];
+  client.deadline = 100;
+  client.subscribe(() => {}, error => errors.push(error.code));
+  await waitFor(() => errors.length > 0); assert.deepEqual(errors, ['timeout']);
 });

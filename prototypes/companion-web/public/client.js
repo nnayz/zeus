@@ -59,6 +59,7 @@ export function validateScreen(value, sessionId) {
   requireThat(value.cols > 0 && value.rows > 0 && value.cols * value.rows <= LIMITS.cells);
   integer(value.cursor_row, value.rows - 1); integer(value.cursor_col, value.cols - 1);
   validateControl(value.control);
+  requireThat(value.control.epoch.incarnation === value.incarnation, 'session_changed');
   for (const field of ['exited', 'truncated']) requireThat(typeof value[field] === 'boolean');
   const text = terminalText(value.text);
   const lines = text.split('\n');
@@ -70,10 +71,10 @@ export function validateScreen(value, sessionId) {
 
 // Deliberately exposes named operations only. No generic RPC, arbitrary path, or raw input.
 export class CompanionClient {
-  #fetch; #WebSocket; #origin; #token = null; #server = null; #controllers = new Set(); #socket = null; #serial = 0;
+  #fetch; #WebSocket; #origin; #token = null; #server = null; #controllers = new Set(); #socket = null; #socketTimer = null; #serial = 0;
   #mutationPending = false;
   constructor({ currentOrigin = globalThis.location?.origin, fetch = globalThis.fetch, WebSocket = globalThis.WebSocket, deadline = LIMITS.deadline } = {}) {
-    this.#origin = origin(currentOrigin, currentOrigin); this.#fetch = fetch; this.#WebSocket = WebSocket; this.deadline = deadline;
+    this.#origin = origin(currentOrigin, currentOrigin); this.#fetch = fetch.bind(globalThis); this.#WebSocket = WebSocket; this.deadline = deadline;
     this.device = null; this.hello = null; this.cursor = new EventCursor();
     this.metrics = { requests: 0, responseBytesLimit: LIMITS.response, requestMs: [], reconnects: 0, events: 0 };
   }
@@ -82,6 +83,7 @@ export class CompanionClient {
   hasCapability(capability) { return this.hello?.capabilities.includes(capability) ?? false; }
   disconnect() {
     this.#serial++;
+    clearTimeout(this.#socketTimer); this.#socketTimer = null;
     for (const controller of this.#controllers) controller.abort();
     this.#controllers.clear();
     if (this.#socket) { this.#socket.onclose = null; this.#socket.onerror = null; this.#socket.onmessage = null; this.#socket.close(); this.#socket = null; }
@@ -161,7 +163,7 @@ export class CompanionClient {
     try {
       return validate(await this.#request(path, body));
     } catch (error) {
-      if (['offline', 'timeout', 'incompatible_response', 'oversized', 'outcome_unknown'].includes(error.code)) throw new CompanionError('mutation_unknown');
+      if (['offline', 'timeout', 'incompatible_response', 'oversized', 'outcome_unknown', 'input_unconfirmed', 'command_sequence', 'duplicate_command', 'replayed_mutation', 'mutation_conflict'].includes(error.code)) throw new CompanionError('mutation_unknown');
       throw error;
     } finally { this.#mutationPending = false; }
   }
@@ -186,12 +188,14 @@ export class CompanionClient {
   async revoke() { requireThat(this.paired, 'unauthorized'); await this.#request(`/v1/devices/${routeId(this.device.id)}/revoke`, {}); this.forget(); }
   subscribe(onEvent, onError) {
     requireThat(this.paired && this.hello, 'unauthorized');
+    clearTimeout(this.#socketTimer);
     if (this.#socket) { this.#socket.onclose = null; this.#socket.close(); }
     const serial = this.#serial;
     const socket = new this.#WebSocket(this.#origin.replace(/^http/u, 'ws') + '/v1/events'); this.#socket = socket;
     let failed = false;
-    const fail = code => { if (failed || serial !== this.#serial || this.#socket !== socket) return; failed = true; socket.onclose = null; socket.close(); onError(new CompanionError(code)); };
-    socket.onopen = () => { if (serial !== this.#serial || !this.paired) { socket.close(); return; } socket.send(JSON.stringify({ api_major: 1, token: this.#token, cursor: this.cursor.value })); };
+    const fail = code => { if (failed || serial !== this.#serial || this.#socket !== socket) return; failed = true; clearTimeout(this.#socketTimer); socket.onclose = null; socket.close(); onError(new CompanionError(code)); };
+    this.#socketTimer = setTimeout(() => fail('timeout'), this.deadline);
+    socket.onopen = () => { clearTimeout(this.#socketTimer); if (serial !== this.#serial || !this.paired) { socket.close(); return; } socket.send(JSON.stringify({ api_major: 1, token: this.#token, cursor: this.cursor.value })); };
     socket.onerror = () => fail('offline');
     socket.onclose = () => fail('offline');
     socket.onmessage = message => {
@@ -201,11 +205,12 @@ export class CompanionClient {
         const event = object(JSON.parse(message.data));
         if (event.code) { const code = string(event.code, 80); if (['revoked', 'unauthorized', 'expired'].includes(code)) this.forget(); onError(new CompanionError(code)); return; }
         requireThat(['changed', 'resync_required', 'engine_unavailable'].includes(event.kind)); object(event.cursor);
-        if (event.kind === 'resync_required') { this.cursor.reset(); onEvent(event); return; }
+        identifier(event.cursor.stream_id); integer(event.cursor.sequence);
+        if (event.kind === 'resync_required') { this.cursor.reset(); this.cursor.accept(event.cursor.stream_id, event.cursor.sequence); onEvent(event); return; }
         if (event.kind === 'engine_unavailable') { fail('offline'); return; }
         if (this.cursor.accept(event.cursor.stream_id, event.cursor.sequence)) { this.metrics.events++; onEvent(event); }
       } catch (error) { fail(error instanceof CompanionError ? error.code : 'incompatible_response'); }
     };
-    return () => { if (this.#socket === socket) { socket.onclose = null; socket.close(); this.#socket = null; } };
+    return () => { if (this.#socket === socket) { clearTimeout(this.#socketTimer); socket.onclose = null; socket.close(); this.#socket = null; } };
   }
 }

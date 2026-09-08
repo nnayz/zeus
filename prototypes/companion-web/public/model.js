@@ -5,7 +5,11 @@ const encoder = new TextEncoder();
 export const bytes = value => encoder.encode(value).byteLength;
 
 export class CompanionError extends Error {
-  constructor(code) { super(code); this.name = 'CompanionError'; this.code = code; }
+  constructor(code) {
+    const aliases = { version_mismatch: 'incompatible_protocol', pairing_denied: 'invalid_pairing', stale_controller_epoch: 'stale_controller', not_controller: 'stale_controller', controller_busy: 'stale_controller', stale_engine: 'session_changed', engine_unavailable: 'offline', capability_unavailable: 'unavailable', invalid_snapshot: 'incompatible_response', terminal_geometry: 'incompatible_response', projection_limit: 'oversized', invalid_text: 'invalid_prompt' };
+    const canonical = aliases[code] ?? code;
+    super(canonical); this.name = 'CompanionError'; this.code = canonical;
+  }
 }
 export function requireThat(value, code = 'incompatible_response') { if (!value) throw new CompanionError(code); }
 export function object(value) { requireThat(value && typeof value === 'object' && !Array.isArray(value)); return value; }

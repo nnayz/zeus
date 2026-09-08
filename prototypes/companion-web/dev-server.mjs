@@ -17,7 +17,7 @@ export async function createFixture({ port = 0 } = {}) {
   let engineEpoch = 'engine_fixture_1', streamId = 'events_fixture_1', sequence = 0, mode = 'online';
   const serverId = 'server_fixture_74';
   const enrollments = new Map(), devices = new Map(), sockets = new Set(), mutations = new Map();
-  const stats = { prompts: 0, actions: 0, acquisitions: 0, requests: 0, subscriptions: 0, replayCursors: [] };
+  const stats = { prompts: 0, actions: 0, acquisitions: 0, requests: 0, subscriptions: 0, pairings: 0, replayCursors: [] };
   const now = Date.now();
   const projects = [{ id: 'project_local', name: 'Zeus', root: '/work/zeus', host: null }, { id: 'project_remote', name: 'API service', root: '/srv/api', host: 'build-box · SSH' }];
   const sessions = projects.map((project, index) => ({ id: index ? 'session_remote' : 'session_local', project_id: project.id, kind: index ? 'claude' : 'codex', title: index ? 'Review the API migration' : 'Ship the Companion prototype', cwd: project.root, host: project.host, status: index ? 'question' : 'working', created_at_ms: now - 3600000, updated_at_ms: now, archived: false, hibernated: false, revision: `revision_${index}_1` }));
@@ -64,6 +64,7 @@ export async function createFixture({ port = 0 } = {}) {
         if (!enrollment || enrollment.expires_at_ms <= Date.now()) return fail(response, 'pairing_expired', 401);
         if (typeof data.device_name !== 'string' || !data.device_name.trim() || Buffer.byteLength(data.device_name) > 80) return fail(response, 'invalid_device');
         enrollments.delete(data.code);
+        stats.pairings++;
         const token = randomBytes(32).toString('hex'), device = { id: randomBytes(16).toString('hex'), name: data.device_name, scopes: enrollment.scopes, expires_at_ms: Date.now() + 3600000, revoked: false }; devices.set(token, device);
         return json(response, 200, { server_id: serverId, device_id: device.id, token, scopes: device.scopes, expires_at_ms: device.expires_at_ms });
       }
@@ -158,7 +159,7 @@ export async function createFixture({ port = 0 } = {}) {
   server.requestTimeout = 10000; server.headersTimeout = 10000; server.maxRequestsPerSocket = 1000;
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', resolve); });
   base = `http://127.0.0.1:${server.address().port}`;
-  return { origin: base, issuePairing, setMode, emit, stats, close: async () => { for (const peer of sockets) peer.socket.destroy(); server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); } };
+  return { origin: base, issuePairing, setMode, emit, stats, setScreenText(id, text) { const screen = screens.get(id); screen.text = text; screen.screen_sequence++; emit(); }, close: async () => { for (const peer of sockets) peer.socket.destroy(); server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); } };
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

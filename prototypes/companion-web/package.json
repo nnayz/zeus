@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "start": "node dev-server.mjs",
-    "test": "node --test test/*.test.mjs"
+    "test": "node --test test/*.test.mjs",
+    "measure": "node measure.mjs"
   },
   "engines": { "node": ">=22" }
 }

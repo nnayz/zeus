@@ -31,6 +31,9 @@ in-memory enrollment/device/session fixtures and clean up their listeners.
 They do not require a real tailnet or credentials. Static assets alone can be
 served independently; the fixture routes must not be deployed.
 
+See [VALIDATION.md](VALIDATION.md) for optional dependency-free Chromium tests,
+measured latency/network/idle findings, coverage, and device-validation gaps.
+
 ## Gateway contract
 
 The authority is `zeus/crates/zeus-companion-api/src/lib.rs` from #73 (initial

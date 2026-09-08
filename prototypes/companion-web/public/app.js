@@ -4,8 +4,8 @@ import { ACTIONS, CompanionError, confirmation, errorMessage, pairingPayload, re
 const $ = id => document.getElementById(id);
 const client = new CompanionClient();
 const state = { phase: 'unpaired', projects: [], sessions: [], selected: null, screen: null, pendingPair: null, dialog: null, hidden: false, busy: false, uncertain: false, generation: 0 };
-let updateTimer = null, refreshPromise = null, dirty = false;
-const labels = { unpaired: 'Not paired', verifying: 'Verify identity', connecting: 'Connecting', online: 'Connected', offline: 'Offline · stale view', reconnecting: 'Reconnecting', revoked: 'Device revoked', incompatible: 'Incompatible', hidden: 'Screen hidden' };
+let updateTimer = null, refreshPromise = null, dirty = false, projectionVersion = 0;
+const labels = { unpaired: 'Not paired', unpairing: 'Revoking device', verifying: 'Verify identity', connecting: 'Connecting', online: 'Connected', offline: 'Offline · stale view', reconnecting: 'Reconnecting', revoked: 'Device revoked', incompatible: 'Incompatible', hidden: 'Screen hidden' };
 const notice = text => { $('notice').textContent = text; };
 const safe = value => terminalText(String(value ?? ''), 4096);
 const host = session => session.host ?? 'This computer';
@@ -25,12 +25,12 @@ function render() {
   $('connection').textContent = labels[state.phase] ?? state.phase;
   $('pairing').hidden = client.paired || state.phase === 'verifying' || state.hidden;
   $('identity').hidden = state.phase !== 'verifying' || state.hidden;
-  $('workspace').hidden = !client.paired || state.hidden;
+  $('workspace').hidden = !client.paired || state.hidden || state.phase === 'unpairing';
   $('pair-form').querySelector('button').disabled = state.busy;
   $('confirm-pair').disabled = state.busy;
   $('privacy-cover').hidden = !state.hidden;
   document.body.classList.toggle('masked', state.hidden);
-  if (state.hidden || !client.paired) return;
+  if (state.hidden || !client.paired || state.phase === 'unpairing') return;
   $('device-label').textContent = `${client.device.name} · ${client.hasScope('interact') ? 'Interaction permitted' : 'Read-only device'}`;
   $('session-count').textContent = String(state.sessions.length);
   const focusedSession = document.activeElement?.dataset?.session;
@@ -81,13 +81,14 @@ function fail(error) {
   render();
 }
 async function projection() {
-  const generation = state.generation;
+  const generation = state.generation, version = ++projectionVersion;
+  try {
   const [projects, sessions] = await Promise.all([client.projects(), client.sessions()]);
   let detail = null, screen = null;
   if (state.selected && sessions.some(session => session.id === state.selected)) {
     [detail, screen] = await Promise.all([client.session(state.selected), client.screen(state.selected)]);
   }
-  if (generation !== state.generation || state.hidden) return;
+  if (generation !== state.generation || version !== projectionVersion || state.hidden) return;
   if (screen && state.screen && screen.session_id === state.screen.session_id) {
     if (screen.incarnation !== state.screen.incarnation) { state.uncertain = true; notice('The session incarnation changed. Review the new screen before permitting new actions.'); }
     else requireThat(screen.screen_sequence >= state.screen.screen_sequence, 'sequence_gap');
@@ -95,6 +96,9 @@ async function projection() {
   state.projects = projects; state.sessions = sessions.map(session => session.id === detail?.id ? detail : session); state.screen = screen;
   if (!detail) state.selected = null;
   render();
+  } catch (error) {
+    if (generation === state.generation && version === projectionVersion && !state.hidden && !['unpairing', 'unpaired'].includes(state.phase)) throw error;
+  }
 }
 function scheduleRefresh() {
   if (state.hidden || state.phase !== 'online') return;
@@ -108,16 +112,17 @@ function scheduleRefresh() {
 async function reconnect() {
   if (!client.paired || state.hidden || state.busy) return;
   state.generation++; client.disconnect(); state.phase = 'reconnecting'; render();
+  const generation = state.generation;
   try {
     await client.connect(); await projection();
-    if (state.hidden) return;
+    if (state.hidden || generation !== state.generation || !client.paired) return;
     state.phase = 'online';
     client.subscribe(event => { if (event.kind === 'resync_required') { state.screen = null; notice('Restoring a fresh authoritative snapshot.'); } scheduleRefresh(); }, error => {
       if (error.code === 'sequence_gap') { client.cursor.reset(); void reconnect(); }
       else fail(error);
     });
     render();
-  } catch (error) { fail(error); }
+  } catch (error) { if (generation === state.generation && !state.hidden) fail(error); }
 }
 async function openSession(id) {
   if (state.busy || state.hidden || state.phase !== 'online') return;
@@ -162,7 +167,7 @@ $('confirm-pair').addEventListener('click', async () => {
 $('refresh').addEventListener('click', () => void reconnect());
 $('take-control').addEventListener('click', () => openConfirmation('control'));
 $('cancel-action').addEventListener('click', () => $('confirmation').close());
-$('confirmation').addEventListener('close', () => { state.dialog = null; $('rename').value = ''; });
+$('confirmation').addEventListener('close', () => { if (!$('confirmation').open) { state.dialog = null; $('rename').value = ''; } });
 $('confirm-action').addEventListener('click', async () => {
   const pending = state.dialog; if (!pending || (pending.action !== 'unpair' && !canMutate())) return;
   const title = $('rename').value.trim(); $('confirmation').close();
@@ -178,11 +183,15 @@ $('prompt-form').addEventListener('submit', async event => {
 $('review-delivery').addEventListener('click', () => { if (state.phase === 'online' && !state.busy) { state.uncertain = false; notice('You reviewed the current state. New actions are enabled; the previous action was not replayed.'); render(); } });
 async function forgetDevice() {
   // Local deletion is always possible, including when the gateway is unreachable.
+  state.busy = true; state.generation++; client.disconnect(); clearTimeout(updateTimer); updateTimer = null; dirty = false;
+  state.phase = 'unpairing'; state.projects = []; state.sessions = []; state.selected = null; state.screen = null; clearSensitiveDOM(); render();
   let revoked = false;
   try { await client.revoke(); revoked = true; } catch { /* Unpair must still delete local data. */ }
-  client.forget(); state.generation++; state.projects = []; state.sessions = []; state.selected = null; state.screen = null; state.uncertain = false; state.phase = 'unpaired'; clearSensitiveDOM();
-  const registration = await navigator.serviceWorker?.getRegistration();
-  registration?.active?.postMessage('delete-shell'); await registration?.unregister();
+  client.forget(); state.generation++; state.uncertain = false; state.busy = false; state.phase = 'unpaired'; clearSensitiveDOM();
+  try {
+    const registration = await navigator.serviceWorker?.getRegistration();
+    registration?.active?.postMessage('delete-shell'); await registration?.unregister();
+  } catch { /* Browser storage restrictions must not prevent local unpair. */ }
   notice(revoked ? 'Device revoked. Local credentials and session data deleted.' : 'Local credentials and session data deleted. Server revocation could not be confirmed. Revoke this device on your Zeus computer.'); render();
 }
 $('unpair').addEventListener('click', () => {

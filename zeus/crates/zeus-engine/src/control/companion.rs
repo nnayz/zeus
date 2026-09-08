@@ -70,7 +70,10 @@ impl ControlServer {
             max_response_bytes: api::MAX_RESPONSE,
         })
     }
-    pub(super) fn companion_sessions(&self, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
+    pub(super) fn companion_sessions(
+        &self,
+        params: Option<JsonValue>,
+    ) -> Result<JsonValue, ControlError> {
         let p: api::PageRequest = decode(params)?;
         let limit = p.limit.unwrap_or(api::MAX_PAGE).clamp(1, api::MAX_PAGE);
         let epoch = self.companion.lock().map_err(poisoned)?.epoch.clone();
@@ -87,7 +90,10 @@ impl ControlServer {
             engine_epoch: epoch,
         })
     }
-    pub(super) fn companion_projects(&self, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
+    pub(super) fn companion_projects(
+        &self,
+        params: Option<JsonValue>,
+    ) -> Result<JsonValue, ControlError> {
         let p: api::PageRequest = decode(params)?;
         let limit = p.limit.unwrap_or(api::MAX_PAGE).clamp(1, api::MAX_PAGE);
         let epoch = self.companion.lock().map_err(poisoned)?.epoch.clone();
@@ -126,7 +132,10 @@ impl ControlServer {
             engine_epoch: epoch,
         })
     }
-    pub(super) fn companion_session(&self, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
+    pub(super) fn companion_session(
+        &self,
+        params: Option<JsonValue>,
+    ) -> Result<JsonValue, ControlError> {
         let p: zeus_proto::SessionIdParams = decode(params)?;
         if !api::valid_id(&p.session_id.0) {
             return Err(error("invalid_request"));
@@ -143,7 +152,10 @@ impl ControlServer {
             engine_epoch,
         })
     }
-    pub(super) fn companion_mutate(&self, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
+    pub(super) fn companion_mutate(
+        &self,
+        params: Option<JsonValue>,
+    ) -> Result<JsonValue, ControlError> {
         #[derive(serde::Deserialize, serde::Serialize)]
         #[serde(deny_unknown_fields)]
         struct Params {
@@ -201,15 +213,44 @@ impl ControlServer {
         if current.revision != p.mutation.expected_revision {
             return Err(error("stale_revision"));
         }
-        // Lifecycle is unavailable until integrated with the terminal controller fence.
-        if !matches!(p.mutation.action, api::Action::Rename { .. }) {
-            return Err(error("capability_unavailable"));
+        if !matches!(p.mutation.action, api::Action::Rename { .. })
+            && let Some(session) = registry.get(&p.session_id)
+            && !session.view().exited
+        {
+            let expected = p
+                .mutation
+                .expected_control
+                .as_ref()
+                .ok_or_else(|| error("not_controller"))?;
+            session.validate_terminal_control(
+                &zeus_proto::terminal::ControlEpoch {
+                    incarnation: expected.incarnation.clone(),
+                    generation: expected.generation,
+                },
+                &p.device_id,
+            )?;
         }
         fence.used.insert(key, digest);
-        if let api::Action::Rename { title } = &p.mutation.action {
-            registry
-                .rename(&p.session_id, title)
-                .map_err(|_| error("mutation_failed"))?;
+        let effect = match &p.mutation.action {
+            api::Action::Rename { title } => registry.rename(&p.session_id, title),
+            api::Action::Archive { .. } => registry
+                .terminate(&p.session_id, Duration::from_secs(3))
+                .and_then(|_| registry.archive(&p.session_id)),
+            api::Action::Wake { .. } => registry.wake_session(&p.session_id),
+            api::Action::Hibernate { .. } => {
+                registry.hibernate(&p.session_id, zeus_proto::HibernationReason::Manual)
+            }
+            api::Action::Terminate { .. } => registry
+                .terminate(&p.session_id, Duration::from_secs(3))
+                .map(|_| ()),
+        };
+        effect.map_err(|_| error("outcome_unknown"))?;
+        if matches!(
+            p.mutation.action,
+            api::Action::Archive { .. } | api::Action::Terminate { .. }
+        ) && let Some(store) = &self.remote_bindings
+        {
+            let _ = store.remove(&p.session_id);
         }
         registry.persist().map_err(|_| error("outcome_unknown"))?;
         self.publish_updated(&registry, &p.session_id);

@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use tokio::sync::{Mutex, RwLock, broadcast, mpsc, oneshot, watch};
+use tokio::sync::{RwLock, broadcast, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use zeus_proto::control::{ControlError, ControlMessage, JsonValue, encode_line};
 use zeus_proto::methods::*;
@@ -82,7 +82,7 @@ pub(crate) struct ClientCore {
     build: String,
     token: Option<String>,
     next_request_id: AtomicU64,
-    pending: Mutex<HashMap<u64, oneshot::Sender<PendingResult>>>,
+    pending: StdMutex<HashMap<u64, oneshot::Sender<PendingResult>>>,
     writer: RwLock<Option<mpsc::Sender<Vec<u8>>>>,
     state_tx: watch::Sender<ConnectionState>,
     event_tx: broadcast::Sender<EventEnvelope>,
@@ -91,6 +91,20 @@ pub(crate) struct ClientCore {
     last_seq: AtomicU64,
     shutdown_tx: watch::Sender<bool>,
     companion: bool,
+}
+
+/// Cancellation must remove its correlation entry even when the future is
+/// dropped by an HTTP deadline or disconnected peer before a reply arrives.
+struct PendingGuard<'a> {
+    core: &'a ClientCore,
+    id: u64,
+}
+impl Drop for PendingGuard<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut pending) = self.core.pending.lock() {
+            pending.remove(&self.id);
+        }
+    }
 }
 
 impl ClientCore {
@@ -141,10 +155,18 @@ impl ClientCore {
             .clone()
             .ok_or_else(|| ClientError::disconnected("not connected to daemon"))?;
         let (response_tx, response_rx) = oneshot::channel();
-        self.pending.lock().await.insert(id, response_tx);
+        self.pending
+            .lock()
+            .expect("pending requests")
+            .insert(id, response_tx);
+        let _pending = PendingGuard { core: self, id };
 
-        if writer.send(line).await.is_err() {
-            self.pending.lock().await.remove(&id);
+        let sent = if self.companion {
+            writer.try_send(line).map_err(|_| ())
+        } else {
+            writer.send(line).await.map_err(|_| ())
+        };
+        if sent.is_err() {
             return Err(ClientError::disconnected(
                 "control connection writer stopped",
             ));
@@ -154,7 +176,6 @@ impl ClientCore {
             match tokio::time::timeout(timeout, response_rx).await {
                 Ok(response) => response,
                 Err(_) => {
-                    self.pending.lock().await.remove(&id);
                     return Err(ClientError::Timeout(format!(
                         "request {id} ({method}) timed out"
                     )));
@@ -234,7 +255,8 @@ impl ClientCore {
     pub(crate) async fn route_message(&self, message: ControlMessage) {
         match message {
             ControlMessage::Response { id, result } => {
-                let Some(sender) = self.pending.lock().await.remove(&id) else {
+                let Some(sender) = self.pending.lock().expect("pending requests").remove(&id)
+                else {
                     return;
                 };
                 let result = result.map_err(ClientError::Control);
@@ -249,7 +271,7 @@ impl ClientCore {
     }
 
     async fn fail_pending(&self, error: ClientError) {
-        let pending = std::mem::take(&mut *self.pending.lock().await);
+        let pending = std::mem::take(&mut *self.pending.lock().expect("pending requests"));
         for (_, sender) in pending {
             let _ = sender.send(Err(error.clone()));
         }
@@ -302,7 +324,7 @@ impl DaemonClient {
                 build: build.into(),
                 token,
                 next_request_id: AtomicU64::new(0),
-                pending: Mutex::new(HashMap::new()),
+                pending: StdMutex::new(HashMap::new()),
                 writer: RwLock::new(None),
                 state_tx,
                 event_tx,
@@ -630,8 +652,14 @@ impl DaemonClient {
         &self,
         params: &zeus_proto::terminal::TerminalSnapshotParams,
     ) -> Result<zeus_proto::terminal::TerminalSnapshot, ClientError> {
-        let snapshot: zeus_proto::terminal::TerminalSnapshot =
-            self.typed(zeus_proto::terminal::SNAPSHOT, params).await?;
+        let snapshot: zeus_proto::terminal::TerminalSnapshot = self
+            .core
+            .request_typed(
+                zeus_proto::terminal::SNAPSHOT,
+                Some(params),
+                Some(Duration::from_secs(5)),
+            )
+            .await?;
         if snapshot.protocol != zeus_proto::terminal::TERMINAL_PROTOCOL {
             return Err(ClientError::protocol("unsupported terminal protocol"));
         }
@@ -643,7 +671,12 @@ impl DaemonClient {
         &self,
         params: &zeus_proto::terminal::AcquireControlParams,
     ) -> Result<zeus_proto::terminal::ControlState, ClientError> {
-        self.typed(zeus_proto::terminal::ACQUIRE_CONTROL, params)
+        self.core
+            .request_typed(
+                zeus_proto::terminal::ACQUIRE_CONTROL,
+                Some(params),
+                Some(Duration::from_secs(5)),
+            )
             .await
     }
 
@@ -651,7 +684,12 @@ impl DaemonClient {
         &self,
         params: &zeus_proto::terminal::ReleaseControlParams,
     ) -> Result<zeus_proto::terminal::ControlState, ClientError> {
-        self.typed(zeus_proto::terminal::RELEASE_CONTROL, params)
+        self.core
+            .request_typed(
+                zeus_proto::terminal::RELEASE_CONTROL,
+                Some(params),
+                Some(Duration::from_secs(5)),
+            )
             .await
     }
 
@@ -659,14 +697,26 @@ impl DaemonClient {
         &self,
         params: &zeus_proto::terminal::TerminalSendTextParams,
     ) -> Result<zeus_proto::terminal::ControlState, ClientError> {
-        self.typed(zeus_proto::terminal::SEND_TEXT, params).await
+        self.core
+            .request_typed(
+                zeus_proto::terminal::SEND_TEXT,
+                Some(params),
+                Some(Duration::from_secs(5)),
+            )
+            .await
     }
 
     pub async fn terminal_scrollback(
         &self,
         params: &zeus_proto::terminal::TerminalScrollbackParams,
     ) -> Result<zeus_proto::ReadScrollbackCellsResult, ClientError> {
-        self.typed(zeus_proto::terminal::SCROLLBACK, params).await
+        self.core
+            .request_typed(
+                zeus_proto::terminal::SCROLLBACK,
+                Some(params),
+                Some(Duration::from_secs(5)),
+            )
+            .await
     }
 
     pub async fn send_text(

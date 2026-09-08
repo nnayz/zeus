@@ -16,6 +16,8 @@ pub const CAPABILITIES: &[&str] = &[
     "events",
     "rename",
     "lifecycle",
+    "control_lease",
+    "send_text",
 ];
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

@@ -35,6 +35,13 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_CONNECTIONS: usize = 32;
 const MAX_WEBSOCKETS: usize = 8;
 
+struct ShutdownOnDrop(watch::Sender<bool>);
+impl Drop for ShutdownOnDrop {
+    fn drop(&mut self) {
+        self.0.send_replace(true);
+    }
+}
+
 #[derive(Clone)]
 struct App {
     client: Arc<DaemonClient>,
@@ -43,6 +50,7 @@ struct App {
     events: Arc<Mutex<EventHub>>,
     rate: Arc<Mutex<Rate>>,
     ws: Arc<Semaphore>,
+    shutdown: watch::Receiver<bool>,
 }
 struct Rate {
     since: Instant,
@@ -174,6 +182,13 @@ fn engine_error(error: ClientError) -> Failure {
             "capability_unavailable" => {
                 Failure(StatusCode::NOT_IMPLEMENTED, "capability_unavailable")
             }
+            "stale_controller_epoch" => Failure(StatusCode::CONFLICT, "stale_controller_epoch"),
+            "not_controller" => Failure(StatusCode::CONFLICT, "not_controller"),
+            "controller_busy" => Failure(StatusCode::CONFLICT, "controller_busy"),
+            "command_sequence" => Failure(StatusCode::CONFLICT, "command_sequence"),
+            "input_unconfirmed" => Failure(StatusCode::CONFLICT, "input_unconfirmed"),
+            "outcome_unknown" => Failure(StatusCode::CONFLICT, "outcome_unknown"),
+            "terminal_geometry" => Failure(StatusCode::UNPROCESSABLE_ENTITY, "terminal_geometry"),
             _ => Failure(StatusCode::CONFLICT, "engine_rejected"),
         },
         ClientError::Timeout(_) => Failure(StatusCode::GATEWAY_TIMEOUT, "outcome_unknown"),
@@ -221,14 +236,13 @@ async fn decode<T: DeserializeOwned>(request: Request, limit: usize) -> Result<T
 }
 async fn protect(State(app): State<App>, request: Request, next: Next) -> Response {
     let origin = request.headers().get(header::ORIGIN).cloned();
-    if let Some(origin) = &origin {
-        if request.headers().get_all(header::ORIGIN).iter().count() != 1
+    if let Some(origin) = &origin
+        && (request.headers().get_all(header::ORIGIN).iter().count() != 1
             || !origin
                 .to_str()
-                .is_ok_and(|o| app.config.origins.iter().any(|allowed| allowed == o))
-        {
-            return Failure(StatusCode::FORBIDDEN, "origin_denied").into_response();
-        }
+                .is_ok_and(|o| app.config.origins.iter().any(|allowed| allowed == o)))
+    {
+        return Failure(StatusCode::FORBIDDEN, "origin_denied").into_response();
     }
     if request.uri().path() != "/v1/events" && request.headers().contains_key(header::UPGRADE) {
         return failure("upgrade_denied").into_response();
@@ -345,11 +359,16 @@ async fn mutate(
     Path(id): Path<String>,
     request: Request,
 ) -> Result<Response, Failure> {
-    let device = authenticate(&app, request.headers(), Scope::Lifecycle)?;
+    authenticate(&app, request.headers(), Scope::Lifecycle)?;
+    let token = zeroize::Zeroizing::new(credential(request.headers())?.to_owned());
     if !valid_id(&id) {
         return Err(failure("invalid_request"));
     }
     let mutation: Mutation = decode(request, 4096).await?;
+    let device = app
+        .auth
+        .authenticate(&token, Scope::Lifecycle, now_ms())
+        .map_err(|_| Failure(StatusCode::UNAUTHORIZED, "unauthorized"))?;
     Ok(reply(
         StatusCode::OK,
         &app.client
@@ -358,22 +377,204 @@ async fn mutate(
             .map_err(engine_error)?,
     ))
 }
+
+fn internal_epoch(epoch: ControlEpoch) -> zeus_proto::terminal::ControlEpoch {
+    zeus_proto::terminal::ControlEpoch {
+        incarnation: epoch.incarnation,
+        generation: epoch.generation,
+    }
+}
+fn external_control(state: zeus_proto::terminal::ControlState) -> ControlState {
+    ControlState {
+        epoch: ControlEpoch {
+            incarnation: state.epoch.incarnation,
+            generation: state.epoch.generation,
+        },
+        command_seq: state.command_seq,
+        owner: state.owner.map(|owner| Controller {
+            id: owner.id,
+            label: owner.label,
+            role: match owner.role {
+                zeus_proto::ClientRole::Desktop => "desktop",
+                zeus_proto::ClientRole::Mobile => "mobile",
+                _ => "unknown",
+            }
+            .into(),
+        }),
+    }
+}
+async fn screen(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    headers: axum::http::HeaderMap,
+) -> Result<Response, Failure> {
+    authenticate(&app, &headers, Scope::Read)?;
+    if !valid_id(&id) {
+        return Err(failure("invalid_request"));
+    }
+    let snapshot = app
+        .client
+        .terminal_snapshot(&zeus_proto::terminal::TerminalSnapshotParams {
+            session_id: zeus_proto::SessionId(id.clone()),
+            protocol: 1,
+            since: None,
+        })
+        .await
+        .map_err(engine_error)?;
+    let grid = snapshot
+        .decode_grid()
+        .map_err(|_| Failure(StatusCode::BAD_GATEWAY, "invalid_snapshot"))?
+        .ok_or(Failure(StatusCode::BAD_GATEWAY, "snapshot_required"))?;
+    let mut text = String::new();
+    for (index, row) in grid.changed_rows.iter().enumerate() {
+        if index > 0 {
+            text.push('\n');
+        }
+        for cell in &row.cells {
+            let ch = char::from_u32(cell.scalar)
+                .filter(|c| !c.is_control())
+                .unwrap_or(' ');
+            text.push(ch);
+        }
+    }
+    app.auth
+        .authenticate(credential(&headers)?, Scope::Read, now_ms())
+        .map_err(|_| Failure(StatusCode::UNAUTHORIZED, "unauthorized"))?;
+    let truncated = text.len() > 128 * 1024;
+    Ok(reply(
+        StatusCode::OK,
+        &Screen {
+            session_id: id,
+            incarnation: snapshot.cursor.incarnation,
+            screen_sequence: snapshot.cursor.sequence,
+            text: bounded_string(&text, 128 * 1024),
+            cols: grid.cols,
+            rows: grid.rows,
+            cursor_row: grid.cursor_row,
+            cursor_col: grid.cursor_col,
+            control: external_control(snapshot.control),
+            exited: snapshot.exited,
+            truncated,
+        },
+    ))
+}
+async fn acquire(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    request: Request,
+) -> Result<Response, Failure> {
+    authenticate(&app, request.headers(), Scope::Interact)?;
+    let token = zeroize::Zeroizing::new(credential(request.headers())?.to_owned());
+    if !valid_id(&id) {
+        return Err(failure("invalid_request"));
+    }
+    let p: AcquireControl = decode(request, 1024).await?;
+    let device = app
+        .auth
+        .authenticate(&token, Scope::Interact, now_ms())
+        .map_err(|_| Failure(StatusCode::UNAUTHORIZED, "unauthorized"))?;
+    let state = app
+        .client
+        .acquire_terminal_control(&zeus_proto::terminal::AcquireControlParams {
+            session_id: zeus_proto::SessionId(id),
+            expected: internal_epoch(p.expected),
+            owner: zeus_proto::terminal::Controller {
+                id: device.id,
+                label: device.name,
+                role: zeus_proto::ClientRole::Mobile,
+            },
+            takeover: p.takeover,
+        })
+        .await
+        .map_err(engine_error)?;
+    Ok(reply(StatusCode::OK, &external_control(state)))
+}
+async fn release(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    request: Request,
+) -> Result<Response, Failure> {
+    authenticate(&app, request.headers(), Scope::Interact)?;
+    let token = zeroize::Zeroizing::new(credential(request.headers())?.to_owned());
+    if !valid_id(&id) {
+        return Err(failure("invalid_request"));
+    }
+    let p: ReleaseControl = decode(request, 1024).await?;
+    let device = app
+        .auth
+        .authenticate(&token, Scope::Interact, now_ms())
+        .map_err(|_| Failure(StatusCode::UNAUTHORIZED, "unauthorized"))?;
+    let state = app
+        .client
+        .release_terminal_control(&zeus_proto::terminal::ReleaseControlParams {
+            session_id: zeus_proto::SessionId(id),
+            expected: internal_epoch(p.expected),
+            owner_id: device.id,
+        })
+        .await
+        .map_err(engine_error)?;
+    Ok(reply(StatusCode::OK, &external_control(state)))
+}
+async fn send_text(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    request: Request,
+) -> Result<Response, Failure> {
+    authenticate(&app, request.headers(), Scope::Interact)?;
+    let token = zeroize::Zeroizing::new(credential(request.headers())?.to_owned());
+    if !valid_id(&id) {
+        return Err(failure("invalid_request"));
+    }
+    let p: SendText = decode(request, MAX_BODY).await?;
+    if p.text.len() > MAX_TEXT
+        || p.text
+            .chars()
+            .any(|c| c.is_control() && c != '\n' && c != '\t')
+    {
+        return Err(failure("invalid_text"));
+    }
+    let device = app
+        .auth
+        .authenticate(&token, Scope::Interact, now_ms())
+        .map_err(|_| Failure(StatusCode::UNAUTHORIZED, "unauthorized"))?;
+    let state = app
+        .client
+        .terminal_send_text(&zeus_proto::terminal::TerminalSendTextParams {
+            session_id: zeus_proto::SessionId(id),
+            expected: internal_epoch(p.expected),
+            owner_id: device.id,
+            command_seq: p.command_seq,
+            text: p.text,
+            submit: p.submit,
+        })
+        .await
+        .map_err(engine_error)?;
+    Ok(reply(StatusCode::OK, &external_control(state)))
+}
 async fn revoke(
     State(app): State<App>,
     Path(id): Path<String>,
     request: Request,
 ) -> Result<Response, Failure> {
     let device = authenticate(&app, request.headers(), Scope::Read)?;
+    let token = zeroize::Zeroizing::new(credential(request.headers())?.to_owned());
     if device.id != id {
         return Err(Failure(StatusCode::FORBIDDEN, "own_device_only"));
     }
     let _: std::collections::BTreeMap<String, serde_json::Value> = decode(request, 16).await?;
     app.auth
+        .authenticate(&token, Scope::Read, now_ms())
+        .map_err(|_| Failure(StatusCode::UNAUTHORIZED, "unauthorized"))?;
+    app.auth
         .revoke(&id)
         .map_err(|_| failure("auth_unavailable"))?;
     Ok(reply(StatusCode::OK, &serde_json::json!({})))
 }
-async fn events(State(app): State<App>, ws: WebSocketUpgrade) -> Result<Response, Failure> {
+async fn events(
+    State(app): State<App>,
+    axum::Extension(connection): axum::Extension<Arc<tokio::sync::OwnedSemaphorePermit>>,
+    ws: WebSocketUpgrade,
+) -> Result<Response, Failure> {
     let permit = app
         .ws
         .clone()
@@ -386,8 +587,15 @@ async fn events(State(app): State<App>, ws: WebSocketUpgrade) -> Result<Response
         .write_buffer_size(0)
         .on_upgrade(move |socket| async move {
             let _permit = permit;
-            let _ =
-                tokio::time::timeout(Duration::from_secs(300), stream_events(socket, app)).await;
+            let _connection = connection;
+            let mut shutdown = app.shutdown.clone();
+            if *shutdown.borrow_and_update() {
+                return;
+            }
+            tokio::select! {
+                _=shutdown.changed()=>{},
+                _=tokio::time::timeout(Duration::from_secs(300), stream_events(socket, app))=>{},
+            }
         })
         .into_response())
 }
@@ -418,6 +626,13 @@ async fn stream_events(mut socket: WebSocket, app: App) {
     };
     let mut last = subscription.cursor.map_or(0, |c| c.sequence);
     for event in replay {
+        if app
+            .auth
+            .authenticate(&token, Scope::Read, now_ms())
+            .is_err()
+        {
+            return;
+        }
         last = event.cursor.sequence;
         if !send_event(&mut socket, &event).await {
             return;
@@ -483,6 +698,8 @@ pub async fn serve(
         }
         _ => None,
     };
+    let (close_sender, close_receiver) = watch::channel(false);
+    let close_on_drop = ShutdownOnDrop(close_sender);
     let app = App {
         client: client.clone(),
         auth,
@@ -494,6 +711,7 @@ pub async fn serve(
             devices: HashMap::new(),
         })),
         ws: Arc::new(Semaphore::new(MAX_WEBSOCKETS)),
+        shutdown: close_receiver,
     };
     let router = Router::new()
         .route("/v1/hello", get(hello))
@@ -502,6 +720,10 @@ pub async fn serve(
         .route("/v1/projects", get(projects))
         .route("/v1/sessions/{id}", get(session))
         .route("/v1/sessions/{id}/actions", post(mutate))
+        .route("/v1/sessions/{id}/screen", get(screen))
+        .route("/v1/sessions/{id}/control/acquire", post(acquire))
+        .route("/v1/sessions/{id}/control/release", post(release))
+        .route("/v1/sessions/{id}/text", post(send_text))
         .route("/v1/devices/{id}/revoke", post(revoke))
         .route("/v1/events", get(events))
         .fallback(|| async { Failure(StatusCode::NOT_FOUND, "not_found") })
@@ -527,7 +749,7 @@ pub async fn serve(
                 let Ok(permit)=connections.clone().try_acquire_owned() else{drop(socket);continue;};
                 let router=router.clone();let tls=tls.clone();
                 tasks.spawn(async move{
-                    let _permit=permit;
+                    let router=router.layer(axum::Extension(Arc::new(permit)));
                     let _=socket.set_nodelay(true);
                     if let Some(tls)=tls {
                         if let Ok(Ok(stream))=tokio::time::timeout(Duration::from_secs(5),tls.accept(socket)).await{connection_task(stream,router).await;}
@@ -536,8 +758,14 @@ pub async fn serve(
             }
         }
     }
+    drop(close_on_drop);
     tasks.abort_all();
     while tasks.join_next().await.is_some() {}
+    let _ = tokio::time::timeout(
+        Duration::from_secs(3),
+        app.ws.clone().acquire_many_owned(MAX_WEBSOCKETS as u32),
+    )
+    .await;
     Ok(())
 }
 async fn connection_task<S>(stream: S, router: Router)
@@ -560,4 +788,87 @@ where
 pub async fn bind(config: &Config) -> io::Result<TcpListener> {
     config.validate()?;
     TcpListener::bind(config.bind).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::{Body, Bytes};
+    use futures::StreamExt;
+    use std::os::unix::fs::PermissionsExt;
+    #[tokio::test]
+    async fn revoked_while_decoding_cannot_reach_engine_dispatch() {
+        let temp = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let auth = AuthStore {
+            directory: temp.path().into(),
+        };
+        auth.initialize().unwrap();
+        let code = auth.enroll(vec![Scope::Lifecycle], now_ms()).unwrap();
+        let paired = auth
+            .pair(&code, "fixture", &auth.server_id().unwrap(), now_ms())
+            .unwrap();
+        let (_shutdown, rx) = watch::channel(false);
+        let app = App {
+            client: Arc::new(DaemonClient::for_companion(
+                temp.path().join("missing.sock"),
+            )),
+            auth: auth.clone(),
+            config: Config::default(),
+            events: Arc::new(Mutex::new(EventHub::new().unwrap())),
+            rate: Arc::new(Mutex::new(Rate {
+                since: Instant::now(),
+                count: 0,
+                devices: HashMap::new(),
+            })),
+            ws: Arc::new(Semaphore::new(8)),
+            shutdown: rx,
+        };
+        let (started, reading) = tokio::sync::oneshot::channel();
+        let (finish, remaining) = tokio::sync::oneshot::channel();
+        let rest = serde_json::to_vec(&Mutation {
+            engine_epoch: "x".into(),
+            mutation_id: "fixture-mutation-1".into(),
+            expected_revision: "x".into(),
+            expected_control: None,
+            action: Action::Rename {
+                title: "never-applied".into(),
+            },
+        })
+        .unwrap();
+        let stream = futures::stream::once(async move {
+            started.send(()).unwrap();
+            Ok::<Bytes, std::io::Error>(Bytes::from_static(b"{"))
+        })
+        .chain(futures::stream::once(async move {
+            remaining.await.unwrap();
+            Ok(Bytes::copy_from_slice(&rest[1..]))
+        }));
+        let request = Request::builder()
+            .method("POST")
+            .header("Content-Type", "application/json")
+            .header("Authorization", format!("Bearer {}", paired.token))
+            .body(Body::from_stream(stream))
+            .unwrap();
+        let pending = tokio::spawn(mutate(State(app), Path("s_fixture".into()), request));
+        reading.await.unwrap();
+        auth.revoke(&paired.device_id).unwrap();
+        finish.send(()).unwrap();
+        let rejection = pending.await.unwrap().err().unwrap();
+        assert_eq!(rejection.0, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn slow_subscriber_overflow_is_signaled_without_blocking_publisher() {
+        let mut hub = EventHub::new().unwrap();
+        let mut subscriber = hub.sender.subscribe();
+        for _ in 0..1000 {
+            hub.publish("changed");
+        }
+        assert!(matches!(
+            subscriber.recv().await,
+            Err(broadcast::error::RecvError::Lagged(_))
+        ));
+        assert_eq!(hub.ring.len(), EVENT_WINDOW);
+    }
 }

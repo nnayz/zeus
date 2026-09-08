@@ -56,17 +56,24 @@ impl Config {
     }
 }
 fn valid_origin(o: &str) -> bool {
-    let Some((scheme, authority)) = o.split_once("://") else {
-        return false;
-    };
-    if authority.is_empty() || authority.contains(['/', '?', '#', '@', '*', '\r', '\n']) {
-        return false;
+    validate_origin(o).is_ok()
+}
+pub fn validate_origin(origin: &str) -> io::Result<()> {
+    let url = url::Url::parse(origin).map_err(|_| invalid("invalid origin"))?;
+    let loopback = url.host_str().is_some_and(|host| {
+        host.trim_matches(['[', ']'])
+            .parse::<IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+    });
+    if origin.len() > 256
+        || url.origin().ascii_serialization() != origin
+        || url.username() != ""
+        || url.password().is_some()
+        || !(url.scheme() == "https" || (url.scheme() == "http" && loopback))
+    {
+        return Err(invalid("invalid origin"));
     }
-    scheme == "https"
-        || (scheme == "http"
-            && authority
-                .parse::<SocketAddr>()
-                .is_ok_and(|s| s.ip().is_loopback()))
+    Ok(())
 }
 pub fn validate_bind(addr: SocketAddr, explicit: bool) -> io::Result<()> {
     let ip = addr.ip();
@@ -91,8 +98,10 @@ pub fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
 }
 
-/// Reject symlinks in every path component; the final descriptor is also opened
-/// O_NOFOLLOW. The containing directory must be owner-only, preventing swaps.
+/// Reject symlinks and attacker-writable ancestors before reopening a path.
+/// Ancestors must belong to root/current uid and exclude group/world writes,
+/// except root-owned sticky shared roots (other users cannot rename our child).
+/// The local Unix account itself remains inside the Engine trust boundary.
 pub fn secure_dir(path: &Path) -> io::Result<()> {
     if !path.is_absolute() {
         return Err(invalid("absolute state path required"));
@@ -106,6 +115,11 @@ pub fn secure_dir(path: &Path) -> io::Result<()> {
         let meta = std::fs::symlink_metadata(&current)?;
         if !meta.is_dir() || meta.file_type().is_symlink() {
             return Err(invalid("unsafe state directory"));
+        }
+        let trusted_owner = meta.uid() == 0 || meta.uid() == unsafe { libc::geteuid() };
+        let sticky_shared = meta.uid() == 0 && meta.mode() & 0o1000 != 0;
+        if !trusted_owner || (meta.mode() & 0o022 != 0 && !sticky_shared) {
+            return Err(invalid("unsafe state ancestor ownership or permissions"));
         }
     }
     let meta = std::fs::metadata(path)?;

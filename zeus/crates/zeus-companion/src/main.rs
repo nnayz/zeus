@@ -41,7 +41,7 @@ async fn run() -> io::Result<()> {
                 &serde_json::to_vec_pretty(&Config::default()).map_err(|_| invalid("config"))?,
             )
         }
-        "enroll" if args.len() == 4 => {
+        "enroll" if args.len() == 5 => {
             let config_path = PathBuf::from(&args[1]);
             let directory = config_path
                 .parent()
@@ -50,6 +50,11 @@ async fn run() -> io::Result<()> {
             let config: Config = serde_json::from_slice(&secure_read(&config_path, 16 * 1024)?)
                 .map_err(|_| invalid("config"))?;
             config.validate()?;
+            let origin = args[4].to_str().ok_or_else(|| invalid("origin"))?;
+            zeus_companion::config::validate_origin(origin)?;
+            if !config.bind.ip().is_loopback() && !origin.starts_with("https://") {
+                return Err(invalid("private origin requires HTTPS"));
+            }
             let scopes = match args[3].to_str() {
                 Some("read") => vec![Scope::Read],
                 Some("interact") => vec![Scope::Read, Scope::Interact],
@@ -59,7 +64,7 @@ async fn run() -> io::Result<()> {
             let auth = AuthStore { directory };
             let now = now_ms();
             let code = auth.enroll(scopes, now)?;
-            let payload = serde_json::json!({"server_id":auth.server_id()?,"code":code,"expires_at_ms":now+300_000});
+            let payload = serde_json::json!({"origin":origin,"server_id":auth.server_id()?,"code":code,"expires_at_ms":now+300_000});
             // Enrollment material only goes to an explicit owner-only file.
             atomic_write(
                 &PathBuf::from(&args[2]),

@@ -16,6 +16,7 @@ futures.workspace = true
 sha2.workspace = true
 getrandom.workspace = true
 zeroize.workspace = true
+url.workspace = true
 libc = "0.2"
 subtle = "2"
 axum = { version = "0.8", features = ["ws"] }
@@ -29,4 +30,5 @@ tower = { version = "0.5", features = ["util"] }
 tempfile.workspace = true
 zeus-engine.workspace = true
 zeus-companion-client = { path = "../zeus-companion-client" }
-
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+tokio-tungstenite = "0.28"

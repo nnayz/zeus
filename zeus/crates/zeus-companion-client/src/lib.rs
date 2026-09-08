@@ -102,7 +102,9 @@ impl Client {
         self.get(&session_path(id, "")?).await
     }
     pub async fn screen(&self, id: &str) -> Result<Screen, Error> {
-        self.get(&session_path(id, "/screen")?).await
+        let screen: Screen = self.get(&session_path(id, "/screen")?).await?;
+        validate_screen(id, &screen)?;
+        Ok(screen)
     }
     /// Mutations are sent exactly once. Cancellation drops the request future;
     /// uncertain outcomes require a fresh projection, never blind resubmission.
@@ -233,7 +235,7 @@ impl Client {
         let frame = Subscribe {
             api_major: API_MAJOR,
             token: self.token.to_string(),
-            cursor,
+            cursor: cursor.clone(),
         };
         let json =
             Zeroizing::new(serde_json::to_string(&frame).map_err(|_| error("invalid_request"))?);
@@ -244,10 +246,7 @@ impl Client {
         .await
         .map_err(|_| error("timeout"))?
         .map_err(|_| error("connection_failed"))?;
-        Ok(Events {
-            socket,
-            cursor: None,
-        })
+        Ok(Events { socket, cursor })
     }
 }
 fn response_error(status: StatusCode, bytes: &[u8]) -> Error {
@@ -290,12 +289,7 @@ impl Events {
                 Some(Ok(Message::Text(text))) => {
                     let event: Event =
                         serde_json::from_str(&text).map_err(|_| error("invalid_event"))?;
-                    if event.cursor.stream_id.len() > 64
-                        || !["changed", "resync_required", "engine_unavailable"]
-                            .contains(&event.kind.as_str())
-                    {
-                        return Err(error("invalid_event"));
-                    }
+                    validate_event(self.cursor.as_ref(), &event)?;
                     self.cursor = Some(event.cursor.clone());
                     return Ok(event);
                 }
@@ -303,5 +297,135 @@ impl Events {
                 _ => return Err(error("connection_closed")),
             }
         }
+    }
+}
+
+fn validate_screen(id: &str, screen: &Screen) -> Result<(), Error> {
+    if screen.session_id != id
+        || screen.cols == 0
+        || screen.rows == 0
+        || screen.cols > 512
+        || screen.rows > 512
+        || usize::from(screen.cols) * usize::from(screen.rows) > 32768
+        || screen.cursor_col >= screen.cols
+        || screen.cursor_row >= screen.rows
+        || screen.text.len() > 128 * 1024
+        || screen.incarnation.len() > 64
+        || screen.incarnation.is_empty()
+        || screen.control.epoch.incarnation != screen.incarnation
+        || screen.text.chars().any(|c| c.is_control() && c != '\n')
+        || screen.text.split('\n').count() > usize::from(screen.rows)
+        || screen
+            .text
+            .split('\n')
+            .any(|line| line.chars().count() > usize::from(screen.cols))
+    {
+        return Err(error("invalid_screen"));
+    }
+    Ok(())
+}
+fn validate_event(previous: Option<&Cursor>, event: &Event) -> Result<(), Error> {
+    if !valid_id(&event.cursor.stream_id)
+        || !["changed", "resync_required", "engine_unavailable"].contains(&event.kind.as_str())
+    {
+        return Err(error("invalid_event"));
+    }
+    match previous {
+        None if event.kind != "resync_required" => Err(error("resync_required")),
+        Some(cursor) if event.kind == "resync_required" => {
+            if cursor.stream_id == event.cursor.stream_id && event.cursor.sequence < cursor.sequence
+            {
+                Err(error("event_rewind"))
+            } else {
+                Ok(())
+            }
+        }
+        Some(cursor)
+            if cursor.stream_id != event.cursor.stream_id
+                || cursor.sequence.checked_add(1) != Some(event.cursor.sequence) =>
+        {
+            Err(error("event_gap"))
+        }
+        _ => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn event_gap_rewind_and_stream_change_need_explicit_reseed() {
+        let previous = Cursor {
+            stream_id: "fixture-stream".into(),
+            sequence: 10,
+        };
+        let event = |stream: &str, sequence, kind: &str| Event {
+            cursor: Cursor {
+                stream_id: stream.into(),
+                sequence,
+            },
+            kind: kind.into(),
+        };
+        assert!(validate_event(Some(&previous), &event("fixture-stream", 11, "changed")).is_ok());
+        for sequence in [0, 9, 10, 12] {
+            assert!(
+                validate_event(
+                    Some(&previous),
+                    &event("fixture-stream", sequence, "changed")
+                )
+                .is_err()
+            );
+        }
+        assert!(validate_event(Some(&previous), &event("other-stream", 11, "changed")).is_err());
+        assert!(
+            validate_event(
+                Some(&previous),
+                &event("other-stream", 0, "resync_required")
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_event(
+                Some(&previous),
+                &event("fixture-stream", 9, "resync_required")
+            )
+            .is_err()
+        );
+        assert!(validate_event(None, &event("fixture-stream", 11, "changed")).is_err());
+    }
+    #[test]
+    fn screen_geometry_session_identity_and_terminal_control_text_are_validated() {
+        let mut screen = Screen {
+            session_id: "s_fixture".into(),
+            incarnation: "fixture".into(),
+            screen_sequence: 1,
+            text: "ok".into(),
+            cols: 2,
+            rows: 1,
+            cursor_row: 0,
+            cursor_col: 1,
+            control: ControlState {
+                epoch: ControlEpoch {
+                    incarnation: "fixture".into(),
+                    generation: 0,
+                },
+                owner: None,
+                command_seq: 0,
+            },
+            exited: false,
+            truncated: false,
+        };
+        assert!(validate_screen("s_fixture", &screen).is_ok());
+        assert!(validate_screen("other", &screen).is_err());
+        screen.cols = 513;
+        assert!(validate_screen("s_fixture", &screen).is_err());
+        screen.cols = 2;
+        screen.text = "abc".into();
+        assert!(validate_screen("s_fixture", &screen).is_err());
+        screen.text = "\x1b".into();
+        assert!(validate_screen("s_fixture", &screen).is_err());
+        screen.text = "ok".into();
+        screen.control.epoch.incarnation = "wrong".into();
+        assert!(validate_screen("s_fixture", &screen).is_err());
     }
 }

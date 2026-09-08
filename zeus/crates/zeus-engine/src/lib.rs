@@ -60,3 +60,5 @@ pub use session::{
     HolderConfig, RemoteAdoptSpec, RemoteSessionSpec, Session, SessionSpec, SessionView,
 };
 pub use status::{Authority, ReducerOutcome, StatusReducer, StatusSignal};
+
+pub mod terminal;

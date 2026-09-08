@@ -544,6 +544,49 @@ impl DaemonClient {
             .await
     }
 
+    pub async fn terminal_snapshot(
+        &self,
+        params: &zeus_proto::terminal::TerminalSnapshotParams,
+    ) -> Result<zeus_proto::terminal::TerminalSnapshot, ClientError> {
+        let snapshot: zeus_proto::terminal::TerminalSnapshot =
+            self.typed(zeus_proto::terminal::SNAPSHOT, params).await?;
+        if snapshot.protocol != zeus_proto::terminal::TERMINAL_PROTOCOL {
+            return Err(ClientError::protocol("unsupported terminal protocol"));
+        }
+        snapshot.decode_grid()?;
+        Ok(snapshot)
+    }
+
+    pub async fn acquire_terminal_control(
+        &self,
+        params: &zeus_proto::terminal::AcquireControlParams,
+    ) -> Result<zeus_proto::terminal::ControlState, ClientError> {
+        self.typed(zeus_proto::terminal::ACQUIRE_CONTROL, params)
+            .await
+    }
+
+    pub async fn release_terminal_control(
+        &self,
+        params: &zeus_proto::terminal::ReleaseControlParams,
+    ) -> Result<zeus_proto::terminal::ControlState, ClientError> {
+        self.typed(zeus_proto::terminal::RELEASE_CONTROL, params)
+            .await
+    }
+
+    pub async fn terminal_send_text(
+        &self,
+        params: &zeus_proto::terminal::TerminalSendTextParams,
+    ) -> Result<zeus_proto::terminal::ControlState, ClientError> {
+        self.typed(zeus_proto::terminal::SEND_TEXT, params).await
+    }
+
+    pub async fn terminal_scrollback(
+        &self,
+        params: &zeus_proto::terminal::TerminalScrollbackParams,
+    ) -> Result<zeus_proto::ReadScrollbackCellsResult, ClientError> {
+        self.typed(zeus_proto::terminal::SCROLLBACK, params).await
+    }
+
     pub async fn send_text(
         &self,
         session_id: &SessionId,

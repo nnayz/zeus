@@ -400,6 +400,7 @@ impl ControlServer {
     /// does.
     pub fn serve(self: &Arc<Self>, stream: UnixStream) -> std::io::Result<()> {
         let _connection = ActiveConnectionGuard::new(Arc::clone(&self.active_connections));
+        stream.set_write_timeout(Some(std::time::Duration::from_secs(5)))?;
         let mut reader = BufReader::new(stream.try_clone()?);
         let writer = Arc::new(Mutex::new(stream));
         let mut subscription: Option<SubscriptionHandle> = None;
@@ -407,7 +408,15 @@ impl ControlServer {
         let mut first = true;
         loop {
             let mut line = Vec::new();
-            let read = reader.read_until(b'\n', &mut line)?;
+            let read = std::io::Read::by_ref(&mut reader)
+                .take((MAX_CONTROL_LINE_BYTES + 1) as u64)
+                .read_until(b'\n', &mut line)?;
+            if line.len() > MAX_CONTROL_LINE_BYTES {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "control line exceeded protocol maximum",
+                ));
+            }
             if read == 0 {
                 return Ok(());
             }
@@ -656,6 +665,13 @@ impl ControlServer {
             Method::HELLO => self.hello(params),
             Method::SESSION_SPAWN => self.session_spawn(params),
             Method::SESSION_LIST | Method::STATE_SNAPSHOT => self.session_list(),
+            zeus_proto::terminal::SNAPSHOT
+            | zeus_proto::terminal::ACQUIRE_CONTROL
+            | zeus_proto::terminal::RELEASE_CONTROL
+            | zeus_proto::terminal::SEND_TEXT
+            | zeus_proto::terminal::SCROLLBACK => {
+                crate::terminal::dispatch(&self.registry, &self.events, method, params)
+            }
             Method::SESSION_SEND_TEXT => self.session_send_text(params),
             Method::SESSION_RESIZE => self.session_resize(params),
             Method::SESSION_READ_SCREEN => self.session_read_screen(params),
@@ -1611,6 +1627,9 @@ impl ControlServer {
         let mut registry = self.registry.lock().map_err(poisoned)?;
         // Typing into a hibernated session wakes it; the text is queued and
         // flushed after SIGCONT, so no keystroke is lost.
+        if let Some(session) = registry.get(&p.session_id.0) {
+            session.require_unowned_terminal()?;
+        }
         let _ = registry.wake_session(&p.session_id.0);
         self.publish_updated(&registry, &p.session_id.0);
         let session = registry
@@ -1630,6 +1649,7 @@ impl ControlServer {
         let session = registry
             .get(&p.session_id.0)
             .ok_or_else(|| ControlError::not_found(p.session_id.0.clone()))?;
+        session.require_unowned_terminal()?;
         session
             .resize(cols, rows)
             .map_err(|error| ControlError::internal(error.to_string()))?;
@@ -1677,6 +1697,9 @@ impl ControlServer {
     fn session_kill(&self, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
         let p: zeus_proto::SessionIdParams = decode(params)?;
         let mut registry = self.registry.lock().map_err(poisoned)?;
+        if let Some(session) = registry.get(&p.session_id.0) {
+            session.require_unowned_terminal()?;
+        }
         let exit = registry
             .terminate(&p.session_id.0, std::time::Duration::from_secs(3))
             .map_err(|error| ControlError::internal(error.to_string()))?;

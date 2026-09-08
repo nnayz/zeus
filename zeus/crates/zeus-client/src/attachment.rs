@@ -171,6 +171,7 @@ impl SessionAttachment {
     async fn adopt(mut stream: UnixStream, session_id: SessionId) -> Result<Self, AttachmentError> {
         let request = AttachRequest {
             attach: session_id,
+            control_protocol: None,
             from_offset: None,
             token: None,
             role: ClientRole::Desktop,
@@ -311,7 +312,11 @@ async fn process_incoming(
         // These byte-replay frames belong to the retired VT-parsing client.
         FrameType::Output | FrameType::ReplayBegin | FrameType::ReplayEnd => {}
         // The daemon does not send client-to-daemon frame types.
-        FrameType::Input | FrameType::Resize | FrameType::Scroll => {}
+        FrameType::Input
+        | FrameType::Resize
+        | FrameType::Scroll
+        | FrameType::Controller
+        | FrameType::Controlled => {}
     }
     Ok(())
 }

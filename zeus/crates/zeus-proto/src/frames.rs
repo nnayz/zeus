@@ -24,6 +24,8 @@ pub enum FrameType {
     Grid = 8,
     Scroll = 9,
     Modes = 10,
+    Controller = 11,
+    Controlled = 12,
 }
 
 impl TryFrom<u8> for FrameType {
@@ -41,6 +43,8 @@ impl TryFrom<u8> for FrameType {
             8 => Ok(Self::Grid),
             9 => Ok(Self::Scroll),
             10 => Ok(Self::Modes),
+            11 => Ok(Self::Controller),
+            12 => Ok(Self::Controlled),
             other => Err(FrameCodecError::UnknownFrameType(other)),
         }
     }
@@ -57,7 +61,8 @@ pub struct Frame {
 /// The first byte preserves the original local data-channel layout. Extended
 /// modes use a second byte so older readers can continue decoding the flags
 /// they understand.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TerminalModes {
     pub alt_screen: bool,
     pub mouse_reporting: bool,

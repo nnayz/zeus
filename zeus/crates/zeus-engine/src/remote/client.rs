@@ -184,6 +184,26 @@ impl RemoteSessionClient {
         Ok(())
     }
 
+    /// Never queue/replay a Companion mutation across a transport generation.
+    pub fn write_once(&self, bytes: &[u8]) -> io::Result<()> {
+        let mut writer = self.writer.lock().expect("remote writer");
+        if writer.controller_epoch.is_none() || writer.input.is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "remote controller is reconnecting",
+            ));
+        }
+        if let Err(error) = write_message(
+            &mut writer,
+            &RemoteMessage::Terminal(Frame::input(bytes.to_vec())),
+        ) {
+            terminate_current(&mut writer);
+            writer.controller_epoch = None;
+            return Err(error);
+        }
+        Ok(())
+    }
+
     pub fn resize(&self, cols: u16, rows: u16) -> io::Result<()> {
         validate_terminal_dimensions(cols, rows)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;

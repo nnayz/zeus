@@ -37,7 +37,7 @@ zeus-updater.workspace = true
 zeus-usage.workspace = true
 gpui = { workspace = true, features = ["test-support"] }
 gpui_platform = { workspace = true, features = ["test-support"] }
-image = { workspace = true, features = ["png"] }
+image = { workspace = true, features = ["gif", "jpeg", "png", "webp"] }
 nucleo-matcher.workspace = true
 notify.workspace = true
 serde.workspace = true

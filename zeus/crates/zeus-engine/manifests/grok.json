@@ -38,6 +38,12 @@
     ],
     "injection": {
       "grokMCP": true
+    },
+    "attachments": {
+      "images": {
+        "strategy": "path",
+        "multiple": true
+      }
     }
   },
   "rules": [

@@ -45,6 +45,12 @@
     "deny": {
       "text": "\u001b",
       "submit": false
+    },
+    "attachments": {
+      "images": {
+        "strategy": "path",
+        "multiple": true
+      }
     }
   },
   "rules": [

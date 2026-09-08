@@ -1031,12 +1031,12 @@ dependencies = [
 
 [[package]]
 name = "cidre"
-version = "0.22.1"
+version = "0.26.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "31470ed932ba5f701eff2d33b972d93ff359d1e4b68b05e76144f5db371beecd"
+checksum = "89d90d8e3c2e20ac2d40a41ea5d94f4a861f828ec0e9ca3946b25ecb8effbf97"
 dependencies = [
  "cc",
- "cidre-macros 0.9.0",
+ "cidre-macros 0.11.0",
  "parking_lot",
 ]
 
@@ -1048,9 +1048,9 @@ checksum = "8f07a383a232853874a9b0b3e80e6eefe9bea73495b8ab4bdd960bc7c1db4c6d"
 
 [[package]]
 name = "cidre-macros"
-version = "0.9.0"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d044c179ef39cc22233fc3f2f7e51021ee410c754e5c322049420f92898bcbea"
+checksum = "76586419720574523c84f6664586b7162a8c32402e127e2251c9031cac0cfdbf"
 
 [[package]]
 name = "cipher"
@@ -5963,9 +5963,9 @@ dependencies = [
 
 [[package]]
 name = "smallvec"
-version = "1.15.2"
+version = "1.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
+checksum = "b9be42f50aa861c555654aa3a37f52f4b1074bacf4e48fe0ef7fa584e80f1f0f"
 
 [[package]]
 name = "smol"
@@ -8624,7 +8624,7 @@ version = "0.3.0"
 dependencies = [
  "alacritty_terminal",
  "base64 0.23.1",
- "cidre 0.22.1",
+ "cidre 0.26.1",
  "futures",
  "getrandom 0.4.3",
  "image",

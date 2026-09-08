@@ -4,8 +4,8 @@ use zeus_proto::{
     AgentDescriptor, AgentKind, AgentReadinessResult, AttachRequest, ClientRole, ControlMessage,
     DateMillis, EventName, EventsSubscribeParams, ExitReason, HostInitializeParams, Method,
     ReadScrollbackCellsResult, SessionDiffBase, SessionId, SessionListResult,
-    SessionReadDiffParams, SessionReadDiffResult, SessionStatus, StateSnapshotResult,
-    WorktreeListResult,
+    SessionReadDiffParams, SessionReadDiffResult, SessionStatus, SessionUploadAttachmentParams,
+    SessionUploadAttachmentResult, StateSnapshotResult, WorktreeListResult,
 };
 
 const FIXTURES: &[&str] = &[
@@ -157,6 +157,58 @@ fn setup_metadata_is_additive_for_old_and_new_catalog_entries() {
 }
 
 #[test]
+fn image_attachment_capability_is_additive_and_missing_means_unsupported() {
+    let old: AgentDescriptor = serde_json::from_value(json!({
+        "id": "shell",
+        "displayName": "Shell"
+    }))
+    .expect("descriptor without attachments");
+    assert_eq!(old.attachments, None);
+    assert_eq!(old.image_path_capability(), None);
+
+    let supported: AgentDescriptor = serde_json::from_value(json!({
+        "id": "claude-code",
+        "displayName": "Claude Code",
+        "attachments": {
+            "images": {
+                "strategy": "path",
+                "multiple": true
+            }
+        }
+    }))
+    .expect("descriptor with image path strategy");
+    let images = supported.image_path_capability().expect("path strategy");
+    assert!(images.multiple);
+    typed_round_trip(&supported);
+
+    let unknown: AgentDescriptor = serde_json::from_value(json!({
+        "id": "future",
+        "displayName": "Future",
+        "attachments": {
+            "images": {
+                "strategy": "native",
+                "multiple": false
+            }
+        }
+    }))
+    .expect("unknown future strategy must not fail catalog decode");
+    assert!(unknown.attachments.is_some());
+    assert_eq!(unknown.image_path_capability(), None);
+
+    let upload = SessionUploadAttachmentParams {
+        session_id: SessionId::new("s_abc"),
+        local_path: "/tmp/zeus-img-1.png".into(),
+    };
+    let encoded = serde_json::to_value(&upload).expect("encode");
+    assert_eq!(encoded["sessionID"], "s_abc");
+    assert_eq!(encoded["localPath"], "/tmp/zeus-img-1.png");
+    typed_round_trip(&upload);
+    typed_round_trip(&SessionUploadAttachmentResult {
+        remote_path: "/home/dev/.cache/zeus/attachments/s_abc/zeus-img-1.png".into(),
+    });
+}
+
+#[test]
 fn host_initialization_defaults_to_non_destructive_version_ensure() {
     let compatible: HostInitializeParams =
         serde_json::from_value(json!({ "host": "forge" })).expect("old request shape");
@@ -207,6 +259,7 @@ fn method_name_set_is_complete() {
         Method::SESSION_RENAME,
         Method::SESSION_RESUME,
         Method::SESSION_SEND_TEXT,
+        Method::SESSION_UPLOAD_ATTACHMENT,
         Method::SESSION_RESIZE,
         Method::SESSION_READ_SCREEN,
         Method::SESSION_READ_SCROLLBACK,
@@ -252,7 +305,7 @@ fn method_name_set_is_complete() {
         Method::DAEMON_SHUTDOWN_IF_IDLE,
         Method::DAEMON_SHUTDOWN,
     ];
-    assert_eq!(methods.len(), 52);
+    assert_eq!(methods.len(), 53);
     assert_eq!(methods[0], "hello");
     assert_eq!(methods.last().copied(), Some("daemon.shutdown"));
 }

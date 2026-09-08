@@ -84,7 +84,7 @@ export function errorMessage(code) {
 
 export function confirmation(action, session) {
   requireThat(ACTIONS.includes(action), 'unavailable');
-  const effects = { rename: 'Change this session’s title.', archive: 'Archive this session and remove it from the active list.', wake: 'Wake this session; its agent may resume work.', hibernate: 'Hibernate this session and suspend its current work.', terminate: 'Terminate the agent process. Unfinished work may be lost.' };
+  const effects = { rename: 'Change this session’s title.', archive: 'Terminate the agent if it is still running, then archive this session and remove it from the active list. Unfinished work may be lost.', wake: 'Wake this session; its agent may resume work.', hibernate: 'Hibernate this session and suspend its current work.', terminate: 'Terminate the agent process. Unfinished work may be lost.' };
   return { title: `${action[0].toUpperCase()}${action.slice(1)} session?`, description: `${effects[action]}\n\n${session.title} · ${session.host}\n${session.id}` };
 }
 

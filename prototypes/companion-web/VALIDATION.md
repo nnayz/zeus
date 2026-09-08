@@ -30,13 +30,15 @@ found`), so the recorded browser checks used installed HeadlessChrome
 
 ## Coverage
 
-The 19 client/fixture tests cover same-origin TLS restrictions, short-lived
+The 20 client/fixture tests cover same-origin TLS restrictions, short-lived
 pairing and expected identity, single-use codes, local/SSH-labelled browsing,
 read-only viewing, explicit controller acquisition, prompt delivery, lifecycle
 scope/confirmation/revision fencing, command sequencing, stale desktop ownership,
 ambiguous delivery, revocation, HTTP/WS size limits, malformed JSON/UTF-8,
 geometry, unknown required capabilities, event duplicate/gap/resync cursors,
-deadlines, and forbidden origins/paths.
+deadlines, and forbidden origins/paths. Live Archive warns that it terminates
+the agent and may lose unfinished work; its regression requires explicit
+confirmation/current mobile control and verifies an exited archived session.
 
 Three browser workflows cover:
 

@@ -109,9 +109,10 @@ export async function createFixture({ port = 0 } = {}) {
         if (mutations.has(data.mutation_id)) return fail(response, 'duplicate_mutation');
         const kind = data.action?.kind;
         if (!['rename', 'archive', 'wake', 'hibernate', 'terminate'].includes(kind)) return fail(response, 'forbidden', 403);
-        if (kind !== 'rename' && (data.action.confirmed !== true || !same(data.expected_control, screen.control.epoch))) return fail(response, 'confirmation_required');
+        if (kind !== 'rename' && data.action.confirmed !== true) return fail(response, 'confirmation_required');
+        if (kind !== 'rename' && !screen.exited && (!same(data.expected_control, screen.control.epoch) || screen.control.owner?.id !== device.id)) return fail(response, 'stale_controller');
         if (kind === 'rename') { if (typeof data.action.title !== 'string' || !data.action.title.trim()) return fail(response, 'invalid_title'); session.title = data.action.title; }
-        if (kind === 'archive') session.archived = true;
+        if (kind === 'archive') { session.archived = true; session.status = 'done'; screen.exited = true; }
         if (kind === 'wake') session.hibernated = false;
         if (kind === 'hibernate') session.hibernated = true;
         if (kind === 'terminate') { session.status = 'done'; screen.exited = true; }

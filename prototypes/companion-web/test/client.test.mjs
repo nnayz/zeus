@@ -95,12 +95,29 @@ test('lifecycle requires confirmation and scopes, revision and control metadata'
   assert.throws(() => client.action(session, 'terminate'), code('unavailable'));
   assert.throws(() => client.action(session, 'daemon.shutdown', { confirmed: true }), code('unavailable'));
   assert.ok(confirmation('terminate', { ...session, host: 'desktop' }).description.includes('Unfinished work'));
+  await client.takeControl(session, screen); screen = await client.screen(session.id);
   await client.action(session, 'rename', { confirmed: true, title: 'Renamed fixture', screen });
   await assert.rejects(client.action(session, 'archive', { confirmed: true, screen }), code('stale_revision'));
   session = await client.session(session.id);
   await client.action(session, 'hibernate', { confirmed: true, screen });
   assert.equal((await client.session(session.id)).hibernated, true); assert.equal(fixture.stats.actions, 2);
   client.device.scopes = ['read']; assert.throws(() => client.action(session, 'terminate', { confirmed: true, screen }), code('forbidden'));
+});
+
+test('live Archive warns that it terminates the agent and risks unfinished work', async t => {
+  const { client } = await setup(t);
+  let session = await client.session('session_local'), screen = await client.screen(session.id);
+  assert.equal(screen.exited, false);
+  const copy = confirmation('archive', { ...session, host: 'desktop' });
+  assert.match(copy.description, /Terminate the agent/u);
+  assert.match(copy.description, /Unfinished work may be lost/u);
+  assert.throws(() => client.action(session, 'archive', { screen }), code('unavailable'));
+  await assert.rejects(client.action(session, 'archive', { confirmed: true, screen }), code('stale_controller'));
+  await client.takeControl(session, screen);
+  session = await client.session(session.id); screen = await client.screen(session.id);
+  await client.action(session, 'archive', { confirmed: true, screen });
+  assert.equal((await client.session(session.id)).archived, true);
+  assert.equal((await client.screen(session.id)).exited, true);
 });
 
 test('a lost prompt response is uncertain and reconnect never repeats the mutation', async t => {

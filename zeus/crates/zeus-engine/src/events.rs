@@ -120,6 +120,7 @@ struct QueueState {
     first_dropped_seq: u64,
     last_dropped_seq: u64,
     closed: bool,
+    projection: bool,
 }
 
 impl SubscriberQueue {
@@ -155,7 +156,16 @@ impl SubscriberQueue {
             state.dropped = 0;
             state.queue.push_back(marker);
         }
-        state.queue.push_back(event.clone());
+        if state.projection {
+            state.queue.push_back(Event {
+                name: "companion.changed".into(),
+                seq: event.seq,
+                session_id: None,
+                params: JsonValue::Null,
+            });
+        } else {
+            state.queue.push_back(event.clone());
+        }
         drop(state);
         self.ready.notify_all();
     }
@@ -270,15 +280,46 @@ impl EventBus {
     /// Subscribes; ring events with `seq > since_seq` are replayed first.
     /// The filter applies to both the replay and the live tail.
     pub fn subscribe(&self, since_seq: Option<u64>, filter: Filter) -> EventStream {
+        self.subscribe_projected(since_seq, filter, false)
+    }
+
+    /// A bounded invalidation queue, with payloads removed before allocation.
+    pub fn subscribe_companion(&self) -> EventStream {
+        self.subscribe_projected(
+            None,
+            Filter::new(
+                None,
+                Some(vec![
+                    "session.updated".into(),
+                    "session.removed".into(),
+                    "project.updated".into(),
+                    "session.output".into(),
+                ]),
+            ),
+            true,
+        )
+    }
+
+    fn subscribe_projected(
+        &self,
+        since_seq: Option<u64>,
+        filter: Filter,
+        projection: bool,
+    ) -> EventStream {
         let queue = Arc::new(SubscriberQueue {
             state: Mutex::new(QueueState {
                 queue: VecDeque::new(),
                 filter,
-                capacity: self.subscriber_capacity,
+                capacity: if projection {
+                    16
+                } else {
+                    self.subscriber_capacity
+                },
                 dropped: 0,
                 first_dropped_seq: 0,
                 last_dropped_seq: 0,
                 closed: false,
+                projection,
             }),
             ready: Condvar::new(),
         });

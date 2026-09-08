@@ -90,6 +90,7 @@ pub(crate) struct ClientCore {
     events_subscribed: AtomicBool,
     last_seq: AtomicU64,
     shutdown_tx: watch::Sender<bool>,
+    companion: bool,
 }
 
 impl ClientCore {
@@ -207,10 +208,14 @@ impl ClientCore {
             since_seq: (seq != 0).then_some(seq),
             sessions: None,
             kinds: Some(
-                Self::EVENT_KINDS
-                    .iter()
-                    .map(|name| name.to_string())
-                    .collect(),
+                (if self.companion {
+                    &["companion.changed"][..]
+                } else {
+                    &Self::EVENT_KINDS[..]
+                })
+                .iter()
+                .map(|name| name.to_string())
+                .collect(),
             ),
         };
         let result = self
@@ -305,6 +310,7 @@ impl DaemonClient {
                 events_subscribed: AtomicBool::new(false),
                 last_seq: AtomicU64::new(0),
                 shutdown_tx,
+                companion: false,
             }),
             lifecycle: StdMutex::new(None),
         }
@@ -312,6 +318,82 @@ impl DaemonClient {
 
     pub fn socket_path(&self) -> &Path {
         &self.core.socket_path
+    }
+
+    /// Dedicated narrow sidecar connection: only payload-free invalidations and
+    /// a small client queue. Ordinary desktop subscriptions are unchanged.
+    pub fn for_companion(socket_path: impl Into<PathBuf>) -> Self {
+        let mut client = Self::with_socket_path(socket_path);
+        let core = Arc::get_mut(&mut client.core).expect("new client");
+        core.companion = true;
+        core.event_tx = broadcast::channel(16).0;
+        client
+    }
+
+    pub async fn companion_hello(&self) -> Result<zeus_companion_api::Hello, ClientError> {
+        self.core
+            .request_typed::<EmptyParams, _>("companion.hello", None, Some(Duration::from_secs(5)))
+            .await
+    }
+    pub async fn companion_sessions(
+        &self,
+        page: &zeus_companion_api::PageRequest,
+    ) -> Result<zeus_companion_api::Page<zeus_companion_api::Session>, ClientError> {
+        self.core
+            .request_typed(
+                "companion.sessions",
+                Some(page),
+                Some(Duration::from_secs(5)),
+            )
+            .await
+    }
+    pub async fn companion_projects(
+        &self,
+        page: &zeus_companion_api::PageRequest,
+    ) -> Result<zeus_companion_api::Page<zeus_companion_api::Project>, ClientError> {
+        self.core
+            .request_typed(
+                "companion.projects",
+                Some(page),
+                Some(Duration::from_secs(5)),
+            )
+            .await
+    }
+    pub async fn companion_session(
+        &self,
+        id: &str,
+    ) -> Result<zeus_companion_api::SessionDetail, ClientError> {
+        self.core
+            .request_typed(
+                "companion.session",
+                Some(&session_params(&SessionId(id.into()))),
+                Some(Duration::from_secs(5)),
+            )
+            .await
+    }
+    pub async fn companion_mutate(
+        &self,
+        id: &str,
+        device_id: &str,
+        mutation: &zeus_companion_api::Mutation,
+    ) -> Result<zeus_companion_api::MutationResult, ClientError> {
+        #[derive(Serialize)]
+        struct Params<'a> {
+            session_id: &'a str,
+            device_id: &'a str,
+            mutation: &'a zeus_companion_api::Mutation,
+        }
+        self.core
+            .request_typed(
+                "companion.mutate",
+                Some(&Params {
+                    session_id: id,
+                    device_id,
+                    mutation,
+                }),
+                Some(Duration::from_secs(5)),
+            )
+            .await
     }
 
     /// Starts the connect/reconnect loop. Repeated calls are idempotent.

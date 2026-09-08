@@ -25,6 +25,8 @@ use zeus_proto::{ControlError, ControlMessage, JsonValue, Method, WIRE_VERSION};
 
 use crate::registry::Registry;
 
+pub(crate) mod companion;
+
 /// Identifies this engine in the handshake, so a client can tell which
 /// implementation it reached.
 pub const BUILD: &str = concat!("zeus-engine-", env!("CARGO_PKG_VERSION"));
@@ -86,6 +88,7 @@ pub struct ControlServer {
     active_connections: Arc<AtomicUsize>,
     git: crate::git_workspace::GitTools,
     git_requests: std::sync::OnceLock<GitRequestPool>,
+    companion: Mutex<companion::Fence>,
 }
 
 /// Where injection files live and which CLI they point at. Present, spawns
@@ -125,6 +128,7 @@ impl ControlServer {
             active_connections: Arc::new(AtomicUsize::new(0)),
             git: crate::git_workspace::GitTools::new(),
             git_requests: std::sync::OnceLock::new(),
+            companion: Mutex::new(companion::Fence::new()),
         }
     }
 
@@ -563,14 +567,18 @@ impl ControlServer {
                 .stop
                 .store(true, std::sync::atomic::Ordering::SeqCst);
         }
-        let stream = self.events.subscribe(
-            p.since_seq,
-            crate::events::Filter::new(
-                p.sessions
-                    .map(|sessions| sessions.into_iter().map(|id| id.0).collect()),
-                p.kinds,
-            ),
-        );
+        let stream = if p.kinds.as_deref() == Some(&["companion.changed".to_owned()][..]) {
+            self.events.subscribe_companion()
+        } else {
+            self.events.subscribe(
+                p.since_seq,
+                crate::events::Filter::new(
+                    p.sessions
+                        .map(|sessions| sessions.into_iter().map(|id| id.0).collect()),
+                    p.kinds,
+                ),
+            )
+        };
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let handle = {
             let stop = Arc::clone(&stop);
@@ -662,6 +670,11 @@ impl ControlServer {
 
     fn dispatch(&self, method: &str, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
         match method {
+            "companion.hello" => self.companion_hello(),
+            "companion.sessions" => self.companion_sessions(params),
+            "companion.projects" => self.companion_projects(params),
+            "companion.session" => self.companion_session(params),
+            "companion.mutate" => self.companion_mutate(params),
             Method::HELLO => self.hello(params),
             Method::SESSION_SPAWN => self.session_spawn(params),
             Method::SESSION_LIST | Method::STATE_SNAPSHOT => self.session_list(),

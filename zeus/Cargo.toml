@@ -4,6 +4,8 @@ members = [
     "crates/zeus-cli",
     "crates/zeus-client",
     "crates/zeus-companion-api",
+    "crates/zeus-companion",
+    "crates/zeus-companion-client",
     "crates/zeus-engine",
     "crates/zeus-node",
     "crates/zeus-mcp",

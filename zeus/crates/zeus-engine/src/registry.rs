@@ -407,6 +407,30 @@ impl Registry {
         Some(record)
     }
 
+    /// Companion projections never clone artifacts, transcripts, prompts or a
+    /// complete SessionRecord. The caller bounds scan count before pagination.
+    pub(crate) fn companion_record(&self, id: &str) -> Option<zeus_companion_api::Session> {
+        let record = self.records.get(id)?;
+        Some(crate::control::companion::project(
+            record,
+            self.sessions.get(id).map(Session::view),
+        ))
+    }
+
+    pub(crate) fn companion_page(
+        &self,
+        offset: usize,
+        limit: usize,
+    ) -> Vec<zeus_companion_api::Session> {
+        let mut ids: Vec<_> = self.records.keys().collect();
+        ids.sort();
+        ids.into_iter()
+            .skip(offset)
+            .take(limit)
+            .filter_map(|id| self.companion_record(id))
+            .collect()
+    }
+
     /// Folds what only the live session knows into a stored record: its real
     /// status and Agent-provided title, and the resumability that follows
     /// from that status.

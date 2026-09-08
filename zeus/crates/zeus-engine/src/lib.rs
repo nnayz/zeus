@@ -23,6 +23,7 @@ pub mod artifacts;
 pub mod attach;
 pub mod browser;
 pub mod checkpoint;
+pub mod companion_sidecar;
 pub mod control;
 pub mod cwd;
 pub mod detect;

@@ -10,6 +10,7 @@ alacritty_terminal.workspace = true
 base64.workspace = true
 image = { workspace = true, features = ["jpeg"] }
 zeus-proto.workspace = true
+zeus-companion-api.workspace = true
 zeus-pty.workspace = true
 zeus-terminal-state.workspace = true
 getrandom.workspace = true

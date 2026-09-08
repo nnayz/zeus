@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+zeus-companion-api.workspace = true
 zeus-proto.workspace = true
 futures-core.workspace = true
 getrandom.workspace = true

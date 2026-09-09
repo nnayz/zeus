@@ -4,7 +4,7 @@
 //! `zeus-client::SessionAttachment`, `zeus-term`, and the T9 session store.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use gpui::{
@@ -15,8 +15,11 @@ use gpui::{
     actions, canvas, div, font, point, prelude::*, px, rgba,
 };
 use tokio::runtime::Handle;
-use tokio::sync::mpsc;
-use zeus_client::attachment::{SessionAttachment, TerminalChunk};
+use tokio::sync::{mpsc, watch};
+use zeus_client::attachment::{
+    AttachmentClosed, SessionAttachment, SessionAttachmentHandle, SessionAttachmentInput,
+    TerminalChunk,
+};
 use zeus_proto::frames::TerminalModes as WireTerminalModes;
 use zeus_proto::grid::{ChangedRow, GridUpdate};
 use zeus_proto::{
@@ -402,43 +405,128 @@ enum AttachmentState {
     Reconnecting,
 }
 
-enum AttachmentCommand {
-    TakeControl,
-    Input(Vec<u8>),
-    Resize(u16, u16),
-    Close,
+// Only measured geometry survives a reconnect. Input goes straight into the
+// bounded client queue, stamped with the Engine epoch at UI admission.
+#[derive(Default)]
+struct AttachmentAdmission {
+    writer: Option<SessionAttachmentHandle>,
+    last_resize: Option<(u16, u16)>,
+    closed: bool,
 }
 
 #[derive(Clone)]
 struct AttachmentControl {
-    tx: mpsc::UnboundedSender<AttachmentCommand>,
+    admission: Arc<Mutex<AttachmentAdmission>>,
+    shutdown: watch::Sender<bool>,
     pane_tx: mpsc::UnboundedSender<PaneEvent>,
 }
 
 impl AttachmentControl {
     fn inert() -> Self {
-        let (tx, _) = mpsc::unbounded_channel();
         let (pane_tx, _) = mpsc::unbounded_channel();
-        Self { tx, pane_tx }
+        Self::new(pane_tx)
+    }
+
+    fn new(pane_tx: mpsc::UnboundedSender<PaneEvent>) -> Self {
+        let (shutdown, _) = watch::channel(false);
+        Self {
+            admission: Arc::new(Mutex::new(AttachmentAdmission::default())),
+            shutdown,
+            pane_tx,
+        }
+    }
+
+    fn capture_input(&self) -> Result<SessionAttachmentInput, AttachmentClosed> {
+        let state = self.admission.lock().map_err(|_| AttachmentClosed)?;
+        state
+            .writer
+            .as_ref()
+            .ok_or(AttachmentClosed)?
+            .capture_input()
+    }
+
+    fn accepts(&self, input: &SessionAttachmentInput) -> bool {
+        self.admission.lock().is_ok_and(|state| {
+            state
+                .writer
+                .as_ref()
+                .is_some_and(|writer| input.belongs_to(writer))
+                && input.is_current()
+        })
     }
 
     fn input(&self, bytes: Vec<u8>) {
         if bytes.is_empty() {
             return;
         }
-        // Queue the priority marker before the bytes leave for the daemon, so
-        // an echo that returns immediately cannot land behind the UI's
-        // background-output repaint timer.
+        if let Ok(input) = self.capture_input() {
+            let _ = self.input_captured(&input, bytes);
+        }
+    }
+
+    fn input_captured(
+        &self,
+        input: &SessionAttachmentInput,
+        bytes: Vec<u8>,
+    ) -> Result<(), AttachmentClosed> {
+        let state = self.admission.lock().map_err(|_| AttachmentClosed)?;
+        if !state
+            .writer
+            .as_ref()
+            .is_some_and(|writer| input.belongs_to(writer))
+        {
+            return Err(AttachmentClosed);
+        }
+        // Queue the priority marker before bytes leave so immediate echo does
+        // not land behind the background-output repaint timer.
         let _ = self.pane_tx.send(PaneEvent::InteractiveInput);
-        let _ = self.tx.send(AttachmentCommand::Input(bytes));
+        input.send_input(bytes)
     }
 
     fn resize(&self, cols: u16, rows: u16) {
-        let _ = self.tx.send(AttachmentCommand::Resize(cols, rows));
+        if let Ok(mut state) = self.admission.lock() {
+            state.last_resize = Some((cols, rows));
+            if let Some(writer) = &state.writer {
+                let _ = writer.resize(cols, rows);
+            }
+        }
+    }
+
+    fn connected(&self, writer: SessionAttachmentHandle) -> bool {
+        let Ok(mut state) = self.admission.lock() else {
+            return false;
+        };
+        if state.closed {
+            return false;
+        }
+        // Deferred launch requires the first measured size, never 80×24.
+        if let Some((cols, rows)) = state.last_resize {
+            let _ = writer.resize(cols, rows);
+        }
+        state.writer = Some(writer);
+        true
+    }
+
+    fn disconnected(&self) {
+        if let Ok(mut state) = self.admission.lock() {
+            state.writer = None;
+        }
+    }
+
+    fn take_control(&self) {
+        if let Ok(state) = self.admission.lock()
+            && let Some(writer) = &state.writer
+        {
+            let _ = writer.take_control();
+        }
     }
 
     fn close(&self) {
-        let _ = self.tx.send(AttachmentCommand::Close);
+        if let Ok(mut state) = self.admission.lock() {
+            state.closed = true;
+            state.writer = None;
+        }
+        self.shutdown.send_replace(true);
     }
 }
 
@@ -449,7 +537,7 @@ enum PaneEvent {
     FindSnapshot(SessionId, SearchRequest, FindSnapshot),
     ScrollbackCells(SessionId, zeus_proto::ReadScrollbackCellsResult, usize),
     ScrollbackFailed(SessionId),
-    AttachmentUploadFinished(SessionId, Result<Vec<String>, String>, Vec<String>),
+    AttachmentUploadFinished(Arc<()>, Result<Vec<String>, String>),
 }
 
 #[derive(Clone, Debug)]
@@ -462,9 +550,58 @@ enum AttachmentUi {
 }
 
 struct PendingUpload {
+    attempt: Arc<()>,
+    input: SessionAttachmentInput,
     session_id: SessionId,
     local_paths: Vec<String>,
     display_names: Vec<String>,
+}
+
+fn attachment_input_rejected() -> AttachmentUi {
+    AttachmentUi::Failed {
+        message: "Image was not inserted: terminal control changed or input is unavailable".into(),
+    }
+}
+
+fn complete_upload(
+    pending: &mut Option<PendingUpload>,
+    attempt: &Arc<()>,
+    result: Result<Vec<String>, String>,
+    target: Option<(&AttachmentControl, bool)>,
+) -> Option<AttachmentUi> {
+    if !pending
+        .as_ref()
+        .is_some_and(|pending| Arc::ptr_eq(&pending.attempt, attempt))
+    {
+        // A cancelled/replaced attempt must neither insert nor replace UI state.
+        return None;
+    }
+    let upload = pending.take().expect("matched attempt");
+    let Some((attachment, bracketed)) =
+        target.filter(|(attachment, _)| attachment.accepts(&upload.input))
+    else {
+        return Some(attachment_input_rejected());
+    };
+    Some(match result {
+        Ok(paths) => {
+            if attachment
+                .input_captured(&upload.input, paste(&paste_paths(&paths), bracketed))
+                .is_ok()
+            {
+                AttachmentUi::Success {
+                    message: attachment_success_message(&upload.display_names),
+                }
+            } else {
+                attachment_input_rejected()
+            }
+        }
+        Err(error) => {
+            *pending = Some(upload);
+            AttachmentUi::Failed {
+                message: format!("Upload failed: {error}"),
+            }
+        }
+    })
 }
 
 struct ResidentTerminal {
@@ -1151,8 +1288,8 @@ impl TerminalPane {
                     cx.notify();
                 }
             }
-            PaneEvent::AttachmentUploadFinished(id, result, local_paths) => {
-                self.finish_remote_upload(id, result, local_paths, cx);
+            PaneEvent::AttachmentUploadFinished(attempt, result) => {
+                self.finish_remote_upload(attempt, result, cx);
             }
         }
     }
@@ -1606,8 +1743,12 @@ impl TerminalPane {
             if in_find {
                 return;
             }
+            let input = self
+                .residents
+                .get(&id)
+                .and_then(|resident| resident.attachment.capture_input().ok());
             match stage_bytes(bytes, format!("clipboard.{extension}")) {
-                Ok(staged) => self.deliver_images(id, vec![staged], window, cx),
+                Ok(staged) => self.deliver_images(id, input, vec![staged], window, cx),
                 Err(error) => self.set_attachment_ui(
                     AttachmentUi::Failed {
                         message: error.user_message().to_owned(),
@@ -1666,6 +1807,7 @@ impl TerminalPane {
     fn deliver_images(
         &mut self,
         id: SessionId,
+        input: Option<SessionAttachmentInput>,
         images: Vec<StagedImage>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -1685,132 +1827,120 @@ impl TerminalPane {
             );
             return;
         }
+        // A new paste replaces any previous attempt, including a failed upload.
+        self.pending_upload = None;
+        let Some(input) = input else {
+            self.set_attachment_ui(attachment_input_rejected(), cx);
+            return;
+        };
         let display_names: Vec<String> = images
             .iter()
             .map(|image| image.original_name.clone())
             .collect();
         let local_paths = keep_staged(&mut self.staged_images, images);
         if remote {
-            self.start_remote_upload(id, local_paths, display_names, cx);
+            self.start_remote_upload(
+                PendingUpload {
+                    attempt: Arc::new(()),
+                    input,
+                    session_id: id,
+                    local_paths,
+                    display_names,
+                },
+                cx,
+            );
             return;
         }
-        self.insert_attachment_paths(&id, &local_paths);
+        let admitted = self.residents.get(&id).is_some_and(|resident| {
+            resident
+                .attachment
+                .input_captured(
+                    &input,
+                    paste(
+                        &paste_paths(&local_paths),
+                        resident.input_modes.bracketed_paste,
+                    ),
+                )
+                .is_ok()
+        });
         self.set_attachment_ui(
-            AttachmentUi::Success {
-                message: attachment_success_message(&display_names),
+            if admitted {
+                AttachmentUi::Success {
+                    message: attachment_success_message(&display_names),
+                }
+            } else {
+                attachment_input_rejected()
             },
             cx,
         );
         self.focus(window, cx);
     }
 
-    fn insert_attachment_paths(&mut self, id: &SessionId, paths: &[String]) {
-        let payload = paste_paths(paths);
-        if let Some(resident) = self.residents.get(id) {
-            resident
-                .attachment
-                .input(paste(&payload, resident.input_modes.bracketed_paste));
+    fn start_remote_upload(&mut self, pending: PendingUpload, cx: &mut Context<Self>) {
+        if !self
+            .residents
+            .get(&pending.session_id)
+            .is_some_and(|resident| resident.attachment.accepts(&pending.input))
+        {
+            self.set_attachment_ui(attachment_input_rejected(), cx);
+            return;
         }
-    }
-
-    fn start_remote_upload(
-        &mut self,
-        id: SessionId,
-        local_paths: Vec<String>,
-        display_names: Vec<String>,
-        cx: &mut Context<Self>,
-    ) {
-        self.pending_upload = Some(PendingUpload {
-            session_id: id.clone(),
-            local_paths: local_paths.clone(),
-            display_names: display_names.clone(),
-        });
         self.set_attachment_ui(
             AttachmentUi::Progress {
-                message: format!("Uploading {}…", attachment_count(&display_names)),
+                message: format!("Uploading {}…", attachment_count(&pending.display_names)),
             },
             cx,
         );
         let client = Arc::clone(self.runtime.client());
         let pane_tx = self.pane_tx.clone();
-        let upload_id = id;
+        let attempt = pending.attempt.clone();
+        let upload_id = pending.session_id.clone();
+        let local_paths = pending.local_paths.clone();
+        self.pending_upload = Some(pending);
         self.tokio.spawn(async move {
             let mut remote_paths = Vec::with_capacity(local_paths.len());
-            for path in local_paths.clone() {
+            for path in local_paths {
                 match client.upload_attachment(&upload_id, path).await {
                     Ok(remote) => remote_paths.push(remote),
                     Err(error) => {
                         let _ = pane_tx.send(PaneEvent::AttachmentUploadFinished(
-                            upload_id,
+                            attempt,
                             Err(error.to_string()),
-                            local_paths,
                         ));
                         return;
                     }
                 }
             }
             let _ = pane_tx.send(PaneEvent::AttachmentUploadFinished(
-                upload_id,
+                attempt,
                 Ok(remote_paths),
-                local_paths,
             ));
         });
     }
 
     fn finish_remote_upload(
         &mut self,
-        id: SessionId,
+        attempt: Arc<()>,
         result: Result<Vec<String>, String>,
-        local_paths: Vec<String>,
         cx: &mut Context<Self>,
     ) {
-        match result {
-            Ok(remote_paths) => {
-                self.insert_attachment_paths(&id, &remote_paths);
-                let names = self
-                    .pending_upload
-                    .as_ref()
-                    .filter(|pending| pending.session_id == id)
-                    .map(|pending| pending.display_names.clone())
-                    .unwrap_or_default();
-                self.pending_upload = None;
-                self.set_attachment_ui(
-                    AttachmentUi::Success {
-                        message: attachment_success_message(&names),
-                    },
-                    cx,
-                );
-            }
-            Err(error) => {
-                self.pending_upload = Some(PendingUpload {
-                    session_id: id,
-                    local_paths,
-                    display_names: self
-                        .pending_upload
-                        .as_ref()
-                        .map(|pending| pending.display_names.clone())
-                        .unwrap_or_default(),
-                });
-                self.set_attachment_ui(
-                    AttachmentUi::Failed {
-                        message: format!("Upload failed: {error}"),
-                    },
-                    cx,
-                );
-            }
+        let target = self
+            .pending_upload
+            .as_ref()
+            .and_then(|pending| self.residents.get(&pending.session_id))
+            .map(|resident| (&resident.attachment, resident.input_modes.bracketed_paste));
+        if let Some(ui) = complete_upload(&mut self.pending_upload, &attempt, result, target) {
+            self.set_attachment_ui(ui, cx);
         }
     }
 
     fn retry_pending_upload(&mut self, cx: &mut Context<Self>) {
-        let Some(pending) = self.pending_upload.take() else {
+        let Some(mut pending) = self.pending_upload.take() else {
             return;
         };
-        self.start_remote_upload(
-            pending.session_id,
-            pending.local_paths,
-            pending.display_names,
-            cx,
-        );
+        // Retry is another upload attempt under the original input authority.
+        pending.attempt = Arc::new(());
+        self.start_remote_upload(pending, cx);
     }
 
     fn cancel_pending_upload(&mut self, cx: &mut Context<Self>) {
@@ -1829,8 +1959,12 @@ impl TerminalPane {
             return;
         };
         let (descriptor, _) = self.session_image_capability(&id);
+        let input = self
+            .residents
+            .get(&id)
+            .and_then(|resident| resident.attachment.capture_input().ok());
         match stage_drop(descriptor.as_ref(), paths.paths()) {
-            Ok(images) => self.deliver_images(id, images, window, cx),
+            Ok(images) => self.deliver_images(id, input, images, window, cx),
             Err(AttachmentDecision::Unsupported { message }) => {
                 self.set_attachment_ui(AttachmentUi::Unsupported { message }, cx);
             }
@@ -2546,7 +2680,7 @@ impl TerminalPane {
                     .child(label)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if !owned && let Some(resident) = this.residents.get(&id) {
-                            let _ = resident.attachment.tx.send(AttachmentCommand::TakeControl);
+                            resident.attachment.take_control();
                         }
                         cx.stop_propagation();
                     })),
@@ -4542,36 +4676,37 @@ fn spawn_attachment(
     id: SessionId,
     pane_tx: mpsc::UnboundedSender<PaneEvent>,
 ) -> AttachmentControl {
-    let (command_tx, mut commands) = mpsc::unbounded_channel();
-    let control = AttachmentControl {
-        tx: command_tx,
-        pane_tx: pane_tx.clone(),
-    };
+    let control = AttachmentControl::new(pane_tx.clone());
+    let task_control = control.clone();
+    let mut shutdown = control.shutdown.subscribe();
     runtime.spawn(async move {
-        // The first resize must be the measured pane geometry: deferred agent
-        // launch waits for it. Do not seed an arbitrary 80×24 size.
-        let mut last_resize = None;
         loop {
+            if *shutdown.borrow() {
+                return;
+            }
             let _ = pane_tx.send(PaneEvent::AttachmentState(
                 id.clone(),
                 AttachmentState::Attaching,
             ));
-            let mut attachment = match SessionAttachment::connect(&socket, id.clone()).await {
+            let connected = tokio::select! {
+                result = SessionAttachment::connect(&socket, id.clone()) => result,
+                _ = shutdown.changed() => return,
+            };
+            let mut attachment = match connected {
                 Ok(attachment) => attachment,
                 Err(_) => {
                     let _ = pane_tx.send(PaneEvent::AttachmentState(
                         id.clone(),
                         AttachmentState::Reconnecting,
                     ));
-                    if wait_for_retry(&mut commands, &mut last_resize).await {
+                    if wait_for_retry(&mut shutdown).await {
                         return;
                     }
                     continue;
                 }
             };
-            let writer = attachment.handle();
-            if let Some((cols, rows)) = last_resize {
-                let _ = writer.resize(cols, rows);
+            if !task_control.connected(attachment.handle()) {
+                return;
             }
             let _ = pane_tx.send(PaneEvent::AttachmentState(
                 id.clone(),
@@ -4586,21 +4721,10 @@ fn spawn_attachment(
                             break true;
                         }
                     }
-                    command = commands.recv() => {
-                        match command {
-                            Some(AttachmentCommand::TakeControl) => { let _ = writer.take_control(); }
-                            Some(AttachmentCommand::Input(bytes)) => {
-                                let _ = writer.send_input(bytes);
-                            }
-                            Some(AttachmentCommand::Resize(cols, rows)) => {
-                                last_resize = Some((cols, rows));
-                                let _ = writer.resize(cols, rows);
-                            }
-                            Some(AttachmentCommand::Close) | None => break true,
-                        }
-                    }
+                    _ = shutdown.changed() => break true,
                 }
             };
+            task_control.disconnected();
             attachment.close().await;
             if should_close {
                 return;
@@ -4609,7 +4733,7 @@ fn spawn_attachment(
                 id.clone(),
                 AttachmentState::Reconnecting,
             ));
-            if wait_for_retry(&mut commands, &mut last_resize).await {
+            if wait_for_retry(&mut shutdown).await {
                 return;
             }
         }
@@ -4617,21 +4741,13 @@ fn spawn_attachment(
     control
 }
 
-async fn wait_for_retry(
-    commands: &mut mpsc::UnboundedReceiver<AttachmentCommand>,
-    last_resize: &mut Option<(u16, u16)>,
-) -> bool {
-    let delay = tokio::time::sleep(REATTACH_DELAY);
-    tokio::pin!(delay);
-    loop {
-        tokio::select! {
-            () = &mut delay => return false,
-            command = commands.recv() => match command {
-                Some(AttachmentCommand::Resize(cols, rows)) => *last_resize = Some((cols, rows)),
-                Some(AttachmentCommand::Close) | None => return true,
-                Some(AttachmentCommand::Input(_) | AttachmentCommand::TakeControl) => {}
-            }
-        }
+async fn wait_for_retry(shutdown: &mut watch::Receiver<bool>) -> bool {
+    if *shutdown.borrow() {
+        return true;
+    }
+    tokio::select! {
+        () = tokio::time::sleep(REATTACH_DELAY) => false,
+        _ = shutdown.changed() => true,
     }
 }
 
@@ -5214,6 +5330,313 @@ mod tests {
     };
 
     use super::*;
+
+    fn test_controller(generation: u64) -> zeus_proto::terminal::AttachmentControlState {
+        use zeus_proto::terminal::*;
+        AttachmentControlState {
+            client_id: "desktop-test".into(),
+            control: ControlState {
+                epoch: ControlEpoch {
+                    incarnation: "engine-test".into(),
+                    generation,
+                },
+                owner: Some(Controller {
+                    id: "desktop-test".into(),
+                    label: "Desktop".into(),
+                    role: zeus_proto::ClientRole::Desktop,
+                }),
+                command_seq: 0,
+            },
+            error: None,
+        }
+    }
+
+    async fn send_controller(
+        server: &mut tokio::net::UnixStream,
+        state: &zeus_proto::terminal::AttachmentControlState,
+    ) {
+        use tokio::io::AsyncWriteExt;
+        use zeus_proto::frames::{Frame, FrameCodec, FrameType};
+        server
+            .write_all(
+                &FrameCodec::encode(&Frame::new(
+                    FrameType::Controller,
+                    serde_json::to_vec(state).unwrap(),
+                ))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+
+    async fn test_attachment() -> (SessionAttachment, tokio::net::UnixStream) {
+        use tokio::io::AsyncReadExt;
+        let dir = tempfile::tempdir_in("/tmp").unwrap();
+        let socket = dir.path().join("attach.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let (attachment, server) = tokio::join!(
+            SessionAttachment::connect(&socket, SessionId::new("test")),
+            async {
+                let (mut server, _) = listener.accept().await.unwrap();
+                while server.read_u8().await.unwrap() != b'\n' {}
+                send_controller(&mut server, &test_controller(1)).await;
+                server
+            },
+        );
+        (attachment.unwrap(), server)
+    }
+
+    async fn receive_command(
+        server: &mut tokio::net::UnixStream,
+    ) -> zeus_proto::terminal::ControlledFrame {
+        use tokio::io::AsyncReadExt;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            assert_eq!(
+                server.read_u8().await.unwrap(),
+                zeus_proto::frames::FrameType::Controlled as u8
+            );
+            let len = server.read_u32().await.unwrap();
+            let mut bytes = vec![0; len as usize];
+            server.read_exact(&mut bytes).await.unwrap();
+            serde_json::from_slice(&bytes).unwrap()
+        })
+        .await
+        .expect("command was queued")
+    }
+
+    async fn change_controller(
+        attachment: &mut SessionAttachment,
+        server: &mut tokio::net::UnixStream,
+        state: zeus_proto::terminal::AttachmentControlState,
+    ) {
+        send_controller(server, &state).await;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(TerminalChunk::Control(current)) = attachment.chunks.recv().await {
+                    if current == state {
+                        break;
+                    }
+                } else {
+                    panic!("expected control notification");
+                }
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    fn pending_image(control: &AttachmentControl) -> PendingUpload {
+        PendingUpload {
+            attempt: Arc::new(()),
+            input: control.capture_input().unwrap(),
+            session_id: SessionId::new("test"),
+            local_paths: vec!["/tmp/staged.png".into()],
+            display_names: vec!["image.png".into()],
+        }
+    }
+
+    fn uploaded_paths() -> Result<Vec<String>, String> {
+        Ok(vec!["/remote/image.png".into()])
+    }
+
+    #[tokio::test]
+    async fn ui_admission_bounds_input_and_preserves_epoch_through_takeover() {
+        let (mut attachment, mut server) = test_attachment().await;
+        let control = AttachmentControl::inert();
+        assert!(control.connected(attachment.handle()));
+        let input = control.capture_input().unwrap();
+        assert!(control.input_captured(&input, vec![0; 65537]).is_err());
+        // No await: the client writer cannot drain the queue on this runtime.
+        for _ in 0..64 {
+            control.input_captured(&input, b"queued".to_vec()).unwrap();
+        }
+        assert!(
+            control
+                .input_captured(&input, b"overflow".to_vec())
+                .is_err()
+        );
+        for _ in 0..64 {
+            let command = receive_command(&mut server).await;
+            assert_eq!(command.expected, test_controller(1).control.epoch);
+            assert!(
+                matches!(command.action, zeus_proto::terminal::AttachmentAction::Input { bytes } if bytes == b"queued")
+            );
+        }
+        let mut phone = test_controller(2);
+        phone.control.owner.as_mut().unwrap().id = "phone".into();
+        change_controller(&mut attachment, &mut server, phone).await;
+        assert!(control.capture_input().is_err());
+        change_controller(&mut attachment, &mut server, test_controller(3)).await;
+        assert!(control.input_captured(&input, b"stale".to_vec()).is_err());
+        control.input(b"fresh".to_vec());
+        let command = receive_command(&mut server).await;
+        assert_eq!(command.expected.generation, 3);
+        assert!(
+            matches!(command.action, zeus_proto::terminal::AttachmentAction::Input { bytes } if bytes == b"fresh")
+        );
+    }
+
+    #[tokio::test]
+    async fn measured_geometry_is_coalesced_while_disconnected_and_close_cannot_overflow() {
+        let control = AttachmentControl::inert();
+        assert!(control.capture_input().is_err());
+        for cols in 1..=1000 {
+            control.resize(cols, 30);
+            control.input(b"must not replay".to_vec());
+        }
+        let (attachment, mut server) = test_attachment().await;
+        assert!(control.connected(attachment.handle()));
+        let first = receive_command(&mut server).await;
+        assert!(matches!(
+            first.action,
+            zeus_proto::terminal::AttachmentAction::Resize {
+                cols: 1000,
+                rows: 30
+            }
+        ));
+        let input = control.capture_input().unwrap();
+        for _ in 0..64 {
+            control.input_captured(&input, vec![1]).unwrap();
+        }
+        control.close();
+        assert!(*control.shutdown.borrow());
+        assert!(control.capture_input().is_err());
+        assert!(!control.connected(attachment.handle()));
+        assert!(control.input_captured(&input, vec![1]).is_err());
+    }
+
+    #[tokio::test]
+    async fn image_completion_ignores_cancelled_and_replaced_attempts() {
+        let (attachment, mut server) = test_attachment().await;
+        let control = AttachmentControl::inert();
+        control.connected(attachment.handle());
+        let cancelled = pending_image(&control);
+        let attempt = cancelled.attempt.clone();
+        let mut pending = Some(cancelled);
+        // The exact cancellation operation used by the UI.
+        pending.take();
+        assert!(
+            complete_upload(
+                &mut pending,
+                &attempt,
+                uploaded_paths(),
+                Some((&control, false))
+            )
+            .is_none()
+        );
+        assert!(
+            complete_upload(
+                &mut pending,
+                &attempt,
+                Err("late failure".into()),
+                Some((&control, false))
+            )
+            .is_none()
+        );
+        pending = Some(pending_image(&control));
+        let replacement = pending.as_ref().unwrap().attempt.clone();
+        assert!(
+            complete_upload(
+                &mut pending,
+                &attempt,
+                uploaded_paths(),
+                Some((&control, false))
+            )
+            .is_none()
+        );
+        assert!(Arc::ptr_eq(
+            &pending.as_ref().unwrap().attempt,
+            &replacement
+        ));
+        assert!(matches!(
+            complete_upload(
+                &mut pending,
+                &replacement,
+                uploaded_paths(),
+                Some((&control, true))
+            ),
+            Some(AttachmentUi::Success { .. })
+        ));
+        let command = receive_command(&mut server).await;
+        assert!(
+            matches!(command.action, zeus_proto::terminal::AttachmentAction::Input { bytes } if bytes == paste("/remote/image.png", true))
+        );
+        assert!(pending.is_none());
+        assert!(
+            complete_upload(
+                &mut pending,
+                &replacement,
+                uploaded_paths(),
+                Some((&control, true))
+            )
+            .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn image_completion_rejects_control_change_reconnect_and_full_input_queue() {
+        let (mut attachment, mut server) = test_attachment().await;
+        let control = AttachmentControl::inert();
+        control.connected(attachment.handle());
+        let upload = pending_image(&control);
+        let attempt = upload.attempt.clone();
+        let mut pending = Some(upload);
+        let mut phone = test_controller(2);
+        phone.control.owner.as_mut().unwrap().id = "phone".into();
+        change_controller(&mut attachment, &mut server, phone).await;
+        change_controller(&mut attachment, &mut server, test_controller(3)).await;
+        assert!(matches!(
+            complete_upload(
+                &mut pending,
+                &attempt,
+                uploaded_paths(),
+                Some((&control, false))
+            ),
+            Some(AttachmentUi::Failed { .. })
+        ));
+        assert!(pending.is_none());
+
+        let (replacement, _server) = test_attachment().await;
+        // Same Engine epoch, distinct attachment identity; old socket still live.
+        let old = AttachmentControl::inert();
+        old.connected(replacement.handle());
+        let upload = pending_image(&old);
+        let attempt = upload.attempt.clone();
+        let mut pending = Some(upload);
+        old.disconnected();
+        assert!(!old.accepts(&pending.as_ref().unwrap().input));
+        let (new_attachment, _new_server) = test_attachment().await;
+        old.connected(new_attachment.handle());
+        assert!(matches!(
+            complete_upload(
+                &mut pending,
+                &attempt,
+                uploaded_paths(),
+                Some((&old, false))
+            ),
+            Some(AttachmentUi::Failed { .. })
+        ));
+
+        let upload = pending_image(&control);
+        let attempt = upload.attempt.clone();
+        let mut pending = Some(upload);
+        for _ in 0..64 {
+            control.input(vec![1]);
+        }
+        assert!(matches!(
+            complete_upload(
+                &mut pending,
+                &attempt,
+                uploaded_paths(),
+                Some((&control, false))
+            ),
+            Some(AttachmentUi::Failed { .. })
+        ));
+        assert!(
+            pending.is_none(),
+            "rejected paste must never report success"
+        );
+    }
 
     /// Replays a drag as the render loop sees it -- a geometry change every
     /// `frame`, for `frames` frames -- and returns when each size reached the

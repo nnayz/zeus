@@ -105,7 +105,13 @@ The passing smoke verified:
 
 The smoke makes bounded screen reads to observe PTY echo. It does not separately
 prove that delayed terminal output alone (without a session/status mutation)
-produces a new invalidation. That remains a #73/#75 event-integration concern.
+produces a new invalidation. #73 independently covers that path in
+`delayed_prompt_output_invalidates_without_metadata_or_control_change`
+(`zeus/crates/zeus-companion/tests/integration.rs`): FIFO-gated output released
+after command events settle produces an Engine `session.output` event, external
+`changed` invalidation, and updated screen while metadata/control stay unchanged.
+The #73 owner reported the gateway suite passing 17/17; this closes the separate
+output-only integration gap without broadening this adapter smoke's claims.
 Its transport is the explicit loopback HTTP fixture exception; no deployment
 TLS, private overlay, real SSH host, browser, or physical iPhone is involved.
 

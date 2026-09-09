@@ -216,7 +216,7 @@ isolated echo PTY. EOF or an input byte shuts down and removes the enrollment
 file. The #74 adapter smoke owns this lifecycle automatically:
 
 ```sh
-rtk env COMPANION_RUST_FIXTURE=/absolute/path/to/zeus/target/debug/examples/fixture node prototypes/companion-web/test/rust-smoke.mjs
+rtk proxy env COMPANION_RUST_FIXTURE=/absolute/path/to/zeus/target/debug/examples/fixture node prototypes/companion-web/test/rust-smoke.mjs
 ```
 
 Run that last command from the integrated repository root. #74 commit

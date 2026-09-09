@@ -248,10 +248,12 @@ Errors use `ApiError {code}`. Examples: 401 `unauthorized`/`pairing_denied`;
 Terminal mappings include 409 `stale_controller_epoch`, `not_controller`,
 `controller_busy`, `command_sequence`, `input_unconfirmed`; 422
 `terminal_geometry`; and 502 `invalid_snapshot`/`snapshot_required`.
-Unlisted Engine errors currently collapse to `engine_rejected`, including an
-Engine-side `outcome_unknown`; client timeout maps to 504 `outcome_unknown`.
-Production must unify uncertain-outcome classification and document sanitized
-close behavior without exposing internal debug payloads.
+Unlisted Engine errors collapse to `engine_rejected`. Engine-side
+`outcome_unknown`, `input_unconfirmed`, and `terminal_unavailable` retain their
+sanitized codes (409); client timeout maps to 504 `outcome_unknown`. Regression
+tests cover these mappings. Clients must treat uncertain delivery as requiring
+fresh state and explicit review, never an automatic mutation retry. Sanitized
+close behavior remains a production review item.
 
 ### Observed bounds and remaining budget gaps
 

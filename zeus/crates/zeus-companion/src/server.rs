@@ -185,6 +185,7 @@ fn engine_error(error: ClientError) -> Failure {
             "stale_controller_epoch" => Failure(StatusCode::CONFLICT, "stale_controller_epoch"),
             "not_controller" => Failure(StatusCode::CONFLICT, "not_controller"),
             "controller_busy" => Failure(StatusCode::CONFLICT, "controller_busy"),
+            "terminal_unavailable" => Failure(StatusCode::CONFLICT, "terminal_unavailable"),
             "command_sequence" => Failure(StatusCode::CONFLICT, "command_sequence"),
             "input_unconfirmed" => Failure(StatusCode::CONFLICT, "input_unconfirmed"),
             "outcome_unknown" => Failure(StatusCode::CONFLICT, "outcome_unknown"),
@@ -796,6 +797,26 @@ mod tests {
     use axum::body::{Body, Bytes};
     use futures::StreamExt;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn uncertain_delivery_and_terminal_admission_errors_preserve_their_code() {
+        for code in [
+            "outcome_unknown",
+            "input_unconfirmed",
+            "terminal_unavailable",
+        ] {
+            let error = ClientError::Control(zeus_proto::control::ControlError::new(
+                code,
+                "internal diagnostic must not cross the gateway",
+            ));
+            let failure = engine_error(error);
+            assert_eq!(failure.0, StatusCode::CONFLICT);
+            assert_eq!(failure.1, code);
+        }
+        let failure = engine_error(ClientError::Timeout("private diagnostic".into()));
+        assert_eq!(failure.0, StatusCode::GATEWAY_TIMEOUT);
+        assert_eq!(failure.1, "outcome_unknown");
+    }
     #[tokio::test]
     async fn revoked_while_decoding_cannot_reach_engine_dispatch() {
         let temp = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();

@@ -126,7 +126,7 @@ async fn run() -> io::Result<()> {
             Ok(())
         }
         _ => Err(invalid(
-            "usage: init DIR | enroll CONFIG OUTPUT read|interact|lifecycle | devices DIR | revoke DIR DEVICE | serve CONFIG ENGINE_SOCKET",
+            "usage: init DIR | enroll CONFIG OUTPUT read|interact|lifecycle ORIGIN | devices DIR | revoke DIR DEVICE | serve CONFIG ENGINE_SOCKET",
         )),
     }
 }

@@ -1300,6 +1300,33 @@ mod tests {
     use zeus_proto::model::AgentKind;
 
     #[tokio::test]
+    async fn companion_cancelled_and_queue_rejected_requests_release_pending_entries() {
+        let client = DaemonClient::for_companion("/unused-fixture.sock");
+        let (writer, mut queued) = mpsc::channel(1);
+        *client.core.writer.write().await = Some(writer.clone());
+        let core = client.core.clone();
+        let request = tokio::spawn(async move {
+            core.request::<JsonValue>("companion.hello", None, None)
+                .await
+        });
+        queued.recv().await.expect("request reached writer");
+        assert_eq!(client.core.pending.lock().unwrap().len(), 1);
+        request.abort();
+        assert!(request.await.unwrap_err().is_cancelled());
+        assert!(client.core.pending.lock().unwrap().is_empty());
+
+        writer.try_send(Vec::new()).unwrap();
+        assert!(
+            client
+                .core
+                .request::<JsonValue>("companion.hello", None, None)
+                .await
+                .is_err()
+        );
+        assert!(client.core.pending.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn live_daemon_control_round_trip() -> Result<(), Box<dyn Error>> {
         if std::env::var_os("ZEUS_RUN_MUTATING_DAEMON_TESTS").is_none() {
             eprintln!(

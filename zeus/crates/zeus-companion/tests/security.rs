@@ -93,6 +93,13 @@ fn secure_files_reject_symlinks_hardlinks_modes_special_files_and_writable_ances
     let link = auth.directory.join("link");
     symlink(&path, &link).unwrap();
     assert!(secure_read(&link, 1024).is_err());
+    assert!(atomic_write(&link, b"replacement").is_err());
+    let missing = auth.directory.join("missing");
+    let dangling = auth.directory.join("dangling");
+    symlink(&missing, &dangling).unwrap();
+    assert!(atomic_write(&dangling, b"replacement").is_err());
+    assert_eq!(std::fs::read_link(&dangling).unwrap(), missing);
+    assert!(!missing.exists());
     let hard = auth.directory.join("hard");
     std::fs::hard_link(&path, &hard).unwrap();
     assert!(secure_read(&path, 1024).is_err());

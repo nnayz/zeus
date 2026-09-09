@@ -159,12 +159,16 @@ pub fn validate_file(file: &File) -> io::Result<()> {
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let parent = path.parent().ok_or_else(|| invalid("missing parent"))?;
     secure_dir(parent)?;
-    if path.try_exists()? {
-        let file = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-            .open(path)?;
-        validate_file(&file)?;
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => {
+            let file = OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                .open(path)?;
+            validate_file(&file)?;
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
     }
     let temporary = parent.join(format!(".{}.tmp", crate::auth::random_token()?));
     let result = (|| {

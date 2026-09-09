@@ -5,6 +5,179 @@ use zeus_companion_api::*;
 use zeus_companion_client::Client;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delayed_prompt_output_invalidates_without_metadata_or_control_change() {
+    use std::{io::Write, os::unix::fs::OpenOptionsExt};
+    let fixture = Fixture::new().await;
+    let gate = fixture.temp.path().join("output-gate");
+    let path = std::ffi::CString::new(gate.as_os_str().as_encoded_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+    // The PTY consumes the prompt, then waits for an independent test-controlled
+    // gate. No timer, rename, control RPC or status mutation releases its output.
+    let script = "stty -echo; printf 'fixture-ready\\n'; IFS= read -r prompt; : > prompt-received; IFS= read -r release < output-gate; printf 'delayed:%s\\n' \"$prompt\"; exec /bin/cat";
+    let result = fixture
+        .daemon
+        .request(
+            "session.spawn",
+            Some(&serde_json::json!({
+                "kind":{"shell":{}}, "cwd":fixture.temp.path(),
+                "argv":["/bin/sh", "-c", script], "title":"delayed output fixture",
+                "initialCols":80, "initialRows":24
+            })),
+            Some(Duration::from_secs(5)),
+        )
+        .await
+        .unwrap();
+    let id = result["id"].as_str().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let screen = loop {
+        if let Ok(screen) = fixture.client.screen(id).await
+            && screen.text.contains("fixture-ready")
+        {
+            break screen;
+        }
+        assert!(Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    let control = fixture
+        .client
+        .acquire(
+            id,
+            &AcquireControl {
+                expected: screen.control.epoch,
+                takeover: false,
+            },
+        )
+        .await
+        .unwrap();
+    fixture
+        .client
+        .send_text(
+            id,
+            &SendText {
+                expected: control.epoch,
+                command_seq: 1,
+                text: "output-only-marker".into(),
+                submit: true,
+            },
+        )
+        .await
+        .unwrap();
+    while !fixture.temp.path().join("prompt-received").exists() {
+        assert!(Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let mut events = fixture.client.subscribe(None).await.unwrap();
+    assert_eq!(events.next().await.unwrap().kind, "resync_required");
+    // Drain startup and command invalidations across two watcher intervals.
+    loop {
+        assert!(Instant::now() < deadline);
+        if tokio::time::timeout(Duration::from_millis(350), events.next())
+            .await
+            .is_err()
+        {
+            break;
+        }
+    }
+    let before = fixture.client.session(id).await.unwrap();
+    let screen_before = fixture.client.screen(id).await.unwrap();
+    let bus = fixture.engine.lock().unwrap().events();
+    let source = bus.subscribe(
+        None,
+        zeus_engine::events::Filter::new(
+            None,
+            Some(vec![
+                "session.output".into(),
+                "session.updated".into(),
+                "terminal.control_changed".into(),
+            ]),
+        ),
+    );
+    let start = Instant::now();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(gate)
+        .unwrap()
+        .write_all(b"release\n")
+        .unwrap();
+    let changed = tokio::time::timeout(Duration::from_secs(3), events.next())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(changed.kind, "changed");
+    let internal = source
+        .try_recv()
+        .expect("Engine published the invalidation");
+    assert_eq!(internal.name, "session.output");
+    assert!(internal.params.is_null());
+    assert!(
+        source.try_recv().is_none(),
+        "no metadata/control event needed"
+    );
+    let screen_after = fixture.client.screen(id).await.unwrap();
+    assert!(screen_after.text.contains("delayed:output-only-marker"));
+    assert!(screen_after.screen_sequence > screen_before.screen_sequence);
+    assert_eq!(screen_after.control, screen_before.control);
+    assert_eq!(fixture.client.session(id).await.unwrap(), before);
+    eprintln!(
+        "companion gated_output_to_event_and_screen_us={}",
+        start.elapsed().as_micros()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sidecar_binary_closes_listener_and_upgraded_stream_on_parent_stdin_eof() {
+    use std::process::Stdio;
+    use zeus_companion::config::{Config, atomic_write};
+    let mut fixture = Fixture::new().await;
+    fixture.stop_gateway().await;
+    let config = Config {
+        bind: fixture
+            .origin
+            .strip_prefix("http://")
+            .unwrap()
+            .parse()
+            .unwrap(),
+        origins: vec![fixture.origin.clone()],
+        ..Config::default()
+    };
+    let path = fixture.auth.directory.join("config.json");
+    atomic_write(&path, &serde_json::to_vec(&config).unwrap()).unwrap();
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_zeus-companion"))
+        .arg("serve")
+        .arg(path)
+        .arg(fixture.temp.path().join("daemon.sock"))
+        .env_clear()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while fixture.client.hello(&[]).await.is_err() {
+        assert!(Instant::now() < deadline, "sidecar did not become ready");
+        assert!(child.try_wait().unwrap().is_none());
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let mut events = fixture.client.subscribe(None).await.unwrap();
+    events.next().await.unwrap();
+    drop(child.stdin.take());
+    let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(status.success());
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), events.next())
+            .await
+            .unwrap()
+            .is_err()
+    );
+    assert!(fixture.client.hello(&[]).await.is_err());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reference_client_drives_real_engine_and_rejects_replay_across_gateway_restart() {
     let mut fixture = Fixture::new().await;
     let id = fixture.spawn_echo().await;

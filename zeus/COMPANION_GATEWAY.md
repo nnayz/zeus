@@ -119,6 +119,23 @@ owned by the current user and have one hard link. Root-owned sticky shared
 directories are accepted; an attacker-writable nonsticky ancestor is rejected.
 The same Unix account and root are inside the trust boundary.
 
+Path selection is local-administrator authority (CLI arguments and owner-only
+configuration), not an HTTP input. Enrollment output and TLS files may live in
+other administrator-selected safe directories. Paths reject `.`/`..`, empty
+components and NUL before filesystem side effects. Directory resolution walks
+from an open root with `openat(O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)` and checks
+each opened descriptor's ownership/mode. Leaf reads, locks, temporary creation,
+rename, directory sync and cleanup use that verified directory handle; they do
+not reopen the original absolute path. Each auth transaction retains the same
+directory handle with its nonblocking lock across load/save, even if the path
+is renamed or replaced. Cleanup is armed only after exclusive temporary-file
+creation succeeds. A directory-sync error after rename means the update may
+already be committed, not that it was rolled back. This is not a sandbox
+against other code running as the same Unix account.
+
+Descriptor traversal conservatively requires read and search permission on all
+ancestors; search-only directory layouts are not supported by this experiment.
+
 The generated `config.json` defaults to `127.0.0.1:19773`, no TLS and no browser
 origins. Configure the exact browser origin in `origins` before browser use.
 Loopback HTTP is for isolated development. For a private deployment, configure

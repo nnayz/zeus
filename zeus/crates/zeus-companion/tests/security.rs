@@ -124,6 +124,138 @@ fn secure_files_reject_symlinks_hardlinks_modes_special_files_and_writable_ances
     assert!(secure_read(&fifo, 1024).is_err());
 }
 
+#[test]
+fn auth_lock_rejects_replaced_symlinks_hardlinks_special_files_and_permissions() {
+    for kind in [
+        "symlink",
+        "dangling",
+        "hardlink",
+        "fifo",
+        "directory",
+        "mode",
+    ] {
+        let (_temp, auth) = auth();
+        let lock = auth.directory.join("auth.lock");
+        std::fs::remove_file(&lock).unwrap();
+        let sentinel = auth.directory.join("sentinel");
+        atomic_write(&sentinel, b"unchanged").unwrap();
+        match kind {
+            "symlink" => symlink(&sentinel, &lock).unwrap(),
+            "dangling" => symlink(auth.directory.join("missing"), &lock).unwrap(),
+            "hardlink" => std::fs::hard_link(&sentinel, &lock).unwrap(),
+            "fifo" => {
+                let name = std::ffi::CString::new(lock.as_os_str().as_encoded_bytes()).unwrap();
+                assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+            }
+            "directory" => std::fs::create_dir(&lock).unwrap(),
+            "mode" => {
+                atomic_write(&lock, b"").unwrap();
+                std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o644)).unwrap();
+            }
+            _ => unreachable!(),
+        }
+        assert!(auth.server_id().is_err(), "{kind}");
+        assert_eq!(std::fs::read(&sentinel).unwrap(), b"unchanged");
+        assert!(!auth.directory.join("missing").exists());
+    }
+}
+
+#[test]
+fn restrictive_umask_failure_cleans_up_only_new_temporary_state() {
+    use std::os::unix::process::CommandExt;
+    let (_temp, auth) = auth();
+    let config = auth.directory.join("config.json");
+    atomic_write(&config, &serde_json::to_vec(&Config::default()).unwrap()).unwrap();
+    let original = secure_read(&auth.directory.join("devices.json"), 65536).unwrap();
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_zeus-companion"));
+    command
+        .arg("enroll")
+        .arg(config)
+        .arg(auth.directory.join("enrollment.json"))
+        .arg("read")
+        .arg("https://companion.example");
+    // Change umask only in the isolated child, never in the parallel test runner.
+    unsafe {
+        command.pre_exec(|| {
+            libc::umask(0o777);
+            Ok(())
+        });
+    }
+    assert!(!command.output().unwrap().status.success());
+    assert_eq!(
+        secure_read(&auth.directory.join("devices.json"), 65536).unwrap(),
+        original
+    );
+    let mut names: Vec<_> = std::fs::read_dir(&auth.directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["auth.lock", "config.json", "devices.json"]);
+}
+
+#[test]
+fn cli_init_validates_before_creation_and_supports_separate_safe_enrollment_output() {
+    let temp = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
+    let outside = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
+    std::fs::set_permissions(outside.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let alias = temp.path().join("alias");
+    symlink(outside.path(), &alias).unwrap();
+    let init = |path: &std::path::Path| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_zeus-companion"))
+            .current_dir(temp.path())
+            .arg("init")
+            .arg(path)
+            .output()
+            .unwrap()
+            .status
+    };
+    assert!(!init(std::path::Path::new("relative")).success());
+    assert!(!temp.path().join("relative").exists());
+    assert!(!init(&temp.path().join("alias/new-state")).success());
+    assert!(!outside.path().join("new-state").exists());
+    let existing = temp.path().join("existing");
+    std::fs::create_dir(&existing).unwrap();
+    assert!(!init(&existing.join("../escaped")).success());
+    assert!(!temp.path().join("escaped").exists());
+
+    let state = temp.path().join("valid-state");
+    assert!(init(&state).success());
+    secure_dir(&state).unwrap();
+    let output = outside.path().join("enrollment.json");
+    let result = std::process::Command::new(env!("CARGO_BIN_EXE_zeus-companion"))
+        .arg("enroll")
+        .arg(state.join("config.json"))
+        .arg(&output)
+        .arg("read")
+        .arg("https://companion.example")
+        .output()
+        .unwrap();
+    assert!(result.status.success());
+    assert!(result.stdout.is_empty());
+    assert!(result.stderr.is_empty());
+    let payload: serde_json::Value =
+        serde_json::from_slice(&secure_read(&output, 4096).unwrap()).unwrap();
+    assert_eq!(payload["origin"], "https://companion.example");
+    // An HTTP-controlled display name stays JSON data, not a path component.
+    let auth = AuthStore { directory: state };
+    let paired = auth
+        .pair(
+            payload["code"].as_str().unwrap(),
+            "../outside",
+            payload["server_id"].as_str().unwrap(),
+            zeus_companion::auth::now_ms(),
+        )
+        .unwrap();
+    assert_eq!(
+        auth.authenticate(&paired.token, Scope::Read, zeus_companion::auth::now_ms())
+            .unwrap()
+            .name,
+        "../outside"
+    );
+    assert!(!temp.path().join("outside").exists());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_allowlist_auth_origins_payload_and_pair_version_fail_closed() {
     let fixture = Fixture::new().await;

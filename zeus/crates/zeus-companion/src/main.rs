@@ -6,7 +6,7 @@ use std::{
 };
 use zeus_companion::{
     auth::{AuthStore, now_ms},
-    config::{Config, atomic_write, invalid, secure_dir, secure_read},
+    config::{Config, atomic_write, create_secure_dir, invalid, secure_read},
     server,
 };
 use zeus_companion_api::Scope;
@@ -28,10 +28,8 @@ async fn run() -> io::Result<()> {
         .ok_or_else(|| invalid("missing operation"))?;
     match action {
         "init" if args.len() == 2 => {
-            use std::os::unix::fs::DirBuilderExt;
             let directory = PathBuf::from(&args[1]);
-            std::fs::DirBuilder::new().mode(0o700).create(&directory)?;
-            secure_dir(&directory)?;
+            create_secure_dir(&directory)?;
             AuthStore {
                 directory: directory.clone(),
             }

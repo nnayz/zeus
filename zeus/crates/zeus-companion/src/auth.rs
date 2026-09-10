@@ -1,11 +1,12 @@
 //! Local enrollment and per-device credentials. No secret-bearing Debug impls.
-use crate::config::{atomic_write, invalid, secure_dir, secure_read, validate_file};
+use crate::config::{SecureDir, invalid};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    fs::{File, OpenOptions},
+    ffi::OsStr,
+    fs::File,
     io,
-    os::{fd::AsRawFd, unix::fs::OpenOptionsExt},
+    os::fd::AsRawFd,
     path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -38,11 +39,14 @@ struct Enrollment {
 pub struct AuthStore {
     pub directory: PathBuf,
 }
-struct Lock(File);
+struct Lock {
+    file: File,
+    directory: SecureDir,
+}
 impl Drop for Lock {
     fn drop(&mut self) {
         unsafe {
-            libc::flock(self.0.as_raw_fd(), libc::LOCK_UN);
+            libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
         }
     }
 }
@@ -68,26 +72,19 @@ fn matches(secret: &str, expected: &str) -> bool {
     let hash = digest(secret);
     hash.as_bytes().ct_eq(expected.as_bytes()).into()
 }
+
 impl AuthStore {
     fn lock(&self) -> io::Result<Lock> {
-        secure_dir(&self.directory)?;
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-            .open(self.directory.join("auth.lock"))?;
-        validate_file(&file)?;
+        let directory = SecureDir::open(&self.directory)?;
+        let file = directory.open_file(OsStr::new("auth.lock"), libc::O_RDWR | libc::O_CREAT)?;
         // Never wait behind a stuck administrator or another gateway.
         if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
             return Err(invalid("auth state busy"));
         }
-        Ok(Lock(file))
+        Ok(Lock { file, directory })
     }
-    fn load(&self) -> io::Result<Store> {
-        let bytes = secure_read(&self.directory.join("devices.json"), MAX_STATE)?;
+    fn load(lock: &Lock) -> io::Result<Store> {
+        let bytes = lock.directory.read(OsStr::new("devices.json"), MAX_STATE)?;
         let store: Store =
             serde_json::from_slice(&bytes).map_err(|_| invalid("invalid auth state"))?;
         if store.version != 1
@@ -98,31 +95,40 @@ impl AuthStore {
         }
         Ok(store)
     }
-    fn save(&self, s: &Store) -> io::Result<()> {
+    fn save(lock: &Lock, s: &Store) -> io::Result<()> {
         let bytes = serde_json::to_vec(s).map_err(|_| invalid("auth serialization failed"))?;
         if bytes.len() > MAX_STATE {
             return Err(invalid("auth state full"));
         }
-        atomic_write(&self.directory.join("devices.json"), &bytes)
+        lock.directory
+            .atomic_write(OsStr::new("devices.json"), &bytes)
     }
     pub fn initialize(&self) -> io::Result<()> {
-        let _lock = self.lock()?;
-        if self.directory.join("devices.json").try_exists()? {
-            return Err(invalid("auth state already exists"));
+        let lock = self.lock()?;
+        match lock
+            .directory
+            .open_file(OsStr::new("devices.json"), libc::O_RDONLY)
+        {
+            Ok(_) => return Err(invalid("auth state already exists")),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
         }
-        self.save(&Store {
-            version: 1,
-            server_id: random_token()?,
-            ..Store::default()
-        })
+        Self::save(
+            &lock,
+            &Store {
+                version: 1,
+                server_id: random_token()?,
+                ..Store::default()
+            },
+        )
     }
     pub fn server_id(&self) -> io::Result<String> {
-        let _lock = self.lock()?;
-        Ok(self.load()?.server_id)
+        let lock = self.lock()?;
+        Ok(Self::load(&lock)?.server_id)
     }
     pub fn enroll(&self, scopes: Vec<Scope>, now: u64) -> io::Result<String> {
-        let _lock = self.lock()?;
-        let mut s = self.load()?;
+        let lock = self.lock()?;
+        let mut s = Self::load(&lock)?;
         s.enrollments.retain(|e| e.expires_at_ms > now);
         if scopes.is_empty() || scopes.len() > 4 || s.enrollments.len() >= MAX_ENROLLMENTS {
             return Err(invalid("invalid enrollment or enrollment limit"));
@@ -133,7 +139,7 @@ impl AuthStore {
             expires_at_ms: now.saturating_add(300_000),
             scopes,
         });
-        self.save(&s)?;
+        Self::save(&lock, &s)?;
         Ok(code)
     }
     pub fn pair(
@@ -150,8 +156,8 @@ impl AuthStore {
         {
             return Err(invalid("pairing denied"));
         }
-        let _lock = self.lock()?;
-        let mut s = self.load()?;
+        let lock = self.lock()?;
+        let mut s = Self::load(&lock)?;
         if s.server_id != expected_server_id {
             return Err(invalid("wrong server"));
         }
@@ -183,15 +189,15 @@ impl AuthStore {
             device,
             digest: digest(&token),
         });
-        self.save(&s)?;
+        Self::save(&lock, &s)?;
         Ok(response)
     }
     pub fn authenticate(&self, token: &str, scope: Scope, now: u64) -> io::Result<Device> {
         if token.len() != 64 {
             return Err(invalid("unauthorized"));
         }
-        let _lock = self.lock()?;
-        let s = self.load()?;
+        let lock = self.lock()?;
+        let s = Self::load(&lock)?;
         s.devices
             .into_iter()
             .find(|c| {
@@ -204,18 +210,77 @@ impl AuthStore {
             .ok_or_else(|| invalid("unauthorized"))
     }
     pub fn list(&self) -> io::Result<Vec<Device>> {
-        let _lock = self.lock()?;
-        Ok(self.load()?.devices.into_iter().map(|c| c.device).collect())
+        let lock = self.lock()?;
+        Ok(Self::load(&lock)?
+            .devices
+            .into_iter()
+            .map(|c| c.device)
+            .collect())
     }
     pub fn revoke(&self, id: &str) -> io::Result<()> {
-        let _lock = self.lock()?;
-        let mut s = self.load()?;
+        let lock = self.lock()?;
+        let mut s = Self::load(&lock)?;
         let device = s
             .devices
             .iter_mut()
             .find(|c| c.device.id == id)
             .ok_or_else(|| invalid("unknown device"))?;
         device.device.revoked = true;
-        self.save(&s)
+        Self::save(&lock, &s)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::create_secure_dir;
+
+    #[test]
+    fn transaction_state_and_lock_keep_one_directory_identity_after_replacement() {
+        let temp = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
+        let directory = temp.path().join("state");
+        create_secure_dir(&directory).unwrap();
+        let auth = AuthStore {
+            directory: directory.clone(),
+        };
+        auth.initialize().unwrap();
+        let original_id = auth.server_id().unwrap();
+        let lock = auth.lock().unwrap();
+        let lock_inode = lock.file.metadata().unwrap();
+
+        let moved = temp.path().join("moved");
+        std::fs::rename(&directory, &moved).unwrap();
+        create_secure_dir(&directory).unwrap();
+        auth.initialize().unwrap();
+        let replacement_id = auth.server_id().unwrap();
+        assert_ne!(original_id, replacement_id);
+        let moved_auth = AuthStore { directory: moved };
+        assert!(
+            moved_auth.lock().is_err(),
+            "old directory is still exclusively locked"
+        );
+        let mut store = AuthStore::load(&lock).unwrap();
+        assert_eq!(store.server_id, original_id);
+        store.enrollments.push(Enrollment {
+            digest: digest("test"),
+            expires_at_ms: 2000,
+            scopes: vec![Scope::Read],
+        });
+        AuthStore::save(&lock, &store).unwrap();
+        assert_eq!(auth.server_id().unwrap(), replacement_id);
+        drop(lock);
+
+        let new_lock = moved_auth.lock().unwrap();
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(new_lock.file.metadata().unwrap().ino(), lock_inode.ino());
+        let stored = AuthStore::load(&new_lock).unwrap();
+        assert_eq!(stored.server_id, original_id);
+        assert_eq!(stored.enrollments.len(), 1);
+        assert!(
+            AuthStore::load(&auth.lock().unwrap())
+                .unwrap()
+                .enrollments
+                .is_empty()
+        );
     }
 }

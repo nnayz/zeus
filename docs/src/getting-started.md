@@ -88,6 +88,13 @@ binaries show an install hint instead of a dead shortcut.
 
 Prefer a dedicated non-admin account on the remote machine.
 
+## Use Zeus from iPhone
+
+The native iOS Companion is a separate SwiftUI target in this repository. It
+connects to the Companion HTTPS gateway on the same private network; it does
+not connect to the Engine or to SSH directly. See [iOS Companion](ios-companion.md)
+for setup and pairing.
+
 ## Diagnostics
 
 ```sh

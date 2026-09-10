@@ -51,6 +51,11 @@ It covers the workbench, shortcuts, agent setup, orchestration, fleet patterns,
 remote execution, and removal. To preview that book locally, run
 `mdbook serve docs`.
 
+The monorepo also contains a native SwiftUI iOS Companion at
+[`ios/ZeusCompanion/`](ios/ZeusCompanion/). It connects to the private-network
+Companion HTTPS gateway and keeps its pairing token in the iOS Keychain. See
+the [iOS Companion guide](docs/src/ios-companion.md).
+
 ## The operating model
 
 - **Parallel sessions without terminal juggling.** Every agent receives a real

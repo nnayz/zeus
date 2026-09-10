@@ -10,7 +10,9 @@ export type Release = {
   zip: string;
 };
 
-export const GITHUB = 'https://github.com/nnayz/zeus';
+export const GITHUB_OWNER = 'nnayz';
+export const GITHUB_REPO = 'zeus';
+export const GITHUB = `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}`;
 export const DOCS = `${base}/docs/`;
 export const SECURITY_EMAIL = 'hi@nasrul.info';
 

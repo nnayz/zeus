@@ -43,12 +43,66 @@ Team ID and bundle identifier, validates notarization, and refuses downgrades.
 Published release assets are treated as immutable. Details are in
 [Updates](updates.md).
 
+### Companion: experimental contract, production no-go
+
+The [Companion architecture](companion-architecture.md) defines the optional
+private-network interface for #76, aligned with #73's API foundation `76d4c4a`
+and #75's terminal seam `137fda6`. The selected placement is an Engine-launched
+narrow Rust sidecar using `zeus-client` and curated REST/JSON + WSS external v1
+DTOs. The Engine owns sessions, metadata mutation epoch/revision/replay fencing
+and terminal controller/command sequencing. The sidecar's auth store owns device
+credentials. Arbitrary RPC, SSH/Holder sockets, raw terminal resize/signal/diffs,
+environments and provider keys are excluded. Full screen reads must not take
+control; text commands require explicit controller takeover and device scope.
+
+The spike defaults to `127.0.0.1:19773`; private literal binds require explicit
+opt-in and TLS. Wildcard/public, hostname, link-local and mapped-address binds
+are conservatively unsupported. Loopback HTTP is an experimental local
+fixture/backend facility, not permission for plaintext mobile access. Deployed
+clients require HTTPS/WSS and valid server identity without ATS exceptions.
+Tailscale, Headscale, WireGuard and LAN reachability do not authorize a device.
+Zeus does not configure overlays, install CAs/services or trust proxy identity
+headers as credentials. Proxy/upstream and browser identity validation remain
+production gates.
+
+Locally initiated single-use pairing expires after 5 minutes. The client checks
+the approved `server_id` in pairing and Hello. Each device gets a scoped
+30-day random credential; the sidecar stores its SHA-256 digest, never
+plaintext. Recovery/rotation is revoke then re-enroll. Subsequent authentication
+rejects revoked tokens; immediate revocation across replay, queued effects and
+leases still needs integration proof. Native iOS credentials belong in
+device-only, non-synchronizing Keychain storage in a separate repository. The
+in-repo PWA keeps tokens only in memory and re-pairs after reload. Its privacy
+curtain does not guarantee exclusion from iOS app-switcher captures.
+
+The experimental contract uses `/v1/hello`, `/v1/pair`, full `/screen`
+projections, explicit control/text routes and first-frame WSS bearer auth.
+Events invalidate projections; a bounded 128-event window supports resync.
+Engine metadata replay rejection is in-memory per epoch, not a durable outcome
+journal. Uncertain results must not be automatically retried. Exact Origin
+checks, inert terminal text and no API caching protect the browser boundary.
+The architecture states actual wire/queue/time limits and remaining Engine/IPC
+budget gaps, operation allow/deny lists, threats, tests and production gates.
+Durable outcomes/fences, one-time WSS tickets, per-resource grants, native pins
+and timed leases are unimplemented follow-up options, not shipped guarantees.
+
 ## Sensitive data
 
 Terminal replay logs can contain prompts, output, paths, and secrets emitted by
 tools. PR monitoring, remote hosts, and third-party agents can send data to their
 own services. Zeus itself has no account, analytics, or telemetry service; see
 [Privacy](privacy.md).
+
+Companion snapshots and recent output are sensitive data: they may disclose
+prompts, source code, paths and tool-emitted secrets even to a read-only device.
+Grant `read` only to trusted devices; `interact`, `spawn` and `lifecycle` can
+exercise substantial desktop-account authority. Device credentials, pairing
+payloads, authentication responses, prompts, terminal payloads and full
+environments must never enter request logs, diagnostics or crash reports.
+Companion state/TLS keys require owner-only directories (`0700`) and files
+(`0600`); backups of that state are sensitive and must not silently reactivate
+restored credentials. Revocation cannot recall already delivered data or undo
+an operation that committed before revocation.
 
 ## Security assumptions
 

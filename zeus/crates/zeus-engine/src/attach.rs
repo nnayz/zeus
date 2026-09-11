@@ -20,6 +20,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use zeus_proto::frames::{Frame, FrameCodec, FrameType};
+use zeus_proto::terminal::{
+    AttachmentAction, AttachmentControlState, ControlEpoch, ControlState, ControlledFrame,
+    Controller,
+};
+use zeus_proto::{AttachRequest, ClientRole, ControlError};
 
 use crate::registry::Registry;
 use crate::session::{AttachmentSeed, GridSignature};
@@ -33,6 +38,13 @@ const GRID_FLUSH_INTERVAL: Duration = Duration::from_millis(16);
 struct Sink {
     id: u64,
     writer: Arc<Mutex<UnixStream>>,
+    controlled: bool,
+}
+
+struct Peer {
+    client_id: String,
+    initial_epoch: ControlEpoch,
+    controlled: bool,
 }
 
 /// All live sinks for one session, plus whether a pump is serving them.
@@ -61,40 +73,75 @@ impl AttachHub {
     pub fn serve(
         &self,
         registry: &Arc<Mutex<Registry>>,
-        session_id: &str,
+        request: &AttachRequest,
         mut reader: impl Read,
         buffered: Vec<u8>,
         writer: Arc<Mutex<UnixStream>>,
     ) {
-        // Selecting a hibernated session revives it: the seed below paints
-        // instantly from the emulator, and the live program resumes
-        // underneath — the Swift attach() behavior.
+        let session_id = &request.attach.0;
+        let controlled = request.control_protocol == Some(zeus_proto::terminal::TERMINAL_PROTOCOL);
+        if request.role != ClientRole::Desktop || request.control_protocol.is_some() && !controlled
         {
+            return;
+        }
+        let sink_id = self.next_sink.fetch_add(1, Ordering::SeqCst);
+        let client_id = format!("desktop-{sink_id}");
+        if let Ok(stream) = writer.lock() {
+            let _ = stream.set_write_timeout(Some(Duration::from_millis(200)));
+        }
+        // Capture under Registry, then release it before any socket write.
+        let (seed, state) = {
             let Ok(mut guard) = registry.lock() else {
                 return;
             };
             let _ = guard.wake_session(session_id);
-        }
-        // Seed before registering: the full snapshot must be the sink's first
-        // frame, ahead of any diff the pump broadcasts.
-        let seed = {
-            let Ok(guard) = registry.lock() else { return };
             let Some(session) = guard.get(session_id) else {
-                return; // unknown session: close, as the Swift daemon does
-            };
-            let seed = session.attachment_seed();
-            let Ok(grid_frame) = Frame::grid(&seed.grid) else {
                 return;
             };
-            if write_frame(&writer, &grid_frame).is_err() {
-                return;
+            let mut state = session.terminal_control_state();
+            if state
+                .owner
+                .as_ref()
+                .is_none_or(|owner| owner.role == ClientRole::Desktop)
+            {
+                let Ok(granted) = session.acquire_terminal_control(
+                    &state.epoch,
+                    desktop_owner(&client_id),
+                    state.owner.is_some(),
+                ) else {
+                    return;
+                };
+                state = granted;
             }
-            let _ = write_frame(&writer, &Frame::modes(seed.modes));
-            seed
+            (session.attachment_seed(), state)
         };
-
-        let sink_id = self.next_sink.fetch_add(1, Ordering::SeqCst);
-        self.register(registry, session_id, sink_id, Arc::clone(&writer), seed);
+        let peer = Peer {
+            client_id,
+            initial_epoch: state.epoch.clone(),
+            controlled,
+        };
+        let seeded = (|| {
+            if controlled {
+                write_frame(&writer, &control_frame(&peer.client_id, state, None)?)?;
+            }
+            let grid = Frame::grid(&seed.grid).map_err(std::io::Error::other)?;
+            write_frame(&writer, &grid)?;
+            write_frame(&writer, &Frame::modes(seed.modes))
+        })();
+        if seeded.is_err() {
+            release_peer(registry, session_id, &peer.client_id);
+            return;
+        }
+        self.register(
+            registry,
+            session_id,
+            Sink {
+                id: sink_id,
+                writer: Arc::clone(&writer),
+                controlled,
+            },
+            seed,
+        );
 
         // The read loop is this connection's thread. A feed error means a
         // corrupt stream; a false from handle_frame means the peer's write
@@ -105,7 +152,7 @@ impl AttachHub {
         'serve: while let Ok(frames) = codec.feed(&pending) {
             pending.clear();
             for frame in frames {
-                if !self.handle_frame(registry, session_id, &writer, &frame) {
+                if !self.handle_frame(registry, session_id, &peer, &writer, &frame) {
                     break 'serve;
                 }
             }
@@ -117,46 +164,114 @@ impl AttachHub {
             }
         }
         self.deregister(session_id, sink_id);
+        release_peer(registry, session_id, &peer.client_id);
     }
 
     fn handle_frame(
         &self,
         registry: &Arc<Mutex<Registry>>,
         session_id: &str,
+        peer: &Peer,
         writer: &Arc<Mutex<UnixStream>>,
         frame: &Frame,
     ) -> bool {
+        if frame.frame_type == FrameType::Ping {
+            return write_frame(writer, &Frame::pong()).is_ok();
+        }
         let Ok(mut guard) = registry.lock() else {
             return false;
         };
-        if matches!(frame.frame_type, FrameType::Input) {
-            // Input to a frozen session wakes it; write_input's queue covers
-            // the race where the governor froze it mid-keystroke.
-            let _ = guard.wake_session(session_id);
-        }
-        let Some(session) = guard.get(session_id) else {
-            return true; // session ended; swallow input quietly, as Swift does
-        };
-        match frame.frame_type {
-            FrameType::Input => {
-                let _ = session.write_input(&frame.payload);
-            }
-            FrameType::Resize => {
-                if let Some((cols, rows)) = frame.resize_payload() {
-                    let _ = session.resize(cols.max(2), rows.max(2));
+        let action = (|| -> Result<(ControlEpoch, AttachmentAction), ControlError> {
+            if peer.controlled {
+                if frame.frame_type != FrameType::Controlled || frame.payload.len() > 256 * 1024 {
+                    return Err(ControlError::bad_request("epoch envelope required"));
                 }
+                let framed: ControlledFrame = serde_json::from_slice(&frame.payload)
+                    .map_err(|_| ControlError::bad_request("invalid controlled frame"))?;
+                return Ok((framed.expected, framed.action));
             }
-            FrameType::Scroll => {
-                if let Some((direction, lines, col, row)) = frame.scroll_payload() {
-                    let _ =
-                        session.scroll(direction == 0, lines as usize, col as usize, row as usize);
+            let action = match frame.frame_type {
+                FrameType::Input => AttachmentAction::Input {
+                    bytes: frame.payload.clone(),
+                },
+                FrameType::Resize => {
+                    let (cols, rows) = frame
+                        .resize_payload()
+                        .ok_or_else(|| ControlError::bad_request("invalid resize"))?;
+                    AttachmentAction::Resize { cols, rows }
                 }
+                FrameType::Scroll => {
+                    let (direction, lines, col, row) = frame
+                        .scroll_payload()
+                        .ok_or_else(|| ControlError::bad_request("invalid scroll"))?;
+                    AttachmentAction::Scroll {
+                        direction,
+                        lines,
+                        col,
+                        row,
+                    }
+                }
+                _ => return Err(ControlError::bad_request("unsupported attachment frame")),
+            };
+            Ok((peer.initial_epoch.clone(), action))
+        })();
+        let result = action.and_then(|(expected, action)| {
+            let session = guard
+                .get(session_id)
+                .ok_or_else(|| ControlError::not_found("session unavailable"))?;
+            if matches!(action, AttachmentAction::TakeControl) {
+                return session
+                    .acquire_terminal_control(&expected, desktop_owner(&peer.client_id), true)
+                    .map(|_| ());
             }
-            FrameType::Ping => {
-                drop(guard);
-                return write_frame(writer, &Frame::pong()).is_ok();
+            session.validate_terminal_control(&expected, &peer.client_id)?;
+            match action {
+                AttachmentAction::ReleaseControl => session
+                    .release_terminal_control(&expected, &peer.client_id)
+                    .map(|_| ()),
+                AttachmentAction::Resize { cols, rows } => {
+                    zeus_proto::remote_pty::validate_terminal_dimensions(cols, rows)
+                        .map_err(|_| ControlError::bad_request("invalid resize geometry"))?;
+                    session
+                        .resize(cols.max(2), rows.max(2))
+                        .map_err(|_| ControlError::internal("resize failed"))
+                }
+                AttachmentAction::Scroll {
+                    direction,
+                    lines,
+                    col,
+                    row,
+                } => session
+                    .scroll(
+                        direction == 0,
+                        usize::from(lines),
+                        usize::from(col),
+                        usize::from(row),
+                    )
+                    .map_err(|_| ControlError::internal("scroll failed")),
+                AttachmentAction::Input { bytes } => {
+                    if bytes.len() > 64 * 1024 {
+                        return Err(ControlError::bad_request("input too large"));
+                    }
+                    let _ = guard.wake_session(session_id);
+                    guard
+                        .get(session_id)
+                        .ok_or_else(|| ControlError::not_found("session unavailable"))?
+                        .write_input(&bytes)
+                        .map_err(|_| ControlError::internal("input failed"))
+                }
+                AttachmentAction::TakeControl => unreachable!(),
             }
-            _ => {}
+        });
+        let state = guard.get(session_id).map(|s| s.terminal_control_state());
+        drop(guard);
+        if let Err(error) = result {
+            if !peer.controlled {
+                return false;
+            }
+            let Some(state) = state else { return false };
+            return control_frame(&peer.client_id, state, Some(error))
+                .is_ok_and(|f| write_frame(writer, &f).is_ok());
         }
         true
     }
@@ -165,16 +280,12 @@ impl AttachHub {
         &self,
         registry: &Arc<Mutex<Registry>>,
         session_id: &str,
-        sink_id: u64,
-        writer: Arc<Mutex<UnixStream>>,
+        sink: Sink,
         seed: AttachmentSeed,
     ) {
         let mut sessions = self.sessions.lock().expect("attach hub");
         let entry = sessions.entry(session_id.to_string()).or_default();
-        entry.sinks.push(Sink {
-            id: sink_id,
-            writer,
-        });
+        entry.sinks.push(sink);
         if !entry.pump_running {
             entry.pump_running = true;
             let hub = self.clone();
@@ -210,6 +321,7 @@ impl AttachHub {
     fn pump(&self, registry: &Arc<Mutex<Registry>>, session_id: &str, seed: AttachmentSeed) {
         let mut signature = seed.signature;
         let mut last_modes = Some(seed.modes);
+        let mut last_control: Option<ControlState> = None;
         let mut wake = seed.wake;
         let mut wake_generation = seed.wake_generation;
         let mut last_emission = Instant::now()
@@ -259,6 +371,7 @@ impl AttachHub {
                     (
                         session.grid_update_if_changed(&mut signature),
                         session.modes(),
+                        session.terminal_control_state(),
                     )
                 })
             } else {
@@ -266,7 +379,12 @@ impl AttachHub {
             };
 
             let mut frames: Vec<Frame> = Vec::with_capacity(2);
-            if let Some((grid, modes)) = observed {
+            let mut control_update = None;
+            if let Some((grid, modes, control)) = observed {
+                if last_control.as_ref() != Some(&control) {
+                    control_update = Some(control.clone());
+                    last_control = Some(control);
+                }
                 if let Some(update) = grid
                     && let Ok(frame) = Frame::grid(&update)
                 {
@@ -282,25 +400,33 @@ impl AttachHub {
                 last_modes = Some(modes);
             }
 
-            if !frames.is_empty() {
+            if !frames.is_empty() || control_update.is_some() {
                 // Two publications per input may bypass coalescing: one can
                 // be a trailing change already in flight, and the next is the
                 // actual terminal response. The bounded budget prevents a
                 // keystroke from unthrottling sustained output indefinitely.
                 wake.consume_interactive_priority();
                 last_emission = Instant::now();
-                let sinks: Vec<(u64, Arc<Mutex<UnixStream>>)> = {
+                let sinks: Vec<(u64, Arc<Mutex<UnixStream>>, bool)> = {
                     let sessions = self.sessions.lock().expect("attach hub");
                     match sessions.get(session_id) {
                         Some(entry) => entry
                             .sinks
                             .iter()
-                            .map(|sink| (sink.id, Arc::clone(&sink.writer)))
+                            .map(|sink| (sink.id, Arc::clone(&sink.writer), sink.controlled))
                             .collect(),
                         None => Vec::new(),
                     }
                 };
-                for (sink_id, writer) in sinks {
+                for (sink_id, writer, controlled) in sinks {
+                    if controlled
+                        && let Some(control) = &control_update
+                        && control_frame(&format!("desktop-{sink_id}"), control.clone(), None)
+                            .map_or(true, |frame| write_frame(&writer, &frame).is_err())
+                    {
+                        self.deregister(session_id, sink_id);
+                        continue;
+                    }
                     for frame in &frames {
                         if write_frame(&writer, frame).is_err() {
                             // The peer is gone; its serve loop will also
@@ -335,6 +461,46 @@ fn write_frame(writer: &Arc<Mutex<UnixStream>>, frame: &Frame) -> std::io::Resul
     let mut stream = writer
         .lock()
         .map_err(|_| std::io::Error::other("writer poisoned"))?;
-    stream.write_all(&bytes)?;
-    stream.flush()
+    if let Err(error) = stream.write_all(&bytes).and_then(|_| stream.flush()) {
+        let _ = stream.shutdown(std::net::Shutdown::Both);
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn desktop_owner(id: &str) -> Controller {
+    Controller {
+        id: id.into(),
+        label: "Desktop".into(),
+        role: ClientRole::Desktop,
+    }
+}
+
+fn control_frame(
+    client_id: &str,
+    control: ControlState,
+    error: Option<ControlError>,
+) -> std::io::Result<Frame> {
+    let payload = serde_json::to_vec(&AttachmentControlState {
+        client_id: client_id.into(),
+        control,
+        error,
+    })
+    .map_err(std::io::Error::other)?;
+    Ok(Frame::new(FrameType::Controller, payload))
+}
+
+fn release_peer(registry: &Arc<Mutex<Registry>>, session_id: &str, client_id: &str) {
+    if let Ok(guard) = registry.lock()
+        && let Some(session) = guard.get(session_id)
+    {
+        let state = session.terminal_control_state();
+        if state
+            .owner
+            .as_ref()
+            .is_some_and(|owner| owner.id == client_id)
+        {
+            let _ = session.release_terminal_control(&state.epoch, client_id);
+        }
+    }
 }

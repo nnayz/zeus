@@ -25,6 +25,8 @@ use zeus_proto::{ControlError, ControlMessage, JsonValue, Method, WIRE_VERSION};
 
 use crate::registry::Registry;
 
+pub(crate) mod companion;
+
 /// Identifies this engine in the handshake, so a client can tell which
 /// implementation it reached.
 pub const BUILD: &str = concat!("zeus-engine-", env!("CARGO_PKG_VERSION"));
@@ -86,6 +88,7 @@ pub struct ControlServer {
     active_connections: Arc<AtomicUsize>,
     git: crate::git_workspace::GitTools,
     git_requests: std::sync::OnceLock<GitRequestPool>,
+    companion: Mutex<companion::Fence>,
 }
 
 /// Where injection files live and which CLI they point at. Present, spawns
@@ -125,6 +128,7 @@ impl ControlServer {
             active_connections: Arc::new(AtomicUsize::new(0)),
             git: crate::git_workspace::GitTools::new(),
             git_requests: std::sync::OnceLock::new(),
+            companion: Mutex::new(companion::Fence::new()),
         }
     }
 
@@ -400,6 +404,7 @@ impl ControlServer {
     /// does.
     pub fn serve(self: &Arc<Self>, stream: UnixStream) -> std::io::Result<()> {
         let _connection = ActiveConnectionGuard::new(Arc::clone(&self.active_connections));
+        stream.set_write_timeout(Some(std::time::Duration::from_secs(5)))?;
         let mut reader = BufReader::new(stream.try_clone()?);
         let writer = Arc::new(Mutex::new(stream));
         let mut subscription: Option<SubscriptionHandle> = None;
@@ -407,7 +412,15 @@ impl ControlServer {
         let mut first = true;
         loop {
             let mut line = Vec::new();
-            let read = reader.read_until(b'\n', &mut line)?;
+            let read = std::io::Read::by_ref(&mut reader)
+                .take((MAX_CONTROL_LINE_BYTES + 1) as u64)
+                .read_until(b'\n', &mut line)?;
+            if line.len() > MAX_CONTROL_LINE_BYTES {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "control line exceeded protocol maximum",
+                ));
+            }
             if read == 0 {
                 return Ok(());
             }
@@ -420,6 +433,16 @@ impl ControlServer {
             if first {
                 first = false;
                 if let Ok(attach) = serde_json::from_slice::<zeus_proto::AttachRequest>(&line) {
+                    if attach.role != zeus_proto::ClientRole::Desktop
+                        || attach
+                            .control_protocol
+                            .is_some_and(|v| v != zeus_proto::terminal::TERMINAL_PROTOCOL)
+                    {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::PermissionDenied,
+                            "Companion must use the Engine terminal snapshot API",
+                        ));
+                    }
                     // Attaching means this session is visible. Reconcile the
                     // actual process first: an adopted holder can be stopped
                     // even when stale persisted metadata says it is awake.
@@ -440,7 +463,7 @@ impl ControlServer {
                     let buffered = reader.buffer().to_vec();
                     self.attach.serve(
                         &self.registry,
-                        &attach.attach.0,
+                        &attach,
                         reader.into_inner(),
                         buffered,
                         writer,
@@ -556,14 +579,18 @@ impl ControlServer {
                 .stop
                 .store(true, std::sync::atomic::Ordering::SeqCst);
         }
-        let stream = self.events.subscribe(
-            p.since_seq,
-            crate::events::Filter::new(
-                p.sessions
-                    .map(|sessions| sessions.into_iter().map(|id| id.0).collect()),
-                p.kinds,
-            ),
-        );
+        let stream = if p.kinds.as_deref() == Some(&["companion.changed".to_owned()][..]) {
+            self.events.subscribe_companion()
+        } else {
+            self.events.subscribe(
+                p.since_seq,
+                crate::events::Filter::new(
+                    p.sessions
+                        .map(|sessions| sessions.into_iter().map(|id| id.0).collect()),
+                    p.kinds,
+                ),
+            )
+        };
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let handle = {
             let stop = Arc::clone(&stop);
@@ -655,9 +682,21 @@ impl ControlServer {
 
     fn dispatch(&self, method: &str, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
         match method {
+            "companion.hello" => self.companion_hello(),
+            "companion.sessions" => self.companion_sessions(params),
+            "companion.projects" => self.companion_projects(params),
+            "companion.session" => self.companion_session(params),
+            "companion.mutate" => self.companion_mutate(params),
             Method::HELLO => self.hello(params),
             Method::SESSION_SPAWN => self.session_spawn(params),
             Method::SESSION_LIST | Method::STATE_SNAPSHOT => self.session_list(),
+            zeus_proto::terminal::SNAPSHOT
+            | zeus_proto::terminal::ACQUIRE_CONTROL
+            | zeus_proto::terminal::RELEASE_CONTROL
+            | zeus_proto::terminal::SEND_TEXT
+            | zeus_proto::terminal::SCROLLBACK => {
+                crate::terminal::dispatch(&self.registry, &self.events, method, params)
+            }
             Method::SESSION_SEND_TEXT => self.session_send_text(params),
             Method::SESSION_UPLOAD_ATTACHMENT => self.session_upload_attachment(params),
             Method::SESSION_RESIZE => self.session_resize(params),
@@ -1614,6 +1653,9 @@ impl ControlServer {
         let mut registry = self.registry.lock().map_err(poisoned)?;
         // Typing into a hibernated session wakes it; the text is queued and
         // flushed after SIGCONT, so no keystroke is lost.
+        if let Some(session) = registry.get(&p.session_id.0) {
+            session.require_unowned_terminal()?;
+        }
         let _ = registry.wake_session(&p.session_id.0);
         self.publish_updated(&registry, &p.session_id.0);
         let session = registry
@@ -1687,6 +1729,7 @@ impl ControlServer {
         let session = registry
             .get(&p.session_id.0)
             .ok_or_else(|| ControlError::not_found(p.session_id.0.clone()))?;
+        session.require_unowned_terminal()?;
         session
             .resize(cols, rows)
             .map_err(|error| ControlError::internal(error.to_string()))?;
@@ -1734,6 +1777,9 @@ impl ControlServer {
     fn session_kill(&self, params: Option<JsonValue>) -> Result<JsonValue, ControlError> {
         let p: zeus_proto::SessionIdParams = decode(params)?;
         let mut registry = self.registry.lock().map_err(poisoned)?;
+        if let Some(session) = registry.get(&p.session_id.0) {
+            session.require_unowned_terminal()?;
+        }
         let exit = registry
             .terminate(&p.session_id.0, std::time::Duration::from_secs(3))
             .map_err(|error| ControlError::internal(error.to_string()))?;

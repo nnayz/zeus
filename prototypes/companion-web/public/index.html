@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#101a20">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'; object-src 'none'">
+  <title>Zeus Companion</title>
+  <link rel="icon" href="./icon.svg" type="image/svg+xml">
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="stylesheet" href="./app.css">
+  <script type="module" src="./app.js"></script>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="app-header">
+    <a class="wordmark" href="./" aria-label="Zeus Companion home"><span aria-hidden="true">ϟ</span> ZEUS <small>COMPANION</small></a>
+    <button id="privacy" class="quiet" type="button">Hide screen</button>
+  </header>
+  <main id="main">
+    <p class="eyebrow">PRIVATE WORKSPACE · WEB PROTOTYPE</p>
+    <div class="heading"><h1>Your agents,<br>within reach.</h1><span class="connection" id="connection" role="status">Not paired</span></div>
+    <p id="notice" class="notice" role="status" aria-live="polite"></p>
+    <section id="pairing" class="card" aria-labelledby="pair-title">
+      <p class="eyebrow">01 / CONNECT</p><h2 id="pair-title">Pair this device</h2>
+      <p>Open Companion pairing on your trusted Zeus computer. Enter its short-lived payload, then compare the server identity on both screens.</p>
+      <form id="pair-form">
+        <label for="payload">Pairing payload</label>
+        <textarea id="payload" rows="4" required maxlength="8192" autocomplete="off" autocapitalize="none" spellcheck="false" aria-describedby="pair-help"></textarea>
+        <p id="pair-help" class="hint">Use a trusted HTTPS origin. This prototype must be served by that same origin. No camera or clipboard access is requested.</p>
+        <label for="device-name">Device name</label>
+        <input id="device-name" required maxlength="80" value="My phone" autocomplete="off">
+        <button type="submit">Review server identity <span aria-hidden="true">→</span></button>
+      </form>
+      <p class="hint">Credentials stay in this tab's memory. Reloading or closing it requires pairing again. Your browser does not provide native Keychain storage.</p>
+    </section>
+    <section id="identity" class="card" hidden aria-labelledby="identity-title">
+      <p class="eyebrow">02 / VERIFY</p><h2 id="identity-title">Is this your Zeus server?</h2>
+      <dl id="identity-facts"></dl>
+      <p>Compare the server ID and HTTPS origin with the pairing screen on your computer. Continue only when both match.</p>
+      <button id="confirm-pair" type="button">Identity matches · Pair device</button>
+      <button id="cancel-pair" class="quiet" type="button">Cancel pairing</button>
+    </section>
+    <section id="workspace" hidden aria-label="Paired workspace">
+      <div class="workspace-bar"><p id="device-label"></p><div><button id="refresh" class="quiet" type="button">Reconnect</button><button id="unpair" class="quiet" type="button">Unpair / delete data</button></div></div>
+      <div class="workspace-grid">
+        <section class="card" aria-labelledby="projects-title"><div class="section-heading"><h2 id="projects-title">Projects &amp; agents</h2><span id="session-count" class="count"></span></div><div id="projects"></div></section>
+        <section id="detail" class="card" hidden aria-labelledby="session-title">
+          <p class="eyebrow">SESSION</p><h2 id="session-title" tabindex="-1"></h2><dl id="session-facts"></dl>
+          <p id="controller" class="controller"></p>
+          <button id="take-control" class="quiet" type="button" hidden>Take Control</button>
+          <div class="section-heading"><h3>Current screen</h3><span id="screen-sequence" class="hint"></span></div>
+          <pre id="screen" tabindex="0" role="region" aria-label="Current terminal screen, read only"></pre>
+          <details><summary>Bounded recent output</summary><button id="load-output" type="button" class="quiet">Load recent output</button><pre id="output" tabindex="0" role="region" aria-label="Recent terminal output, read only"></pre></details>
+          <button id="review-delivery" class="quiet" type="button" hidden>I've checked current state · Allow new actions</button>
+          <form id="prompt-form"><label for="prompt">Send a prompt</label><textarea id="prompt" rows="3" maxlength="8192" autocomplete="off" spellcheck="false" aria-describedby="prompt-help"></textarea><p id="prompt-help" class="hint">Prompts go to the selected agent. Delivery is never automatically retried after a connection loss.</p><button id="send-prompt" type="submit">Send prompt <span aria-hidden="true">↗</span></button></form>
+          <details class="lifecycle"><summary>Session actions</summary><p class="hint">These change the session's lifecycle. Each action requires a separate confirmation.</p><div id="actions" class="action-grid"></div></details>
+        </section>
+      </div>
+    </section>
+    <footer>Direct to your Zeus gateway. <span>No cloud relay.</span><p>Hide the screen before switching apps. Browser snapshot protection is best effort.</p></footer>
+  </main>
+  <dialog id="confirmation" aria-labelledby="confirm-title" aria-describedby="confirm-description"><h2 id="confirm-title"></h2><p id="confirm-description"></p><label id="rename-label" for="rename" hidden>New title<input id="rename" maxlength="160" autocomplete="off"></label><div class="action-grid"><button id="cancel-action" type="button" class="quiet" autofocus>Cancel</button><button id="confirm-action" type="button" class="danger">Confirm action</button></div></dialog>
+  <section id="privacy-cover" hidden aria-labelledby="privacy-title"><span class="privacy-mark" aria-hidden="true">ϟ</span><h1 id="privacy-title">Screen hidden</h1><p>Zeus Companion</p><button id="reveal" type="button">Reveal &amp; reconnect</button></section>
+</body>
+</html>

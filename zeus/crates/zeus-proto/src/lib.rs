@@ -16,3 +16,5 @@ pub use hosts::{HostEntry, HostNodeConfig, HostsConfig};
 pub use methods::*;
 pub use model::*;
 pub use node::*;
+
+pub mod terminal;

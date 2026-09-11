@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use tokio::sync::{Mutex, RwLock, broadcast, mpsc, oneshot, watch};
+use tokio::sync::{RwLock, broadcast, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use zeus_proto::control::{ControlError, ControlMessage, JsonValue, encode_line};
 use zeus_proto::methods::*;
@@ -82,7 +82,7 @@ pub(crate) struct ClientCore {
     build: String,
     token: Option<String>,
     next_request_id: AtomicU64,
-    pending: Mutex<HashMap<u64, oneshot::Sender<PendingResult>>>,
+    pending: StdMutex<HashMap<u64, oneshot::Sender<PendingResult>>>,
     writer: RwLock<Option<mpsc::Sender<Vec<u8>>>>,
     state_tx: watch::Sender<ConnectionState>,
     event_tx: broadcast::Sender<EventEnvelope>,
@@ -90,6 +90,21 @@ pub(crate) struct ClientCore {
     events_subscribed: AtomicBool,
     last_seq: AtomicU64,
     shutdown_tx: watch::Sender<bool>,
+    companion: bool,
+}
+
+/// Cancellation must remove its correlation entry even when the future is
+/// dropped by an HTTP deadline or disconnected peer before a reply arrives.
+struct PendingGuard<'a> {
+    core: &'a ClientCore,
+    id: u64,
+}
+impl Drop for PendingGuard<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut pending) = self.core.pending.lock() {
+            pending.remove(&self.id);
+        }
+    }
 }
 
 impl ClientCore {
@@ -140,10 +155,18 @@ impl ClientCore {
             .clone()
             .ok_or_else(|| ClientError::disconnected("not connected to daemon"))?;
         let (response_tx, response_rx) = oneshot::channel();
-        self.pending.lock().await.insert(id, response_tx);
+        self.pending
+            .lock()
+            .expect("pending requests")
+            .insert(id, response_tx);
+        let _pending = PendingGuard { core: self, id };
 
-        if writer.send(line).await.is_err() {
-            self.pending.lock().await.remove(&id);
+        let sent = if self.companion {
+            writer.try_send(line).map_err(|_| ())
+        } else {
+            writer.send(line).await.map_err(|_| ())
+        };
+        if sent.is_err() {
             return Err(ClientError::disconnected(
                 "control connection writer stopped",
             ));
@@ -153,7 +176,6 @@ impl ClientCore {
             match tokio::time::timeout(timeout, response_rx).await {
                 Ok(response) => response,
                 Err(_) => {
-                    self.pending.lock().await.remove(&id);
                     return Err(ClientError::Timeout(format!(
                         "request {id} ({method}) timed out"
                     )));
@@ -207,10 +229,14 @@ impl ClientCore {
             since_seq: (seq != 0).then_some(seq),
             sessions: None,
             kinds: Some(
-                Self::EVENT_KINDS
-                    .iter()
-                    .map(|name| name.to_string())
-                    .collect(),
+                (if self.companion {
+                    &["companion.changed"][..]
+                } else {
+                    &Self::EVENT_KINDS[..]
+                })
+                .iter()
+                .map(|name| name.to_string())
+                .collect(),
             ),
         };
         let result = self
@@ -229,7 +255,8 @@ impl ClientCore {
     pub(crate) async fn route_message(&self, message: ControlMessage) {
         match message {
             ControlMessage::Response { id, result } => {
-                let Some(sender) = self.pending.lock().await.remove(&id) else {
+                let Some(sender) = self.pending.lock().expect("pending requests").remove(&id)
+                else {
                     return;
                 };
                 let result = result.map_err(ClientError::Control);
@@ -244,7 +271,7 @@ impl ClientCore {
     }
 
     async fn fail_pending(&self, error: ClientError) {
-        let pending = std::mem::take(&mut *self.pending.lock().await);
+        let pending = std::mem::take(&mut *self.pending.lock().expect("pending requests"));
         for (_, sender) in pending {
             let _ = sender.send(Err(error.clone()));
         }
@@ -297,7 +324,7 @@ impl DaemonClient {
                 build: build.into(),
                 token,
                 next_request_id: AtomicU64::new(0),
-                pending: Mutex::new(HashMap::new()),
+                pending: StdMutex::new(HashMap::new()),
                 writer: RwLock::new(None),
                 state_tx,
                 event_tx,
@@ -305,6 +332,7 @@ impl DaemonClient {
                 events_subscribed: AtomicBool::new(false),
                 last_seq: AtomicU64::new(0),
                 shutdown_tx,
+                companion: false,
             }),
             lifecycle: StdMutex::new(None),
         }
@@ -312,6 +340,82 @@ impl DaemonClient {
 
     pub fn socket_path(&self) -> &Path {
         &self.core.socket_path
+    }
+
+    /// Dedicated narrow sidecar connection: only payload-free invalidations and
+    /// a small client queue. Ordinary desktop subscriptions are unchanged.
+    pub fn for_companion(socket_path: impl Into<PathBuf>) -> Self {
+        let mut client = Self::with_socket_path(socket_path);
+        let core = Arc::get_mut(&mut client.core).expect("new client");
+        core.companion = true;
+        core.event_tx = broadcast::channel(16).0;
+        client
+    }
+
+    pub async fn companion_hello(&self) -> Result<zeus_companion_api::Hello, ClientError> {
+        self.core
+            .request_typed::<EmptyParams, _>("companion.hello", None, Some(Duration::from_secs(5)))
+            .await
+    }
+    pub async fn companion_sessions(
+        &self,
+        page: &zeus_companion_api::PageRequest,
+    ) -> Result<zeus_companion_api::Page<zeus_companion_api::Session>, ClientError> {
+        self.core
+            .request_typed(
+                "companion.sessions",
+                Some(page),
+                Some(Duration::from_secs(5)),
+            )
+            .await
+    }
+    pub async fn companion_projects(
+        &self,
+        page: &zeus_companion_api::PageRequest,
+    ) -> Result<zeus_companion_api::Page<zeus_companion_api::Project>, ClientError> {
+        self.core
+            .request_typed(
+                "companion.projects",
+                Some(page),
+                Some(Duration::from_secs(5)),
+            )
+            .await
+    }
+    pub async fn companion_session(
+        &self,
+        id: &str,
+    ) -> Result<zeus_companion_api::SessionDetail, ClientError> {
+        self.core
+            .request_typed(
+                "companion.session",
+                Some(&session_params(&SessionId(id.into()))),
+                Some(Duration::from_secs(5)),
+            )
+            .await
+    }
+    pub async fn companion_mutate(
+        &self,
+        id: &str,
+        device_id: &str,
+        mutation: &zeus_companion_api::Mutation,
+    ) -> Result<zeus_companion_api::MutationResult, ClientError> {
+        #[derive(Serialize)]
+        struct Params<'a> {
+            session_id: &'a str,
+            device_id: &'a str,
+            mutation: &'a zeus_companion_api::Mutation,
+        }
+        self.core
+            .request_typed(
+                "companion.mutate",
+                Some(&Params {
+                    session_id: id,
+                    device_id,
+                    mutation,
+                }),
+                Some(Duration::from_secs(5)),
+            )
+            .await
     }
 
     /// Starts the connect/reconnect loop. Repeated calls are idempotent.
@@ -540,6 +644,77 @@ impl DaemonClient {
                 Method::HOST_LOCATE_REPO,
                 Some(&params),
                 Some(Duration::from_secs(60)),
+            )
+            .await
+    }
+
+    pub async fn terminal_snapshot(
+        &self,
+        params: &zeus_proto::terminal::TerminalSnapshotParams,
+    ) -> Result<zeus_proto::terminal::TerminalSnapshot, ClientError> {
+        let snapshot: zeus_proto::terminal::TerminalSnapshot = self
+            .core
+            .request_typed(
+                zeus_proto::terminal::SNAPSHOT,
+                Some(params),
+                Some(Duration::from_secs(5)),
+            )
+            .await?;
+        if snapshot.protocol != zeus_proto::terminal::TERMINAL_PROTOCOL {
+            return Err(ClientError::protocol("unsupported terminal protocol"));
+        }
+        snapshot.decode_grid()?;
+        Ok(snapshot)
+    }
+
+    pub async fn acquire_terminal_control(
+        &self,
+        params: &zeus_proto::terminal::AcquireControlParams,
+    ) -> Result<zeus_proto::terminal::ControlState, ClientError> {
+        self.core
+            .request_typed(
+                zeus_proto::terminal::ACQUIRE_CONTROL,
+                Some(params),
+                Some(Duration::from_secs(5)),
+            )
+            .await
+    }
+
+    pub async fn release_terminal_control(
+        &self,
+        params: &zeus_proto::terminal::ReleaseControlParams,
+    ) -> Result<zeus_proto::terminal::ControlState, ClientError> {
+        self.core
+            .request_typed(
+                zeus_proto::terminal::RELEASE_CONTROL,
+                Some(params),
+                Some(Duration::from_secs(5)),
+            )
+            .await
+    }
+
+    pub async fn terminal_send_text(
+        &self,
+        params: &zeus_proto::terminal::TerminalSendTextParams,
+    ) -> Result<zeus_proto::terminal::ControlState, ClientError> {
+        self.core
+            .request_typed(
+                zeus_proto::terminal::SEND_TEXT,
+                Some(params),
+                Some(Duration::from_secs(5)),
+            )
+            .await
+    }
+
+    pub async fn terminal_scrollback(
+        &self,
+        params: &zeus_proto::terminal::TerminalScrollbackParams,
+    ) -> Result<zeus_proto::ReadScrollbackCellsResult, ClientError> {
+        self.core
+            .request_typed(
+                zeus_proto::terminal::SCROLLBACK,
+                Some(params),
+                Some(Duration::from_secs(5)),
             )
             .await
     }
@@ -1123,6 +1298,33 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
     use zeus_proto::methods::EventName;
     use zeus_proto::model::AgentKind;
+
+    #[tokio::test]
+    async fn companion_cancelled_and_queue_rejected_requests_release_pending_entries() {
+        let client = DaemonClient::for_companion("/unused-fixture.sock");
+        let (writer, mut queued) = mpsc::channel(1);
+        *client.core.writer.write().await = Some(writer.clone());
+        let core = client.core.clone();
+        let request = tokio::spawn(async move {
+            core.request::<JsonValue>("companion.hello", None, None)
+                .await
+        });
+        queued.recv().await.expect("request reached writer");
+        assert_eq!(client.core.pending.lock().unwrap().len(), 1);
+        request.abort();
+        assert!(request.await.unwrap_err().is_cancelled());
+        assert!(client.core.pending.lock().unwrap().is_empty());
+
+        writer.try_send(Vec::new()).unwrap();
+        assert!(
+            client
+                .core
+                .request::<JsonValue>("companion.hello", None, None)
+                .await
+                .is_err()
+        );
+        assert!(client.core.pending.lock().unwrap().is_empty());
+    }
 
     #[tokio::test]
     async fn live_daemon_control_round_trip() -> Result<(), Box<dyn Error>> {

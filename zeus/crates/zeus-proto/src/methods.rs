@@ -1169,6 +1169,8 @@ pub type DaemonShutdownResult = EmptyResult;
 #[serde(rename_all = "camelCase")]
 pub struct AttachRequest {
     pub attach: SessionId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_protocol: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub from_offset: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1192,7 +1194,7 @@ pub struct ForwardAck {
     pub error: Option<String>,
 }
 
-mod base64_bytes {
+pub(crate) mod base64_bytes {
     use serde::{Deserialize, Deserializer, Serializer, de};
 
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";

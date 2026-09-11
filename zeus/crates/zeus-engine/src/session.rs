@@ -282,7 +282,7 @@ struct GridWakeState {
 const INTERACTIVE_GRID_BUDGET: u8 = 2;
 
 impl GridWake {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             inner: Arc::new(GridWakeInner {
                 state: Mutex::new(GridWakeState {
@@ -294,7 +294,7 @@ impl GridWake {
         }
     }
 
-    fn notify(&self) {
+    pub(crate) fn notify(&self) {
         let mut state = self.inner.state.lock().expect("grid wake");
         state.generation = state.generation.saturating_add(1);
         self.inner.changed.notify_all();
@@ -377,6 +377,7 @@ enum Transport {
 }
 
 pub struct Session {
+    pub(crate) terminal_control: Mutex<crate::terminal::TerminalControl>,
     shared: Arc<Shared>,
     transport: Transport,
     pump: Option<JoinHandle<()>>,
@@ -653,6 +654,7 @@ impl Session {
 
         let session = Self {
             shared,
+            terminal_control: Mutex::new(crate::terminal::TerminalControl::new()?),
             transport: Transport::Remote(client),
             pump: Some(pump),
             manifest_id: spec.manifest_id,
@@ -721,6 +723,7 @@ impl Session {
         };
         Ok(Self {
             shared,
+            terminal_control: Mutex::new(crate::terminal::TerminalControl::new()?),
             transport: Transport::Remote(client),
             pump: Some(pump),
             manifest_id: spec.manifest_id,
@@ -749,6 +752,7 @@ impl Session {
 
         Ok(Self {
             shared,
+            terminal_control: Mutex::new(crate::terminal::TerminalControl::new()?),
             transport: Transport::Direct(pty),
             pump: Some(pump),
             manifest_id: spec.manifest_id,
@@ -895,6 +899,7 @@ impl Session {
 
         Ok(Self {
             shared,
+            terminal_control: Mutex::new(crate::terminal::TerminalControl::new()?),
             transport: Transport::Held(client),
             pump: Some(pump),
             manifest_id: spec.manifest_id,
@@ -969,6 +974,7 @@ impl Session {
 
         Ok(Self {
             shared,
+            terminal_control: Mutex::new(crate::terminal::TerminalControl::new()?),
             transport: Transport::Held(client),
             pump: Some(pump),
             manifest_id: spec.manifest_id,
@@ -1058,6 +1064,114 @@ impl Session {
             return (usize::from(cols), usize::from(rows));
         }
         self.shared.screen.lock().expect("screen").size()
+    }
+
+    /// One bounded, coherent read, independent of desktop dirty-row tracking.
+    /// It neither wakes a hibernated session nor changes its PTY geometry.
+    pub(crate) fn terminal_snapshot_sample(
+        &self,
+    ) -> Result<
+        (zeus_proto::grid::GridUpdate, TerminalModes, GridSignature),
+        zeus_proto::ControlError,
+    > {
+        let remote = self.shared.remote_grid.lock().expect("remote grid");
+        if let Some(remote) = remote.as_ref() {
+            let (cols, rows) = remote.mirror.size();
+            zeus_proto::terminal::validate_geometry(cols, rows)?;
+            let grid = remote.mirror.full_update().ok_or_else(|| {
+                zeus_proto::ControlError::new("terminal_unavailable", "waiting for remote snapshot")
+            })?;
+            let modes = remote.mirror.modes();
+            let signature = GridSignature {
+                content_seq: remote.revision,
+                size: (usize::from(cols), usize::from(rows)),
+                cursor: remote.mirror.cursor(),
+                alt_screen: modes.alt_screen,
+                mouse_reporting: modes.mouse_reporting,
+            };
+            return Ok((grid, modes, signature));
+        }
+        drop(remote);
+        let screen = self.shared.screen.lock().expect("screen");
+        let (cols, rows) = screen.size();
+        zeus_proto::terminal::validate_geometry(
+            u16::try_from(cols).unwrap_or(u16::MAX),
+            u16::try_from(rows).unwrap_or(u16::MAX),
+        )?;
+        Ok((
+            screen.full_snapshot(),
+            TerminalModes {
+                alt_screen: screen.is_alt_screen(),
+                mouse_reporting: screen.mouse_reporting(),
+                application_cursor_keys: screen.application_cursor_keys(),
+                bracketed_paste: screen.bracketed_paste(),
+                mouse_sgr: screen.mouse_sgr(),
+                mouse_utf8: screen.mouse_utf8(),
+                mouse_drag: screen.mouse_drag(),
+                mouse_motion: screen.mouse_motion(),
+                alternate_scroll: screen.alternate_scroll(),
+                focus_reporting: screen.focus_reporting(),
+            },
+            GridSignature {
+                content_seq: screen.content_seq(),
+                size: screen.size(),
+                cursor: screen.cursor(),
+                alt_screen: screen.is_alt_screen(),
+                mouse_reporting: screen.mouse_reporting(),
+            },
+        ))
+    }
+
+    /// Companion commands never enter a deferred/hibernated/reconnect queue.
+    /// Any failed write is ambiguous and must never be replayed automatically.
+    pub(crate) fn send_text_once(&self, text: &str, submit: bool) -> std::io::Result<()> {
+        if self.is_hibernated()
+            || self.shared.exited.load(Ordering::SeqCst)
+            || self
+                .deferred
+                .as_ref()
+                .is_some_and(|d| !d.state.lock().expect("deferred").launched)
+        {
+            return Err(std::io::Error::other("session is not ready for input"));
+        }
+        let modes = self.modes();
+        // Without bracketed paste, newline/tab would execute commands or
+        // activate completion rather than represent literal composed text.
+        if !modes.bracketed_paste && text.chars().any(|c| c == '\n' || c == '\t') {
+            return Err(std::io::Error::other(
+                "multiline text requires bracketed paste",
+            ));
+        }
+        let framed = if modes.bracketed_paste {
+            format!("\x1b[200~{text}\x1b[201~")
+        } else {
+            text.to_owned()
+        };
+        let write = |bytes: &[u8]| match &self.transport {
+            Transport::Remote(client) => client.write_once(bytes),
+            Transport::Held(client) => client.write(bytes).map_err(holder_io_error),
+            Transport::Direct(pty) => {
+                use std::io::Write;
+                pty.lock().expect("pty").writer()?.write_all(bytes)
+            }
+        };
+        self.shared.note_hot();
+        self.shared.grid_wake.prioritize_interactive_changes();
+        write(framed.as_bytes())?;
+        self.capture_prompt_title(text);
+        if submit {
+            std::thread::sleep(Duration::from_millis(30));
+            write(b"\r")?;
+        }
+        self.feed_signal(StatusSignal::UserKeystroke);
+        Ok(())
+    }
+
+    pub(crate) fn ready_for_control_transfer(&self) -> bool {
+        match &self.transport {
+            Transport::Remote(client) => client.ready_for_control_transfer(),
+            _ => true,
+        }
     }
 
     /// A coherent full snapshot and change-generation baseline for a freshly

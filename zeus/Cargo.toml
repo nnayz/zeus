@@ -3,6 +3,9 @@ members = [
     "crates/zeus-app",
     "crates/zeus-cli",
     "crates/zeus-client",
+    "crates/zeus-companion-api",
+    "crates/zeus-companion",
+    "crates/zeus-companion-client",
     "crates/zeus-engine",
     "crates/zeus-node",
     "crates/zeus-mcp",
@@ -26,6 +29,7 @@ license = "Apache-2.0"
 alacritty_terminal = { version = "0.26", default-features = false }
 base64 = "0.23"
 zeus-client = { path = "crates/zeus-client" }
+zeus-companion-api = { path = "crates/zeus-companion-api" }
 zeus-engine = { path = "crates/zeus-engine" }
 zeus-node = { path = "crates/zeus-node" }
 zeus-proto = { path = "crates/zeus-proto" }

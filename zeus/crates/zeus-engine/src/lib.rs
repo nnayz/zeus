@@ -24,6 +24,7 @@ pub mod attach;
 pub mod attachment;
 pub mod browser;
 pub mod checkpoint;
+pub mod companion_sidecar;
 pub mod control;
 pub mod cwd;
 pub mod detect;
@@ -61,3 +62,5 @@ pub use session::{
     HolderConfig, RemoteAdoptSpec, RemoteSessionSpec, Session, SessionSpec, SessionView,
 };
 pub use status::{Authority, ReducerOutcome, StatusReducer, StatusSignal};
+
+pub mod terminal;

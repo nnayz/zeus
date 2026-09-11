@@ -9,6 +9,19 @@ permissions:
   contents: read
 
 jobs:
+  companion-web:
+    name: Companion web contract tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5.0.0
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '22'
+      - name: Run dependency-free client and fixture conformance tests
+        working-directory: prototypes/companion-web
+        run: npm test
+
   homebrew-cask:
     name: Homebrew cask
     runs-on: macos-15

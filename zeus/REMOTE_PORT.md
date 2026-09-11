@@ -562,8 +562,58 @@ These features are separate from Remote Holder transport:
   bootstrap dependency;
 - the old iPhone companion path is not part of the Rust remote architecture and
   its obsolete UI entry points are removed;
-- any future companion implementation requires a separately designed protocol,
-  security model, lifecycle, and product scope.
+- the replacement Companion contract is defined in
+  [Companion architecture and trust model](../docs/src/companion-architecture.md)
+  for issue #76 under #72. It approves implementation spikes, not production
+  availability, and does not reopen the completed remote transport refactor.
+
+The Companion is an Engine-launched narrow Rust sidecar using `zeus-client` over
+local IPC. The Engine retains session/status/host authority, metadata mutation
+epoch/revision/replay fencing and desktop/mobile controller arbitration; the
+experimental sidecar auth store owns device credentials. Production requires
+verified execution-time authorization and a narrow Companion IPC boundary.
+The external HTTPS REST/JSON + WSS v1 API is independently versioned, with
+OpenAPI selected as the schema/client authority and curated allowlisted
+operations. Publishing and validating that artifact is an implementation gate.
+The external API is not local Engine RPC, `remote_pty`, `zeus-node`, or a direct
+phone-to-Holder connection.
+
+V1 is command-oriented, with read-only full terminal snapshots from Engine
+state and explicit controller takeover before interaction. A snapshot read
+must not create a second Holder attach or steal control. Missing Engine state
+is reported as unavailable/stale. Raw mobile resize, signals, terminal bytes,
+scroll protocol and diffs are excluded. No mobile functionality is added to
+`zeus-remote`, and multiple Helper observers remain deferred.
+
+The gateway defaults to loopback and accepts only explicitly selected private
+literal binds; wildcard/public, DNS, link-local and mapped-address binds are
+unsupported. Private binds require TLS without ATS exceptions. Loopback HTTP
+is an experimental local fixture/backend facility, not mobile transport.
+Short-lived pairing, per-device hashed credentials/scopes/revocation, bounded
+frames/queues/replay and Engine mutation fencing define the spike. Its actual
+routes use `/v1/hello`, `/v1/pair`, `/screen`, control/text and `/actions`, with
+first-frame WSS bearer authentication and invalidation events. Metadata replay
+rejection is bounded and in-memory per Engine epoch; a durable outcome journal,
+tickets, resource grants, native pinning and timed leases are follow-up options.
+Production remains no-go pending schema, lifecycle, authorization, budget and
+client validation. Overlay reachability never substitutes for authentication.
+The selected app-quit policy stops Companion without an unattended service or
+an otherwise idle Engine; integration must prove that behavior.
+The in-repo PWA and Rust reference client validate the API; native iOS lives in
+a separate repository and does not reintroduce Swift into this workspace.
+The linked contract specifies lifecycle, threat model, limits, deterministic
+tests, and go/no-go gates for #73/#74/#75. Existing Helper release gates remain
+required; Companion measurements cannot relax them.
+
+### Separate existing implementation mismatch
+
+Despite this baseline's removal statements, this checkout retains
+`crates/zeus-engine/src/legacy_remote.rs`, its `src/lib.rs` export,
+`src/control.rs` retirement invocation and `tests/legacy_remote.rs`. Issue #76
+records this pre-existing mismatch separately and leaves that code untouched.
+The design authority remains Remote Holder-only with no legacy transport
+fallback; this note does not approve or reintroduce one. Reconciliation belongs
+to a separate maintenance change, not Companion implementation.
 
 ## Verification and release gates
 

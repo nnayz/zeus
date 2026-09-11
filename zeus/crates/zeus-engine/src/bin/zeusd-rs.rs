@@ -155,6 +155,12 @@ fn main() {
     // never be what a client waits behind.
     server.spawn_remote_restore();
 
+    let _companion = zeus_engine::companion_sidecar::launch(&exe_dir, server.socket_path())
+        .unwrap_or_else(|_| {
+            eprintln!("zeusd-rs: opted-in Companion sidecar unavailable");
+            None
+        });
+
     let _watcher = zeus_engine::events::spawn_registry_watcher(
         Arc::clone(&registry),
         server.events(),

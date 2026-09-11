@@ -12,6 +12,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use futures_core::Stream;
+use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
@@ -21,11 +22,16 @@ use zeus_proto::frames::{Frame, FrameCodec, FrameType, TerminalModes};
 use zeus_proto::grid::GridUpdate;
 use zeus_proto::methods::{AttachRequest, ClientRole};
 use zeus_proto::model::SessionId;
+use zeus_proto::terminal::{
+    AttachmentAction, AttachmentControlState, ControlEpoch, ControlledFrame,
+};
 
 const READ_BUFFER_BYTES: usize = 64 * 1024;
 const KEEPALIVE_CHECK_EVERY: Duration = Duration::from_secs(5);
 const PING_AFTER: Duration = Duration::from_secs(20);
 const DEAD_AFTER: Duration = Duration::from_secs(30);
+const COMMAND_CAPACITY: usize = 64;
+const MAX_INPUT_BYTES: usize = 64 * 1024;
 
 /// A decoded event from the daemon's authoritative terminal data channel.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -33,6 +39,7 @@ pub enum TerminalChunk {
     Grid(GridUpdate),
     Modes(TerminalModes),
     Pong,
+    Control(AttachmentControlState),
 }
 
 /// The receiving half of an attachment.
@@ -41,7 +48,7 @@ pub enum TerminalChunk {
 /// need a stream extension trait for the common one-at-a-time use case.
 #[derive(Debug)]
 pub struct AttachmentChunks {
-    receiver: mpsc::UnboundedReceiver<TerminalChunk>,
+    receiver: mpsc::Receiver<TerminalChunk>,
 }
 
 impl AttachmentChunks {
@@ -110,7 +117,8 @@ impl std::error::Error for AttachmentClosed {}
 
 /// A separate binary data connection attached to one daemon session.
 pub struct SessionAttachment {
-    commands: mpsc::UnboundedSender<Command>,
+    commands: mpsc::Sender<Command>,
+    control: Arc<Mutex<AttachmentControlState>>,
     task: Option<JoinHandle<()>>,
     pub chunks: AttachmentChunks,
 }
@@ -123,16 +131,72 @@ pub struct SessionAttachment {
 /// with the caller, as in `SessionAttachment.swift`.
 #[derive(Clone)]
 pub struct SessionAttachmentHandle {
-    commands: mpsc::UnboundedSender<Command>,
+    commands: mpsc::Sender<Command>,
+    control: Arc<Mutex<AttachmentControlState>>,
+}
+
+/// Input authority captured before deferred work starts. It is bound to this
+/// connection and Engine epoch and cannot acquire a newer lease on completion.
+#[derive(Clone)]
+pub struct SessionAttachmentInput {
+    handle: SessionAttachmentHandle,
+    expected: ControlEpoch,
+}
+
+impl SessionAttachmentInput {
+    pub fn belongs_to(&self, handle: &SessionAttachmentHandle) -> bool {
+        Arc::ptr_eq(&self.handle.control, &handle.control)
+    }
+
+    pub fn is_current(&self) -> bool {
+        !self.handle.commands.is_closed()
+            && self.handle.control.lock().is_ok_and(|state| {
+                state.control.epoch == self.expected
+                    && state
+                        .control
+                        .owner
+                        .as_ref()
+                        .is_some_and(|owner| owner.id == state.client_id)
+            })
+    }
+
+    pub fn send_input(&self, bytes: Vec<u8>) -> Result<(), AttachmentClosed> {
+        if bytes.len() > MAX_INPUT_BYTES {
+            return Err(AttachmentClosed);
+        }
+        self.handle
+            .send_at(AttachmentAction::Input { bytes }, Some(&self.expected))
+    }
 }
 
 impl SessionAttachmentHandle {
+    pub fn capture_input(&self) -> Result<SessionAttachmentInput, AttachmentClosed> {
+        let state = self.control.lock().map_err(|_| AttachmentClosed)?;
+        if self.commands.is_closed()
+            || !state
+                .control
+                .owner
+                .as_ref()
+                .is_some_and(|owner| owner.id == state.client_id)
+        {
+            return Err(AttachmentClosed);
+        }
+        Ok(SessionAttachmentInput {
+            handle: self.clone(),
+            expected: state.control.epoch.clone(),
+        })
+    }
+
     pub fn send_input(&self, bytes: impl Into<Vec<u8>>) -> Result<(), AttachmentClosed> {
-        self.send(Frame::input(bytes))
+        let bytes = bytes.into();
+        if bytes.len() > MAX_INPUT_BYTES {
+            return Err(AttachmentClosed);
+        }
+        self.send(AttachmentAction::Input { bytes })
     }
 
     pub fn resize(&self, cols: u16, rows: u16) -> Result<(), AttachmentClosed> {
-        self.send(Frame::resize(cols, rows))
+        self.send(AttachmentAction::Resize { cols, rows })
     }
 
     pub fn scroll(
@@ -142,18 +206,57 @@ impl SessionAttachmentHandle {
         col: u16,
         row: u16,
     ) -> Result<(), AttachmentClosed> {
-        self.send(Frame::scroll(direction, lines, col, row))
+        self.send(AttachmentAction::Scroll {
+            direction,
+            lines,
+            col,
+            row,
+        })
     }
 
     pub fn close(&self) -> Result<(), AttachmentClosed> {
         self.commands
-            .send(Command::Close)
+            .try_send(Command::Close)
             .map_err(|_| AttachmentClosed)
     }
 
-    fn send(&self, frame: Frame) -> Result<(), AttachmentClosed> {
+    pub fn take_control(&self) -> Result<(), AttachmentClosed> {
+        self.send(AttachmentAction::TakeControl)
+    }
+
+    pub fn release_control(&self) -> Result<(), AttachmentClosed> {
+        self.send(AttachmentAction::ReleaseControl)
+    }
+
+    fn send(&self, action: AttachmentAction) -> Result<(), AttachmentClosed> {
+        self.send_at(action, None)
+    }
+
+    fn send_at(
+        &self,
+        action: AttachmentAction,
+        expected: Option<&ControlEpoch>,
+    ) -> Result<(), AttachmentClosed> {
+        let state = self.control.lock().map_err(|_| AttachmentClosed)?;
+        if expected.is_some_and(|expected| *expected != state.control.epoch) {
+            return Err(AttachmentClosed);
+        }
+        if !matches!(action, AttachmentAction::TakeControl)
+            && !state
+                .control
+                .owner
+                .as_ref()
+                .is_some_and(|owner| owner.id == state.client_id)
+        {
+            return Err(AttachmentClosed);
+        }
+        let envelope = ControlledFrame {
+            expected: expected.unwrap_or(&state.control.epoch).clone(),
+            action,
+        };
+        let payload = serde_json::to_vec(&envelope).map_err(|_| AttachmentClosed)?;
         self.commands
-            .send(Command::Frame(frame))
+            .try_send(Command::Frame(Frame::new(FrameType::Controlled, payload)))
             .map_err(|_| AttachmentClosed)
     }
 }
@@ -171,6 +274,7 @@ impl SessionAttachment {
     async fn adopt(mut stream: UnixStream, session_id: SessionId) -> Result<Self, AttachmentError> {
         let request = AttachRequest {
             attach: session_id,
+            control_protocol: Some(zeus_proto::terminal::TERMINAL_PROTOCOL),
             from_offset: None,
             token: None,
             role: ClientRole::Desktop,
@@ -179,12 +283,40 @@ impl SessionAttachment {
         line.push(b'\n');
         stream.write_all(&line).await?;
 
-        let (command_tx, command_rx) = mpsc::unbounded_channel();
-        let (chunk_tx, chunk_rx) = mpsc::unbounded_channel();
-        let task = tokio::spawn(run_connection(stream, command_rx, chunk_tx));
+        // Complete negotiation before callers can queue a first resize/input.
+        // Read only this frame so the following full grid stays on the socket.
+        let initial = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut header = [0u8; 5];
+            stream.read_exact(&mut header).await?;
+            let len = u32::from_be_bytes(header[1..].try_into().expect("header")) as usize;
+            if header[0] != FrameType::Controller as u8 || len > 4096 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Engine did not negotiate controller epochs",
+                ));
+            }
+            let mut payload = vec![0; len];
+            stream.read_exact(&mut payload).await?;
+            serde_json::from_slice::<AttachmentControlState>(&payload).map_err(io::Error::other)
+        })
+        .await
+        .map_err(|_| {
+            io::Error::new(io::ErrorKind::TimedOut, "controller negotiation timed out")
+        })??;
+        let control = Arc::new(Mutex::new(initial.clone()));
+        let (command_tx, command_rx) = mpsc::channel(COMMAND_CAPACITY);
+        let (chunk_tx, chunk_rx) = mpsc::channel(64);
+        let _ = chunk_tx.try_send(TerminalChunk::Control(initial));
+        let task = tokio::spawn(run_connection(
+            stream,
+            command_rx,
+            chunk_tx,
+            Arc::clone(&control),
+        ));
 
         Ok(Self {
             commands: command_tx,
+            control,
             task: Some(task),
             chunks: AttachmentChunks { receiver: chunk_rx },
         })
@@ -217,13 +349,15 @@ impl SessionAttachment {
     pub fn handle(&self) -> SessionAttachmentHandle {
         SessionAttachmentHandle {
             commands: self.commands.clone(),
+            control: Arc::clone(&self.control),
         }
     }
 
     /// Detaches and cleanly finishes the chunk stream. Idempotent.
     pub async fn close(&mut self) {
-        let _ = self.commands.send(Command::Close);
         if let Some(task) = self.task.take() {
+            // A full command queue must not keep a detached socket alive.
+            task.abort();
             let _ = task.await;
         }
     }
@@ -244,8 +378,9 @@ enum Command {
 
 async fn run_connection(
     mut stream: UnixStream,
-    mut commands: mpsc::UnboundedReceiver<Command>,
-    chunks: mpsc::UnboundedSender<TerminalChunk>,
+    mut commands: mpsc::Receiver<Command>,
+    chunks: mpsc::Sender<TerminalChunk>,
+    control: Arc<Mutex<AttachmentControlState>>,
 ) {
     let mut codec = FrameCodec::new();
     let mut read_buffer = vec![0_u8; READ_BUFFER_BYTES];
@@ -264,7 +399,7 @@ async fn run_connection(
                 last_received = Instant::now();
                 let Ok(frames) = codec.feed(&read_buffer[..read]) else { return };
                 for frame in frames {
-                    if process_incoming(frame, &mut stream, &chunks).await.is_err() {
+                    if process_incoming(frame, &mut stream, &chunks, &control).await.is_err() {
                         return;
                     }
                 }
@@ -295,23 +430,56 @@ async fn run_connection(
 async fn process_incoming(
     frame: Frame,
     stream: &mut UnixStream,
-    chunks: &mpsc::UnboundedSender<TerminalChunk>,
+    chunks: &mpsc::Sender<TerminalChunk>,
+    control: &Mutex<AttachmentControlState>,
 ) -> Result<(), ()> {
     match frame.frame_type {
         FrameType::Grid => {
             let update = frame.grid_payload().map_err(|_| ())?.ok_or(())?;
-            chunks.send(TerminalChunk::Grid(update)).map_err(|_| ())?;
+            chunks
+                .try_send(TerminalChunk::Grid(update))
+                .map_err(|_| ())?;
+        }
+        FrameType::Controller => {
+            if frame.payload.len() > 4096 {
+                return Err(());
+            }
+            let state: AttachmentControlState =
+                serde_json::from_slice(&frame.payload).map_err(|_| ())?;
+            {
+                let mut current = control.lock().map_err(|_| ())?;
+                if current.client_id != state.client_id {
+                    return Err(());
+                }
+                // A stale error response may race a newer pump notification.
+                // Never let it roll the visible lease back.
+                if current.control.epoch.incarnation == state.control.epoch.incarnation
+                    && (state.control.epoch.generation, state.control.command_seq)
+                        < (
+                            current.control.epoch.generation,
+                            current.control.command_seq,
+                        )
+                {
+                    return Ok(());
+                }
+                *current = state.clone();
+            }
+            chunks
+                .try_send(TerminalChunk::Control(state))
+                .map_err(|_| ())?;
         }
         FrameType::Modes => {
             let modes = frame.modes_payload().ok_or(())?;
-            chunks.send(TerminalChunk::Modes(modes)).map_err(|_| ())?;
+            chunks
+                .try_send(TerminalChunk::Modes(modes))
+                .map_err(|_| ())?;
         }
         FrameType::Ping => write_frame(stream, &Frame::pong()).await.map_err(|_| ())?,
-        FrameType::Pong => chunks.send(TerminalChunk::Pong).map_err(|_| ())?,
+        FrameType::Pong => chunks.try_send(TerminalChunk::Pong).map_err(|_| ())?,
         // These byte-replay frames belong to the retired VT-parsing client.
         FrameType::Output | FrameType::ReplayBegin | FrameType::ReplayEnd => {}
         // The daemon does not send client-to-daemon frame types.
-        FrameType::Input | FrameType::Resize | FrameType::Scroll => {}
+        FrameType::Input | FrameType::Resize | FrameType::Scroll | FrameType::Controlled => {}
     }
     Ok(())
 }
@@ -343,6 +511,137 @@ mod tests {
     use zeus_proto::paths::{ZeusEnv, ZeusPaths};
 
     use super::{SessionAttachment, TerminalChunk};
+
+    fn controller(generation: u64) -> zeus_proto::terminal::AttachmentControlState {
+        use zeus_proto::terminal::*;
+        AttachmentControlState {
+            client_id: "desktop-test".into(),
+            control: ControlState {
+                epoch: ControlEpoch {
+                    incarnation: "engine-test".into(),
+                    generation,
+                },
+                owner: Some(Controller {
+                    id: "desktop-test".into(),
+                    label: "Desktop".into(),
+                    role: zeus_proto::ClientRole::Desktop,
+                }),
+                command_seq: 0,
+            },
+            error: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn slow_chunk_receiver_fails_closed_and_old_ownership_cannot_regress() {
+        use zeus_proto::frames::{Frame, FrameType};
+        let (mut stream, _other) = UnixStream::pair().unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let state = std::sync::Mutex::new(controller(2));
+        let stale = Frame::new(
+            FrameType::Controller,
+            serde_json::to_vec(&controller(1)).unwrap(),
+        );
+        super::process_incoming(stale, &mut stream, &tx, &state)
+            .await
+            .unwrap();
+        assert_eq!(state.lock().unwrap().control.epoch.generation, 2);
+        assert!(rx.try_recv().is_err());
+        super::process_incoming(Frame::pong(), &mut stream, &tx, &state)
+            .await
+            .unwrap();
+        assert!(
+            super::process_incoming(Frame::pong(), &mut stream, &tx, &state)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            rx.len(),
+            1,
+            "overflow ends the connection, never queues stale frames"
+        );
+    }
+
+    #[test]
+    fn queued_input_keeps_its_original_epoch_and_queue_is_bounded() {
+        use std::sync::{Arc, Mutex};
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let state = Arc::new(Mutex::new(controller(1)));
+        let handle = super::SessionAttachmentHandle {
+            commands: tx,
+            control: Arc::clone(&state),
+        };
+        handle.send_input(b"first".to_vec()).unwrap();
+        assert!(handle.send_input(b"overflow".to_vec()).is_err());
+        *state.lock().unwrap() = controller(2);
+        let super::Command::Frame(frame) = rx.try_recv().unwrap() else {
+            panic!("expected input")
+        };
+        let frame: zeus_proto::terminal::ControlledFrame =
+            serde_json::from_slice(&frame.payload).unwrap();
+        assert_eq!(frame.expected.generation, 1);
+    }
+
+    #[test]
+    fn captured_input_cannot_cross_takeover_reacquire_or_engine_restart() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(super::COMMAND_CAPACITY);
+        let state = std::sync::Arc::new(std::sync::Mutex::new(controller(1)));
+        let handle = super::SessionAttachmentHandle {
+            commands: tx,
+            control: state.clone(),
+        };
+        let input = handle.capture_input().unwrap();
+        input
+            .send_input(b"queued before takeover".to_vec())
+            .unwrap();
+        let mut phone = controller(2);
+        phone.control.owner.as_mut().unwrap().id = "phone".into();
+        *state.lock().unwrap() = phone;
+        assert!(!input.is_current());
+        assert!(handle.capture_input().is_err());
+        assert!(input.send_input(b"during takeover".to_vec()).is_err());
+        *state.lock().unwrap() = controller(3);
+        assert!(input.send_input(b"after reacquire".to_vec()).is_err());
+        let super::Command::Frame(frame) = rx.try_recv().unwrap() else {
+            panic!("expected input")
+        };
+        let frame: zeus_proto::terminal::ControlledFrame =
+            serde_json::from_slice(&frame.payload).unwrap();
+        assert_eq!(frame.expected, controller(1).control.epoch);
+        assert_ne!(frame.expected, state.lock().unwrap().control.epoch);
+        assert!(rx.try_recv().is_err(), "stale sends were not queued");
+
+        let input = handle.capture_input().unwrap();
+        state.lock().unwrap().control.epoch.incarnation = "restarted-engine".into();
+        assert!(input.send_input(b"old engine".to_vec()).is_err());
+        let input = handle.capture_input().unwrap();
+        drop(rx);
+        assert!(!input.is_current());
+        assert!(input.send_input(b"disconnected".to_vec()).is_err());
+    }
+
+    #[test]
+    fn captured_input_obeys_production_count_and_byte_bounds() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(super::COMMAND_CAPACITY);
+        let handle = super::SessionAttachmentHandle {
+            commands: tx,
+            control: std::sync::Arc::new(std::sync::Mutex::new(controller(1))),
+        };
+        let input = handle.capture_input().unwrap();
+        assert!(
+            input
+                .send_input(vec![0; super::MAX_INPUT_BYTES + 1])
+                .is_err()
+        );
+        assert!(rx.try_recv().is_err());
+        for _ in 0..super::COMMAND_CAPACITY {
+            input.send_input(vec![0; super::MAX_INPUT_BYTES]).unwrap();
+        }
+        assert!(input.send_input(vec![1]).is_err());
+        assert_eq!(rx.len(), super::COMMAND_CAPACITY);
+        rx.try_recv().unwrap();
+        input.send_input(vec![1]).unwrap();
+    }
 
     struct TestControl {
         reader: BufReader<OwnedReadHalf>,

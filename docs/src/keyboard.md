@@ -7,7 +7,7 @@ is the backup for anything you forget.
 
 | Shortcut | Action |
 |----------|--------|
-| `⌘N` | New Agent composer (pick kind, folder, first prompt) |
+| `⌘N` | New Agent composer (pick kind, folder, first prompt, or a saved recipe) |
 | `⌘T` | New session with your default agent |
 | `⌥⌘T` | New terminal (login shell) |
 | `⌘⇧N` | New Codex session |
@@ -62,6 +62,26 @@ When the lineage view is **Tree**:
 | Return | Open that session's terminal |
 | Double-click | Same |
 | Esc | Back to tabs |
+
+## New Agent composer
+
+`⌘N` opens the composer in the main pane. Recipes remember the agent, project,
+host, worktree policy, title, and first prompt so a repeatable setup is one
+action.
+
+| Shortcut | Action |
+|----------|--------|
+| `⌘S` | Save the current setup as a recipe, or update the loaded one |
+| `⌘⇧S` | Save as a new recipe |
+| `⌘R` | Open the recipe list |
+| `⌘↵` | Launch the highlighted recipe immediately |
+| `⌘D` | Duplicate the highlighted or loaded recipe |
+| `⌘⌫` | Delete the highlighted or loaded recipe |
+| `⌥↑` `⌥↓` | Reorder the highlighted recipe |
+| Return | Load the highlighted recipe into the composer, or launch the current setup |
+
+A recipe whose agent, project, or host is gone stays visible and cannot launch
+until you repair that one field. It never silently retargets.
 
 ## Palette worth typing
 

@@ -12,6 +12,7 @@ use zeus_ui::{FloatingSurface, Ink, Radius, SemanticColors, Typo};
 
 use crate::AppServices;
 use crate::inspector::{InspectorEvent, WorkbenchInspector};
+use crate::launcher::{LauncherEvent, LauncherOverlay};
 use crate::macos::sf_symbols::{SymbolWeight, sf_symbol, sf_symbol_weighted};
 use crate::navigation::{
     NavigationEvent, NavigationOverlay, ToggleCommandPalette, ToggleQuickOpen,
@@ -143,6 +144,7 @@ pub struct RootView {
     session_surfaces: Option<Entity<SessionSurfaces>>,
     utility_surfaces: Option<Entity<UtilitySurfaces>>,
     inspector: Option<Entity<WorkbenchInspector>>,
+    launcher: Entity<LauncherOverlay>,
     services: Arc<AppServices>,
     focus: FocusHandle,
     resize_origin: Option<(f32, f32)>,
@@ -250,6 +252,7 @@ impl RootView {
                 inspector
             }))
         };
+        let launcher = cx.new(|cx| LauncherOverlay::new(Arc::clone(&services), preview, cx));
         if let (Some(terminal), Some(navigation), Some(utility_surfaces)) =
             (&terminal, &navigation, &utility_surfaces)
         {
@@ -309,6 +312,19 @@ impl RootView {
             }
             cx.notify();
         })
+        .detach();
+        cx.subscribe_in(
+            &launcher,
+            window,
+            |this, _, _: &LauncherEvent, window, cx| {
+                if let Some(terminal) = &this.terminal {
+                    terminal.update(cx, |terminal, cx| terminal.focus(window, cx));
+                } else {
+                    window.focus(&this.focus, cx);
+                }
+                cx.notify();
+            },
+        )
         .detach();
         if let Some(navigation) = &navigation {
             cx.subscribe(navigation, |this, _, event, cx| match event {
@@ -633,6 +649,7 @@ impl RootView {
             session_surfaces,
             utility_surfaces,
             inspector,
+            launcher,
             services,
             focus: cx.focus_handle(),
             resize_origin: None,
@@ -667,6 +684,12 @@ impl RootView {
             _workbench_sync: workbench_sync,
         };
         root.sync_auxiliary_terminal(window, cx);
+        if preview && std::env::var("ZEUS_LAUNCHER_PREVIEW").is_ok_and(|value| value != "0") {
+            root.launcher.update(cx, |launcher, cx| {
+                launcher.open(window, cx);
+                launcher.show_recipes();
+            });
+        }
         if !preview {
             // Do not rely on AppKit emitting a move/resize after the observer
             // is installed: even an untouched first launch should become the
@@ -739,6 +762,18 @@ impl RootView {
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.launcher.read(cx).is_open() {
+            let reopen = event.keystroke.modifiers.platform
+                && event.keystroke.key == "n"
+                && !event.keystroke.modifiers.shift;
+            self.launcher.update(cx, |launcher, cx| {
+                launcher.handle_key_down(event, _window, cx);
+            });
+            if !reopen {
+                cx.stop_propagation();
+                return;
+            }
+        }
         if let Some(surfaces) = &self.utility_surfaces
             && surfaces.read(cx).is_open()
         {
@@ -1155,9 +1190,14 @@ impl RootView {
             .update(cx, |sidebar, cx| sidebar.reopen_last(cx));
     }
 
-    fn open_new_agent(&mut self, _: &OpenNewAgent, _window: &mut Window, cx: &mut Context<Self>) {
-        self.sidebar
-            .update(cx, |sidebar, cx| sidebar.show_new_agent(cx));
+    fn open_new_agent(&mut self, _: &OpenNewAgent, window: &mut Window, cx: &mut Context<Self>) {
+        self.launcher
+            .update(cx, |launcher, cx| launcher.open(window, cx));
+        let launcher = self.launcher.clone();
+        cx.defer_in(window, move |_, window, cx| {
+            launcher.update(cx, |launcher, cx| launcher.focus(window, cx));
+        });
+        cx.notify();
     }
 
     fn open_workspace(&mut self, _: &OpenWorkspace, window: &mut Window, cx: &mut Context<Self>) {
@@ -1545,6 +1585,32 @@ impl RootView {
                 ),
         )
         .into_any_element()
+    }
+
+    fn main_pane(
+        &mut self,
+        visible_sidebar: bool,
+        layout: HorizontalLayout,
+        seam: f32,
+        inspector_seam: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        if self.launcher.read(cx).is_open() {
+            return div()
+                .relative()
+                .flex_1()
+                .h_full()
+                .min_w(px(0.0))
+                .overflow_hidden()
+                .child(
+                    self.launcher
+                        .clone()
+                        .cached(StyleRefinement::default().size_full()),
+                )
+                .into_any_element();
+        }
+        self.terminal_card(visible_sidebar, layout, seam, inspector_seam, window, cx)
     }
 
     /// `layout` is the settled allocation and drives everything the terminal is
@@ -1956,7 +2022,9 @@ impl Render for RootView {
             window_width,
             sidebar_visible,
             sidebar_width,
-            inspector_visible: self.inspector_open && inspector_available,
+            inspector_visible: self.inspector_open
+                && inspector_available
+                && !self.launcher.read(cx).is_open(),
             requested_inspector_width,
             inspector_min_width: self.inspector_min_width(),
             terminal_min_width: MIN_TERMINAL_WIDTH,
@@ -2102,7 +2170,7 @@ impl Render for RootView {
             if let Some(wrapper) = inspector_wrapper {
                 root = root.child(wrapper).child(self.inspector_resize_handle(cx));
             }
-            root = root.child(self.terminal_card(
+            root = root.child(self.main_pane(
                 sidebar_visible,
                 layout,
                 seam,
@@ -2119,7 +2187,7 @@ impl Render for RootView {
             if seam > 0.0 {
                 root = root.child(self.resize_handle(cx));
             }
-            root = root.child(self.terminal_card(
+            root = root.child(self.main_pane(
                 sidebar_visible,
                 layout,
                 seam,

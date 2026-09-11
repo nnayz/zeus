@@ -1,0 +1,35 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {};
+	objectVersion = 56;
+	objects = {
+		P000000000000000000000001 = { isa = PBXProject; buildConfigurationList = P000000000000000000000010; compatibilityVersion = "Xcode 14.0"; developmentRegion = en; knownRegions = ( en, Base ); mainGroup = P000000000000000000000003; productRefGroup = P000000000000000000000004; projectDirPath = ""; projectRoot = ""; targets = ( P000000000000000000000002 ); };
+		P000000000000000000000002 = { isa = PBXNativeTarget; buildConfigurationList = P000000000000000000000011; buildPhases = ( P000000000000000000000020, P000000000000000000000021, P000000000000000000000022 ); buildRules = (); dependencies = (); name = ZeusCompanion; productName = ZeusCompanion; productReference = P000000000000000000000005; productType = "com.apple.product-type.application"; };
+		P000000000000000000000003 = { isa = PBXGroup; children = ( P000000000000000000000036, P000000000000000000000004 ); sourceTree = "<group>"; };
+		P000000000000000000000004 = { isa = PBXGroup; name = Products; children = ( P000000000000000000000005 ); sourceTree = "<group>"; };
+		P000000000000000000000005 = { isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ZeusCompanion.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		P000000000000000000000030 = { isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZeusCompanionApp.swift; sourceTree = "<group>"; };
+		P000000000000000000000031 = { isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		P000000000000000000000032 = { isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
+		P000000000000000000000033 = { isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompanionClient.swift; sourceTree = "<group>"; };
+		P000000000000000000000034 = { isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainStore.swift; sourceTree = "<group>"; };
+		P000000000000000000000035 = { isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		P000000000000000000000036 = { isa = PBXGroup; children = ( P000000000000000000000030, P000000000000000000000031, P000000000000000000000032, P000000000000000000000033, P000000000000000000000034, P000000000000000000000035 ); path = ZeusCompanion; sourceTree = "<group>"; };
+		P000000000000000000000020 = { isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = ( P000000000000000000000040, P000000000000000000000041, P000000000000000000000042, P000000000000000000000043, P000000000000000000000044 ); runOnlyForDeploymentPostprocessing = 0; };
+		P000000000000000000000040 = { isa = PBXBuildFile; fileRef = P000000000000000000000030; };
+		P000000000000000000000041 = { isa = PBXBuildFile; fileRef = P000000000000000000000031; };
+		P000000000000000000000042 = { isa = PBXBuildFile; fileRef = P000000000000000000000032; };
+		P000000000000000000000043 = { isa = PBXBuildFile; fileRef = P000000000000000000000033; };
+		P000000000000000000000044 = { isa = PBXBuildFile; fileRef = P000000000000000000000034; };
+		P000000000000000000000021 = { isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		P000000000000000000000022 = { isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		P000000000000000000000010 = { isa = XCConfigurationList; buildConfigurations = ( P000000000000000000000050, P000000000000000000000051 ); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		P000000000000000000000011 = { isa = XCConfigurationList; buildConfigurations = ( P000000000000000000000052, P000000000000000000000053 ); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		P000000000000000000000050 = { isa = XCBuildConfiguration; buildSettings = { SWIFT_VERSION = 5.0; }; name = Debug; };
+		P000000000000000000000051 = { isa = XCBuildConfiguration; buildSettings = { SWIFT_VERSION = 5.0; }; name = Release; };
+		P000000000000000000000052 = { isa = XCBuildConfiguration; buildSettings = { INFOPLIST_FILE = ZeusCompanion/Info.plist; IPHONEOS_DEPLOYMENT_TARGET = 17.0; PRODUCT_BUNDLE_IDENTIFIER = com.zeus.companion; PRODUCT_NAME = "$(TARGET_NAME)"; SDKROOT = iphoneos; SWIFT_VERSION = 5.0; TARGETED_DEVICE_FAMILY = "1,2"; }; name = Debug; };
+		P000000000000000000000053 = { isa = XCBuildConfiguration; buildSettings = { INFOPLIST_FILE = ZeusCompanion/Info.plist; IPHONEOS_DEPLOYMENT_TARGET = 17.0; PRODUCT_BUNDLE_IDENTIFIER = com.zeus.companion; PRODUCT_NAME = "$(TARGET_NAME)"; SDKROOT = iphoneos; SWIFT_VERSION = 5.0; TARGETED_DEVICE_FAMILY = "1,2"; }; name = Release; };
+	};
+	rootObject = P000000000000000000000001;
+}

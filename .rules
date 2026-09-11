@@ -8,7 +8,8 @@ These instructions apply to the whole repository. The active architecture decisi
 
 - The remote refactor is complete. Maintain the bootstrapped Remote PTY Holder as Zeus's only remote session transport; future remote work extends this architecture rather than reopening the transport migration.
 - Implement and maintain remote behavior entirely in the Rust workspace under `zeus/`.
-- The product is Rust-only. Do not reintroduce Swift sources, a Swift daemon, or a Swift CLI.
+- Zeus is a monorepo: the desktop, Engine, CLI, and transport remain Rust-owned under `zeus/`; the native iOS Companion is a separate SwiftUI client under `ios/ZeusCompanion/`.
+- Swift in `ios/ZeusCompanion/` must remain a client of the versioned Companion HTTPS API. It must not embed an Engine, execute SSH, own sessions, or introduce a Swift daemon or Swift CLI.
 - `zeus/crates/zeus-engine/manifests` is the Agent catalog. A missing manifest does not error at runtime — it silently downgrades that agent to a bare login shell. Never shrink the catalog.
 - Existing Rust behavior is the implementation baseline. Historical comments about Swift compatibility do not create new requirements.
 - The former Rust SSH + `tmux` transport has been deleted. Never reintroduce it as `legacy_tmux`, a feature flag, a migration path, or a runtime fallback. Missing, corrupt, unsupported, or capability-incompatible Helper artifacts must fail closed with a structured error; an unavailable packaged transport reports `remote_transport_unavailable`.
@@ -43,6 +44,7 @@ The Rust toolchain is pinned by `zeus/rust-toolchain.toml` to Rust 1.95.0, editi
 - Use exactly one independent Holder process and Unix socket per Session; do not add a multi-session Zeus Supervisor to the current baseline.
 - A Holder may spawn one minimal liveness guard for its Agent process group. The guard may only wait for Holder pipe closure and kill that one process group; it must not own a PTY, socket, state, or orchestration.
 - The app and client must verify the local Engine's explicit Rust identity during `Hello`; fail closed on missing, old, or unknown daemon identities.
+- The iOS Companion must verify the configured HTTPS origin and server ID during pairing and Hello, store tokens in Keychain, and never put authentication material in URLs, logs, UserDefaults, or WebSocket query parameters.
 - Agent manifests used by the Rust Engine are Rust-owned resources under `zeus-engine`; remote launch must not load Swift resource bundles or fall back to a Swift Holder.
 - Share terminal parsing through a minimal `zeus-terminal-state` crate; do not make `zeus-remote` depend on the full Engine or create a second parser implementation.
 - PTY reads must never block on the attached client. Bound the connection queue; when it falls behind, discard stale diffs and reseed it with a Full Snapshot.

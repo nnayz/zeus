@@ -5,6 +5,10 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use zeus_proto::{AgentKind, ProjectId, SessionId};
 
+use super::recipes::{
+    CURRENT_RECIPES_VERSION, LaunchRecipe, deserialize_launch_recipes, legacy_recipes_version,
+};
+
 const DEFAULT_THEME: &str = "zeus-dark";
 const CURRENT_LAYOUT_VERSION: u8 = 1;
 
@@ -61,14 +65,17 @@ pub enum LineageView {
 /// four pre-catalog enum spellings are accepted forever because prefs survive
 /// upgrades; new saves use the canonical manifest ids (for example
 /// `"claude-code"` and `"opencode"`).
-fn serialize_default_agent<S>(agent: &AgentKind, serializer: S) -> Result<S::Ok, S::Error>
+pub(crate) fn serialize_preference_agent<S>(
+    agent: &AgentKind,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
 {
     serializer.serialize_str(agent.id())
 }
 
-fn deserialize_default_agent<'de, D>(deserializer: D) -> Result<AgentKind, D::Error>
+pub(crate) fn deserialize_preference_agent<'de, D>(deserializer: D) -> Result<AgentKind, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -80,8 +87,8 @@ where
 #[serde(default, rename_all = "camelCase")]
 pub struct Prefs {
     #[serde(
-        serialize_with = "serialize_default_agent",
-        deserialize_with = "deserialize_default_agent"
+        serialize_with = "serialize_preference_agent",
+        deserialize_with = "deserialize_preference_agent"
     )]
     pub default_agent: AgentKind,
     /// Persistent destination for global new-session shortcuts. `None` means
@@ -148,6 +155,13 @@ pub struct Prefs {
     pub last_active_workspace: Option<ProjectId>,
     /// Session that should regain focus after the daemon's initial hydrate.
     pub last_selected_session: Option<SessionId>,
+    /// Schema version for [`Self::launch_recipes`]. Missing values deserialize
+    /// as the legacy version so older preference files still load.
+    #[serde(default = "legacy_recipes_version")]
+    pub launch_recipes_version: u8,
+    /// Saved New Agent configurations, in display order.
+    #[serde(default, deserialize_with = "deserialize_launch_recipes")]
+    pub launch_recipes: Vec<LaunchRecipe>,
 }
 
 impl Default for Prefs {
@@ -187,6 +201,8 @@ impl Default for Prefs {
             sidebar_expanded_archives: Vec::new(),
             last_active_workspace: None,
             last_selected_session: None,
+            launch_recipes_version: CURRENT_RECIPES_VERSION,
+            launch_recipes: Vec::new(),
         }
     }
 }
@@ -291,6 +307,10 @@ impl Prefs {
         if self.terminal_theme.is_empty() {
             self.terminal_theme = DEFAULT_THEME.to_owned();
         }
+        self.launch_recipes.retain(LaunchRecipe::is_well_formed);
+        if self.launch_recipes_version < CURRENT_RECIPES_VERSION {
+            self.launch_recipes_version = CURRENT_RECIPES_VERSION;
+        }
     }
 }
 
@@ -366,5 +386,45 @@ mod tests {
 
         assert_eq!(prefs.sidebar_width, 276.0);
         assert_eq!(prefs.inspector_width, 512.0);
+    }
+
+    #[test]
+    fn launch_recipes_are_optional_for_older_preferences() {
+        let restored: Prefs =
+            serde_json::from_str(r#"{"lastSelectedSession":"session-a"}"#).expect("legacy prefs");
+        assert!(restored.launch_recipes.is_empty());
+        assert_eq!(restored.launch_recipes_version, 0);
+    }
+
+    #[test]
+    fn launch_recipes_survive_round_trip_and_drop_malformed_entries() {
+        let restored: Prefs = serde_json::from_str(
+            r#"{
+                "launchRecipesVersion": 1,
+                "launchRecipes": [
+                    {
+                        "id": "recipe-1",
+                        "name": "Review this PR",
+                        "agent": "claude-code",
+                        "project": {"kind": "project", "id": "zeus"},
+                        "initialPrompt": "review it"
+                    },
+                    {"id": "", "name": "broken"},
+                    7
+                ]
+            }"#,
+        )
+        .expect("recipes");
+        assert_eq!(restored.launch_recipes.len(), 1);
+        assert_eq!(restored.launch_recipes[0].name, "Review this PR");
+        assert_eq!(
+            restored.launch_recipes[0].agent,
+            zeus_proto::AgentKind::CLAUDE_CODE
+        );
+
+        let encoded = serde_json::to_value(&restored).expect("encode");
+        assert_eq!(encoded["launchRecipesVersion"], 1);
+        assert_eq!(encoded["launchRecipes"][0]["agent"], "claude-code");
+        assert_eq!(encoded["launchRecipes"][0]["project"]["kind"], "project");
     }
 }

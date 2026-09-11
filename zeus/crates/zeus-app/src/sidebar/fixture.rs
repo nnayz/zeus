@@ -5,7 +5,9 @@ use zeus_proto::{
     SessionListResult, SessionRecord, SessionStatus, TitleSource,
 };
 
-use crate::store::{InspectorTab, Prefs, SessionStore};
+use crate::store::{
+    InspectorTab, LaunchRecipe, Prefs, RecipeProject, RecipeWorktree, SessionStore,
+};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PreviewScenario {
@@ -396,6 +398,7 @@ tokio::spawn(async move { clone_repository(request).await });
             sidebar_expanded_archives: vec![settings.id.clone()],
             inspector_tab: InspectorTab::Changes,
             inspector_word_wrap: true,
+            launch_recipes: preview_launch_recipes(&zeus.id),
             ..Prefs::default()
         };
         prefs.normalize();
@@ -420,8 +423,67 @@ tokio::spawn(async move { clone_repository(request).await });
         if let Some(id) = self.selected_session_id {
             store.select(id);
         }
+        store.set_hosts(vec![zeus_proto::HostEntry {
+            id: "forge".into(),
+            name: Some("Forge".into()),
+            ssh: "preview@forge".into(),
+            default_cwd: Some("~/code".into()),
+            node: None,
+        }]);
         store
     }
+}
+
+fn preview_launch_recipes(zeus: &ProjectId) -> Vec<LaunchRecipe> {
+    vec![
+        LaunchRecipe {
+            id: "preview-recipe-review".into(),
+            name: "Review this PR".into(),
+            agent: AgentKind::CLAUDE_CODE,
+            project: RecipeProject::Project { id: zeus.clone() },
+            host: None,
+            worktree: None,
+            initial_prompt: "Review the open pull request and leave concrete comments.".into(),
+            title: Some("PR review".into()),
+        },
+        LaunchRecipe {
+            id: "preview-recipe-worktree".into(),
+            name: "Investigate a bug in a fresh worktree".into(),
+            agent: AgentKind::CODEX,
+            project: RecipeProject::Project { id: zeus.clone() },
+            host: None,
+            worktree: Some(RecipeWorktree {
+                create: true,
+                branch: Some("bug/{name}".into()),
+            }),
+            initial_prompt: "Reproduce the failing test and isolate the regression.".into(),
+            title: Some("Bug investigation".into()),
+        },
+        LaunchRecipe {
+            id: "preview-recipe-remote".into(),
+            name: "Fix failing tests remotely".into(),
+            agent: AgentKind::CLAUDE_CODE,
+            project: RecipeProject::Path {
+                path: "~/src/zeus".into(),
+            },
+            host: Some("forge".into()),
+            worktree: None,
+            initial_prompt: "Fix the failing tests on this host.".into(),
+            title: Some("Remote test fix".into()),
+        },
+        LaunchRecipe {
+            id: "preview-recipe-missing".into(),
+            name: "Audit performance".into(),
+            agent: AgentKind::CLAUDE_CODE,
+            project: RecipeProject::Project {
+                id: ProjectId::new("preview-gone"),
+            },
+            host: None,
+            worktree: None,
+            initial_prompt: "Profile the hot path and report the top three costs.".into(),
+            title: Some("Performance audit".into()),
+        },
+    ]
 }
 
 fn project(id: &str, root: &str, name: &str) -> Project {
@@ -557,6 +619,7 @@ mod tests {
         assert_eq!(fixture.prefs.sidebar_expanded_archives.len(), 1);
         assert_eq!(fixture.prefs.inspector_tab, InspectorTab::Changes);
         assert!(fixture.prefs.inspector_word_wrap);
+        assert_eq!(fixture.prefs.launch_recipes.len(), 4);
     }
 
     #[test]

@@ -2,6 +2,7 @@ mod agent_catalog;
 mod app_theme;
 mod code_intelligence;
 mod code_viewer;
+mod composer;
 #[cfg(unix)]
 mod daemon_launch;
 mod dev_build;
@@ -13,6 +14,7 @@ mod git_review;
 pub mod history;
 mod image_attachment;
 mod inspector;
+mod launcher;
 pub mod markdown;
 mod markdown_view;
 pub mod navigation;

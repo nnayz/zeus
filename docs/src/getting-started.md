@@ -23,8 +23,9 @@ and notarized release ships. See [Updates](updates.md).
 1. Open Zeus. If no project is open, use **Open…** (`⌘O`) or **Quick Open**
    (`⌘P`) and pick a repository from the Projects & Folders section.
 2. Press `⌘N`. Choose Claude Code, Codex, or whatever is installed, type the
-   first prompt, and press Return. You can also press `⌘T` to launch your
-   default agent in the current project with no prompt.
+   first prompt, and press Return. Save that setup with `⌘S` if you will run
+   it again — recipes relaunch through the same spawn path. You can also press
+   `⌘T` to launch your default agent in the current project with no prompt.
 3. Work in the embedded terminal. The sidebar row tells you whether that agent
    is working, waiting for you, or done. You do not have to keep reading the
    PTY.
@@ -86,6 +87,13 @@ binaries show an install hint instead of a dead shortcut.
   [Remote nodes](remote-nodes.md).
 
 Prefer a dedicated non-admin account on the remote machine.
+
+## Use Zeus from iPhone
+
+The native iOS Companion is a separate SwiftUI target in this repository. It
+connects to the Companion HTTPS gateway on the same private network; it does
+not connect to the Engine or to SSH directly. See [iOS Companion](ios-companion.md)
+for setup and pairing.
 
 ## Diagnostics
 

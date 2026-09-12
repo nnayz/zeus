@@ -13,7 +13,7 @@
 
 <article class="editorial markdown-content space-y-4">
   <header>
-    <p class="text-[28px] leading-[34px] font-semibold tracking-[-0.03em]">v{release.version}</p>
+    <p class="text-[22px] leading-[30px] font-semibold">v{release.version}</p>
     <p class="mt-1 text-[13px] leading-5 text-muted">
       <time datetime={release.date}>{formatDate(release.date)}</time>
       {#if release.unsigned}

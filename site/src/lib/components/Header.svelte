@@ -1,19 +1,24 @@
 <script lang="ts">
   import { base } from '$app/paths';
   import GitHubStars from '$lib/components/GitHubStars.svelte';
-  import Wordmark from '$lib/components/Wordmark.svelte';
-  import { GITHUB, DOCS } from '$lib/releases';
+  import Mark from '$lib/components/Mark.svelte';
+  import { DOCS, GITHUB, latestRelease } from '$lib/releases';
 
   let { githubStars = null }: { githubStars?: number | null } = $props();
+  const latest = latestRelease();
 </script>
 
 <header class="site-header">
-  <Wordmark />
+  <a href="{base}/" class="wordmark" aria-label="Zeus">
+    <Mark />
+  </a>
   <nav class="site-nav">
-    <a href="{base}/install/">Install</a>
-    <a href="{base}/releases/" class="nav-wide">Releases</a>
+    <a href={DOCS} rel="external">Docs</a>
+    <a href="{base}/releases/">Releases</a>
     <a href="{base}/security/" class="nav-wide">Security</a>
-    <a href={DOCS} rel="external" class="nav-wide">Docs</a>
+    <a href={GITHUB} rel="external">GitHub</a>
+  </nav>
+  <div class="site-header__end">
     <a href={GITHUB} class="site-nav__github" rel="external">
       <svg class="size-4" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
         <path
@@ -23,5 +28,6 @@
       <span class="sr-only">GitHub</span>
       <GitHubStars initial={githubStars} />
     </a>
-  </nav>
+    <a class="btn btn--header" href={latest.dmg}>Download for Mac</a>
+  </div>
 </header>

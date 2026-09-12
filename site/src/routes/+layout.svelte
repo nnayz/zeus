@@ -7,9 +7,9 @@
   let { children, data }: LayoutProps = $props();
 </script>
 
-<div class="site">
+<div class="page">
   <Header githubStars={data.githubStars} />
-  <div class="site-main">
+  <div class="page-body">
     {@render children()}
   </div>
   <Footer />

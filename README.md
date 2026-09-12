@@ -78,6 +78,8 @@ a basic terminal and reports only whether it is running or has exited.
 
 ## How it is assembled
 
+![Zeus architecture](docs/src/images/zeus-architecture.svg)
+
 The desktop and session machinery are implemented in Rust:
 
 - **Desktop application:** `zeus`, built with

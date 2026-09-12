@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Zeus lightning icon dark mode">
+  <rect width="512" height="512" fill="#000000"/>
+
+  <g fill="none" stroke="#FFFFFF" stroke-width="6"
+     stroke-linecap="round" stroke-linejoin="round">
+
+    <!-- Outer rounded square, interrupted by the lightning at the top -->
+    <path d="M152 88 H208"/>
+
+    <path d="M355 88 H360
+             C401.97 88 436 122.03 436 164
+             V348
+             C436 389.97 401.97 424 360 424
+             H152
+             C110.03 424 76 389.97 76 348
+             V164
+             C76 122.03 110.03 88 152 88"/>
+
+    <!-- Lightning bolt -->
+    <path d="M208 88
+             L190 176
+             L232 170
+             L204 306
+             L255 290
+             L238 382
+             L330 221
+             L276 221
+             L326 142
+             L280 154
+             L318 88
+             L355 88"/>
+  </g>
+</svg>

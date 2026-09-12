@@ -1,5 +1,6 @@
 <div align="center">
-    <h1><img src="docs/src/images/pixel-art-zeus.png" alt="Zeus" width="300"></h1>
+  <img src="docs/src/images/zeus-logo.svg" alt="Zeus" width="160">
+  <h1>Zeus</h1>
 </div>
 
 [![CI](https://github.com/nnayz/zeus/actions/workflows/ci.yml/badge.svg)](https://github.com/nnayz/zeus/actions/workflows/ci.yml)

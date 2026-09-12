@@ -22,82 +22,28 @@ trap cleanup EXIT
 
 mkdir -p "${assets_dir}" "${iconset_dir}" "${dev_iconset_dir}"
 
+logo_svg="$(cd "${workspace_dir}/.." && pwd)/docs/src/images/zeus-logo.svg"
+if [[ ! -f "${logo_svg}" ]]; then
+    echo "missing Zeus logo SVG at ${logo_svg}" >&2
+    exit 1
+fi
+
 SWIFT_MODULECACHE_PATH="${work_dir}/swift-module-cache" \
 CLANG_MODULE_CACHE_PATH="${work_dir}/clang-module-cache" \
-swift - "${base_png}" <<'SWIFT'
+swift - "${logo_svg}" "${base_png}" <<'SWIFT'
 import AppKit
 
-let canvas = NSSize(width: 1024, height: 1024)
-let outputURL = URL(fileURLWithPath: CommandLine.arguments[1])
-
-func color(_ hex: UInt32, alpha: CGFloat = 1) -> NSColor {
-    NSColor(
-        srgbRed: CGFloat((hex >> 16) & 0xff) / 255,
-        green: CGFloat((hex >> 8) & 0xff) / 255,
-        blue: CGFloat(hex & 0xff) / 255,
-        alpha: alpha
-    )
+let svgURL = URL(fileURLWithPath: CommandLine.arguments[1])
+let outputURL = URL(fileURLWithPath: CommandLine.arguments[2])
+guard let source = NSImage(contentsOf: svgURL) else {
+    fatalError("could not read the Zeus logo SVG")
 }
 
-let image = NSImage(size: canvas, flipped: false) { _ in
+let canvas = NSSize(width: 1024, height: 1024)
+let image = NSImage(size: canvas, flipped: false) { bounds in
     NSGraphicsContext.current?.imageInterpolation = .high
-
-    let shadow = NSBezierPath(
-        roundedRect: NSRect(x: 74, y: 54, width: 876, height: 876),
-        xRadius: 194,
-        yRadius: 194
-    )
-    color(0x05070b, alpha: 0.40).setFill()
-    shadow.fill()
-
-    let tile = NSBezierPath(
-        roundedRect: NSRect(x: 64, y: 72, width: 896, height: 896),
-        xRadius: 198,
-        yRadius: 198
-    )
-    tile.addClip()
-    NSGradient(
-        starting: color(0x252a37),
-        ending: color(0x10131b)
-    )!.draw(in: tile, angle: -90)
-
-    let topSheen = NSBezierPath(
-        roundedRect: NSRect(x: 86, y: 540, width: 852, height: 398),
-        xRadius: 170,
-        yRadius: 170
-    )
-    color(0xffffff, alpha: 0.025).setFill()
-    topSheen.fill()
-
-    let innerBorder = NSBezierPath(
-        roundedRect: NSRect(x: 76, y: 84, width: 872, height: 872),
-        xRadius: 188,
-        yRadius: 188
-    )
-    innerBorder.lineWidth = 6
-    color(0xffffff, alpha: 0.07).setStroke()
-    innerBorder.stroke()
-
-    let motif = color(0xd97757)
-
-    let chevron = NSBezierPath()
-    chevron.move(to: NSPoint(x: 326, y: 650))
-    chevron.line(to: NSPoint(x: 508, y: 512))
-    chevron.line(to: NSPoint(x: 326, y: 374))
-    chevron.lineWidth = 70
-    chevron.lineCapStyle = .round
-    chevron.lineJoinStyle = .round
-    motif.setStroke()
-    chevron.stroke()
-
-    let cursor = NSBezierPath()
-    cursor.move(to: NSPoint(x: 558, y: 378))
-    cursor.line(to: NSPoint(x: 738, y: 378))
-    cursor.lineWidth = 62
-    cursor.lineCapStyle = .round
-    color(0xd97757, alpha: 0.92).setStroke()
-    cursor.stroke()
-
+    NSGraphicsContext.current?.shouldAntialias = true
+    source.draw(in: bounds)
     return true
 }
 

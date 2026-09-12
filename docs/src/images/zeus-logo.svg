@@ -1,33 +1,38 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Zeus lightning icon dark mode">
-  <rect width="512" height="512" fill="#000000"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Zeus">
+  <!-- Black lives only inside the rounded square; corners of the canvas stay empty. -->
+  <path fill="#000000" d="M110.4 4
+           H401.6
+           C460.36 4 508 62.76 508 110.4
+           V401.6
+           C508 460.36 460.36 508 401.6 508
+           H110.4
+           C51.64 508 4 460.36 4 401.6
+           V110.4
+           C4 62.76 51.64 4 110.4 4
+           Z"/>
 
-  <g fill="none" stroke="#FFFFFF" stroke-width="6"
-     stroke-linecap="round" stroke-linejoin="round">
-
-    <!-- Outer rounded square, interrupted by the lightning at the top -->
-    <path d="M152 88 H208"/>
-
-    <path d="M355 88 H360
-             C401.97 88 436 122.03 436 164
-             V348
-             C436 389.97 401.97 424 360 424
-             H152
-             C110.03 424 76 389.97 76 348
-             V164
-             C76 122.03 110.03 88 152 88"/>
-
-    <!-- Lightning bolt -->
-    <path d="M208 88
-             L190 176
-             L232 170
-             L204 306
-             L255 290
-             L238 382
-             L330 221
-             L276 221
-             L326 142
-             L280 154
-             L318 88
-             L355 88"/>
-  </g>
+  <path fill="none" stroke="#FFFFFF" stroke-width="8"
+        stroke-linecap="round" stroke-linejoin="round"
+        d="M110.4 4
+           H188.8
+           L163.6 136
+           L222.4 127
+           L183.2 331
+           L254.6 307
+           L230.8 445
+           L359.6 203.5
+           L284 203.5
+           L354 85
+           L289.6 103
+           L342.8 4
+           L394.6 4
+           H401.6
+           C460.36 4 508 62.76 508 110.4
+           V401.6
+           C508 460.36 460.36 508 401.6 508
+           H110.4
+           C51.64 508 4 460.36 4 401.6
+           V110.4
+           C4 62.76 51.64 4 110.4 4
+           Z"/>
 </svg>

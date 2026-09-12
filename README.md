@@ -1,10 +1,11 @@
 <div align="center">
-  <img src="docs/src/images/zeus-logo.svg" alt="Zeus" width="160">
-  <h1>Zeus</h1>
-</div>
+  <img src="docs/src/images/zeus-header.svg" width="100%" alt="Zeus: A Native Command Center for Coding Agents">
 
-[![CI](https://github.com/nnayz/zeus/actions/workflows/ci.yml/badge.svg)](https://github.com/nnayz/zeus/actions/workflows/ci.yml)
-[![GitHub release](https://img.shields.io/github/v/release/nnayz/zeus)](https://github.com/nnayz/zeus/releases/latest)
+  <p>
+    <a href="https://github.com/nnayz/zeus/actions/workflows/ci.yml"><img src="https://github.com/nnayz/zeus/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+    <a href="https://github.com/nnayz/zeus/releases/latest"><img src="https://img.shields.io/github/v/release/nnayz/zeus" alt="GitHub release"></a>
+  </p>
+</div>
 
 Zeus is a native macOS command center for coding agents. It gives Claude Code,
 Codex, Cursor, Grok, OpenCode, Gemini, and ordinary shells their own live

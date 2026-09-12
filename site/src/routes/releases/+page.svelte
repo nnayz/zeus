@@ -7,4 +7,4 @@
   <meta name="description" content="Zeus release notes and download archive." />
 </svelte:head>
 
-<article class="markdown-content space-y-4"><Releases /></article>
+<article class="editorial markdown-content space-y-4"><Releases /></article>

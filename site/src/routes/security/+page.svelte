@@ -10,4 +10,4 @@
   />
 </svelte:head>
 
-<article class="markdown-content space-y-4"><Security /></article>
+<article class="editorial markdown-content space-y-4"><Security /></article>

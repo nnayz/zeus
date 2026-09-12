@@ -1,0 +1,220 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2320 1020" role="img" aria-label="Zeus architecture: desktop, CLI, and iOS clients talk to the local Engine; the Engine attaches local and remote PTY holders that run coding agents">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8.5" refY="5"
+            markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0.6L9 5L0 9.4z" fill="#FFFFFF"/>
+    </marker>
+    <style>
+      .panel { fill:#1A1A1D; stroke:#FFF; stroke-width:2.5; }
+      .chip { fill:#0E0E10; stroke:#3F3F46; stroke-width:2; }
+      .group { fill:none; stroke:#FFF; stroke-width:2.5; stroke-dasharray:10 9; }
+      .title { fill:#FFF; font:600 32px Inter,ui-sans-serif,system-ui,sans-serif; }
+      .card-title { fill:#FFF; font:600 26px Inter,ui-sans-serif,system-ui,sans-serif; }
+      .label { fill:#FFF; font:500 20px Inter,ui-sans-serif,system-ui,sans-serif; }
+      .muted { fill:#A1A1AA; font:400 17px Inter,ui-sans-serif,system-ui,sans-serif; }
+      .edge { fill:#A1A1AA; font:500 16px Inter,ui-sans-serif,system-ui,sans-serif; }
+      .flow { fill:none; stroke:#FFF; stroke-width:2.5; }
+      .flow-dashed { fill:none; stroke:#FFF; stroke-width:2.5; stroke-dasharray:8 7; }
+      .icon { fill:none; stroke:#FFF; stroke-width:2; stroke-linecap:round; stroke-linejoin:round; }
+    </style>
+  </defs>
+
+  <rect id="background" width="2320" height="1020" fill="#0E0E10"/>
+
+  <g id="title">
+    <text class="title" x="1160" y="64" text-anchor="middle">Zeus Architecture</text>
+    <text class="muted" x="1160" y="98" text-anchor="middle">macOS command center for coding agents</text>
+  </g>
+
+  <g id="clients">
+    <g id="desktop">
+      <rect class="panel" x="60" y="140" width="700" height="150" rx="14"/>
+      <g class="icon" transform="translate(84 162)">
+        <rect x="1" y="2" width="30" height="20" rx="3"/>
+        <path d="M10 30h12M16 22v8"/>
+      </g>
+      <text class="card-title" x="128" y="186">Desktop</text>
+      <rect class="chip" x="84" y="228" width="96" height="44" rx="10"/>
+      <text class="label" x="132" y="250" text-anchor="middle" dominant-baseline="middle">GPUI</text>
+      <rect class="chip" x="192" y="228" width="140" height="44" rx="10"/>
+      <text class="label" x="262" y="250" text-anchor="middle" dominant-baseline="middle">zeus-term</text>
+      <rect class="chip" x="344" y="228" width="156" height="44" rx="10"/>
+      <text class="label" x="422" y="250" text-anchor="middle" dominant-baseline="middle">zeus-client</text>
+      <rect class="chip" x="512" y="228" width="112" height="44" rx="10"/>
+      <text class="label" x="568" y="250" text-anchor="middle" dominant-baseline="middle">zeus-ui</text>
+    </g>
+
+    <g id="cli">
+      <rect class="panel" x="784" y="140" width="580" height="150" rx="14"/>
+      <g class="icon" transform="translate(808 162)">
+        <rect x="1" y="3" width="30" height="26" rx="4"/>
+        <path d="M8 12l6 4-6 4M16 22h8"/>
+      </g>
+      <text class="card-title" x="852" y="186">CLI</text>
+      <rect class="chip" x="808" y="228" width="90" height="44" rx="10"/>
+      <text class="label" x="853" y="250" text-anchor="middle" dominant-baseline="middle">MCP</text>
+      <rect class="chip" x="910" y="228" width="100" height="44" rx="10"/>
+      <text class="label" x="960" y="250" text-anchor="middle" dominant-baseline="middle">hooks</text>
+      <rect class="chip" x="1022" y="228" width="120" height="44" rx="10"/>
+      <text class="label" x="1082" y="250" text-anchor="middle" dominant-baseline="middle">session</text>
+    </g>
+
+    <g id="ios">
+      <rect class="panel" x="1420" y="140" width="840" height="150" rx="14"/>
+      <g class="icon" transform="translate(1444 162)">
+        <rect x="6" y="1" width="20" height="30" rx="4"/>
+        <path d="M14 26h4"/>
+      </g>
+      <text class="card-title" x="1488" y="186">iOS Companion</text>
+      <rect class="chip" x="1444" y="228" width="120" height="44" rx="10"/>
+      <text class="label" x="1504" y="250" text-anchor="middle" dominant-baseline="middle">SwiftUI</text>
+      <rect class="chip" x="1576" y="228" width="132" height="44" rx="10"/>
+      <text class="label" x="1642" y="250" text-anchor="middle" dominant-baseline="middle">Keychain</text>
+      <rect class="chip" x="1720" y="228" width="100" height="44" rx="10"/>
+      <text class="label" x="1770" y="250" text-anchor="middle" dominant-baseline="middle">HTTPS</text>
+    </g>
+  </g>
+
+  <g id="core-runtime">
+    <g id="engine">
+      <rect class="panel" x="60" y="350" width="1304" height="150" rx="14"/>
+      <g class="icon" transform="translate(84 372)">
+        <path d="M16 2l12 7v14l-12 7L4 23V9z"/>
+        <path d="M16 16v14M4 9l12 7 12-7"/>
+      </g>
+      <text class="card-title" x="128" y="396">Engine</text>
+      <rect class="chip" x="84" y="438" width="188" height="44" rx="10"/>
+      <text class="label" x="178" y="460" text-anchor="middle" dominant-baseline="middle">SessionRecord</text>
+      <rect class="chip" x="284" y="438" width="140" height="44" rx="10"/>
+      <text class="label" x="354" y="460" text-anchor="middle" dominant-baseline="middle">Manifests</text>
+      <rect class="chip" x="436" y="438" width="104" height="44" rx="10"/>
+      <text class="label" x="488" y="460" text-anchor="middle" dominant-baseline="middle">Status</text>
+      <rect class="chip" x="552" y="438" width="140" height="44" rx="10"/>
+      <text class="label" x="622" y="460" text-anchor="middle" dominant-baseline="middle">Worktrees</text>
+      <rect class="chip" x="704" y="438" width="140" height="44" rx="10"/>
+      <text class="label" x="774" y="460" text-anchor="middle" dominant-baseline="middle">Bootstrap</text>
+      <rect class="chip" x="856" y="438" width="168" height="44" rx="10"/>
+      <text class="label" x="940" y="460" text-anchor="middle" dominant-baseline="middle">Orchestration</text>
+    </g>
+
+    <g id="companion">
+      <rect class="panel" x="1420" y="350" width="840" height="150" rx="14"/>
+      <g class="icon" transform="translate(1444 372)">
+        <rect x="2" y="8" width="28" height="18" rx="3"/>
+        <path d="M10 8V6a6 6 0 0 1 12 0v2"/>
+      </g>
+      <text class="card-title" x="1488" y="396">Companion Gateway</text>
+      <rect class="chip" x="1444" y="438" width="100" height="44" rx="10"/>
+      <text class="label" x="1494" y="460" text-anchor="middle" dominant-baseline="middle">HTTPS</text>
+      <rect class="chip" x="1556" y="438" width="116" height="44" rx="10"/>
+      <text class="label" x="1614" y="460" text-anchor="middle" dominant-baseline="middle">Pairing</text>
+      <rect class="chip" x="1684" y="438" width="108" height="44" rx="10"/>
+      <text class="label" x="1738" y="460" text-anchor="middle" dominant-baseline="middle">Screen</text>
+      <rect class="chip" x="1804" y="438" width="168" height="44" rx="10"/>
+      <text class="label" x="1888" y="460" text-anchor="middle" dominant-baseline="middle">Control lease</text>
+    </g>
+  </g>
+
+  <g id="execution">
+    <g id="local-holder">
+      <rect class="panel" x="60" y="560" width="660" height="150" rx="14"/>
+      <g class="icon" transform="translate(84 582)">
+        <rect x="2" y="6" width="28" height="22" rx="3"/>
+        <path d="M8 6V4h16v2M16 14v6"/>
+      </g>
+      <text class="card-title" x="128" y="606">Local Holder</text>
+      <rect class="chip" x="84" y="648" width="88" height="44" rx="10"/>
+      <text class="label" x="128" y="670" text-anchor="middle" dominant-baseline="middle">PTY</text>
+      <rect class="chip" x="184" y="648" width="148" height="44" rx="10"/>
+      <text class="label" x="258" y="670" text-anchor="middle" dominant-baseline="middle">Unix socket</text>
+      <rect class="chip" x="344" y="648" width="176" height="44" rx="10"/>
+      <text class="label" x="432" y="670" text-anchor="middle" dominant-baseline="middle">terminal-state</text>
+    </g>
+
+    <g id="remote">
+      <rect class="group" x="800" y="536" width="1460" height="190" rx="18"/>
+      <text class="muted" x="1720" y="528">Remote host</text>
+
+      <g id="ssh">
+        <rect class="panel" x="820" y="560" width="340" height="150" rx="14"/>
+        <g class="icon" transform="translate(844 582)">
+          <circle cx="12" cy="14" r="6"/>
+          <path d="M18 14h12M24 14v6M30 14v8"/>
+        </g>
+        <text class="card-title" x="888" y="606">SSH</text>
+        <rect class="chip" x="844" y="648" width="108" height="44" rx="10"/>
+        <text class="label" x="898" y="670" text-anchor="middle" dominant-baseline="middle">ssh -T</text>
+        <rect class="chip" x="964" y="648" width="164" height="44" rx="10"/>
+        <text class="label" x="1046" y="670" text-anchor="middle" dominant-baseline="middle">byte transport</text>
+      </g>
+
+      <g id="remote-holder">
+        <rect class="panel" x="1200" y="560" width="1040" height="150" rx="14"/>
+        <g class="icon" transform="translate(1224 582)">
+          <rect x="2" y="6" width="28" height="22" rx="3"/>
+          <path d="M8 6V4h16v2M10 17h12"/>
+        </g>
+        <text class="card-title" x="1268" y="606">Remote Holder</text>
+        <rect class="chip" x="1224" y="648" width="88" height="44" rx="10"/>
+        <text class="label" x="1268" y="670" text-anchor="middle" dominant-baseline="middle">PTY</text>
+        <rect class="chip" x="1324" y="648" width="90" height="44" rx="10"/>
+        <text class="label" x="1369" y="670" text-anchor="middle" dominant-baseline="middle">Grid</text>
+        <rect class="chip" x="1426" y="648" width="100" height="44" rx="10"/>
+        <text class="label" x="1476" y="670" text-anchor="middle" dominant-baseline="middle">Lease</text>
+        <rect class="chip" x="1538" y="648" width="88" height="44" rx="10"/>
+        <text class="label" x="1582" y="670" text-anchor="middle" dominant-baseline="middle">UDS</text>
+        <rect class="chip" x="1638" y="648" width="176" height="44" rx="10"/>
+        <text class="label" x="1726" y="670" text-anchor="middle" dominant-baseline="middle">terminal-state</text>
+        <rect class="chip" x="1826" y="648" width="128" height="44" rx="10"/>
+        <text class="label" x="1890" y="670" text-anchor="middle" dominant-baseline="middle">Snapshot</text>
+      </g>
+    </g>
+  </g>
+
+  <g id="agents">
+    <rect class="panel" x="60" y="780" width="2200" height="150" rx="14"/>
+    <g class="icon" transform="translate(84 802)">
+      <circle cx="10" cy="12" r="6"/>
+      <circle cx="22" cy="12" r="6"/>
+      <circle cx="16" cy="22" r="6"/>
+    </g>
+    <text class="card-title" x="128" y="826">Agents</text>
+    <rect class="chip" x="280" y="868" width="148" height="44" rx="10"/>
+    <text class="label" x="354" y="890" text-anchor="middle" dominant-baseline="middle">Claude Code</text>
+    <rect class="chip" x="440" y="868" width="100" height="44" rx="10"/>
+    <text class="label" x="490" y="890" text-anchor="middle" dominant-baseline="middle">Codex</text>
+    <rect class="chip" x="552" y="868" width="108" height="44" rx="10"/>
+    <text class="label" x="606" y="890" text-anchor="middle" dominant-baseline="middle">Cursor</text>
+    <rect class="chip" x="672" y="868" width="96" height="44" rx="10"/>
+    <text class="label" x="720" y="890" text-anchor="middle" dominant-baseline="middle">Grok</text>
+    <rect class="chip" x="780" y="868" width="128" height="44" rx="10"/>
+    <text class="label" x="844" y="890" text-anchor="middle" dominant-baseline="middle">OpenCode</text>
+    <rect class="chip" x="920" y="868" width="112" height="44" rx="10"/>
+    <text class="label" x="976" y="890" text-anchor="middle" dominant-baseline="middle">Gemini</text>
+    <rect class="chip" x="1044" y="868" width="96" height="44" rx="10"/>
+    <text class="label" x="1092" y="890" text-anchor="middle" dominant-baseline="middle">Shell</text>
+  </g>
+
+  <g id="connectors">
+    <path class="flow" d="M390 290 V350" marker-end="url(#arrow)"/>
+    <path class="flow" d="M1074 290 V350" marker-end="url(#arrow)"/>
+    <path class="flow" d="M1840 290 V350" marker-end="url(#arrow)"/>
+    <path class="flow" d="M1420 425 H1364" marker-end="url(#arrow)"/>
+    <path class="flow" d="M390 500 V560" marker-end="url(#arrow)"/>
+    <path class="flow" d="M990 500 V560" marker-end="url(#arrow)"/>
+    <path class="flow" d="M1160 635 H1200" marker-end="url(#arrow)"/>
+    <path class="flow" d="M390 710 V780" marker-end="url(#arrow)"/>
+    <path class="flow" d="M1720 710 V780" marker-end="url(#arrow)"/>
+    <path class="flow-dashed" d="M760 780 V500" marker-end="url(#arrow)"/>
+
+    <text class="edge" x="1868" y="324">HTTPS</text>
+    <text class="edge" x="1288" y="418">zeus-client</text>
+    <text class="edge" x="1004" y="518">ssh -T</text>
+    <text class="edge" x="1164" y="622">Helper</text>
+    <text class="edge" x="408" y="752">PTY</text>
+    <text class="edge" x="1738" y="752">PTY</text>
+    <text class="edge" x="772" y="746">MCP</text>
+  </g>
+
+  <text class="muted" x="1160" y="992" text-anchor="middle">Holders own each PTY · Engine owns SessionRecord · SSH never owns the Agent PTY</text>
+</svg>

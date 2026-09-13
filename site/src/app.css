@@ -17,8 +17,8 @@
   html {
     color-scheme: dark;
     font-family: var(--font-sans);
-    font-size: 16px;
-    line-height: 26px;
+    font-size: 13px;
+    line-height: 20px;
     font-weight: 400;
     color: var(--color-text);
     background: var(--color-background);
@@ -54,7 +54,7 @@
 
   code {
     font-family: var(--font-mono);
-    font-size: 14px;
+    font-size: 12px;
   }
 }
 
@@ -94,7 +94,6 @@
   justify-self: center;
   gap: 24px;
   color: rgba(255, 255, 255, 0.5);
-  font-size: 13px;
   font-weight: 400;
 }
 
@@ -177,8 +176,6 @@
 .hero__lede {
   margin: 16px 0 0;
   color: rgba(255, 255, 255, 0.72);
-  font-size: 18px;
-  line-height: 28px;
 }
 
 .hero__actions {
@@ -192,7 +189,6 @@
 .hero__note {
   margin: 16px 0 0;
   color: rgba(255, 255, 255, 0.5);
-  font-size: 14px;
 }
 
 .hero__note a {
@@ -211,7 +207,7 @@
   padding: 0 20px;
   border: 1px solid transparent;
   border-radius: 999px;
-  font-size: 15px;
+  font-size: 13px;
   font-weight: 500;
   line-height: 1;
   text-decoration: none;
@@ -265,7 +261,6 @@
   max-width: 560px;
   margin: 56px auto 16px;
   color: rgba(255, 255, 255, 0.45);
-  font-size: 14px;
 }
 
 .features {
@@ -280,8 +275,6 @@
   position: relative;
   padding: 7px 0 7px 18px;
   color: rgba(255, 255, 255, 0.82);
-  font-size: 16px;
-  line-height: 26px;
 }
 
 .features li::before {
@@ -428,8 +421,8 @@ footer a {
   border-radius: 8px;
   padding: 16px;
   font-family: var(--font-mono);
-  font-size: 14px;
-  line-height: 22px;
+  font-size: 12px;
+  line-height: 20px;
   overflow-x: auto;
 }
 
@@ -456,7 +449,7 @@ footer a {
   border-radius: 6px;
   border: 1px solid var(--color-border);
   background: var(--color-surface-raised);
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 500;
   color: var(--color-text);
   cursor: pointer;
@@ -521,8 +514,6 @@ footer a {
 
 .release-row__date {
   color: var(--color-muted);
-  font-size: 14px;
-  line-height: 22px;
   white-space: nowrap;
 }
 

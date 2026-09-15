@@ -12,6 +12,10 @@ renderer, shared design system, session store, usage accounting, and
 window/sidebar shell. [`PLAN.md`](PLAN.md) is the historical record of the
 port from the retired Swift client.
 
+For the proposed local closed-lid execution investigation in #70, see
+[CLOSED_LID_PLAN.md](CLOSED_LID_PLAN.md). This is an exploration plan, not approval
+to install a privileged helper.
+
 ## Engine
 
 Sessions are owned by *holder* processes, not the Engine: the Engine can

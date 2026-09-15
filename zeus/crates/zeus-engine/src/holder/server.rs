@@ -50,6 +50,8 @@ struct Shared {
     incarnation: String,
     /// Captured once after spawn; paired with the pid to reject pid reuse.
     child_start_sec: Option<i64>,
+    /// Kernel birth identity of this Holder process, captured once.
+    holder_start_sec: Option<i64>,
     finished: AtomicBool,
     listen_fd: AtomicI32,
 }
@@ -97,6 +99,7 @@ impl HolderServer {
         let pty = Pty::spawn(&pty_spec).map_err(|error| HolderError::io("PTY spawn", error))?;
         let child_pid = pty.pid() as i32;
         let child_start_sec = process_tree::start_time(child_pid);
+        let holder_start_sec = process_tree::start_time(std::process::id() as i32);
         let incarnation = random_incarnation()?;
 
         // Nonblocking master: the reader drains in bursts, and writes bound
@@ -124,6 +127,7 @@ impl HolderServer {
             epoch_offset,
             incarnation,
             child_start_sec,
+            holder_start_sec,
             finished: AtomicBool::new(false),
             listen_fd: AtomicI32::new(listen_fd),
             spec,
@@ -401,6 +405,8 @@ fn current_stat(shared: &Shared) -> HolderStat {
         epoch_offset: Some(shared.epoch_offset),
         incarnation: Some(shared.incarnation.clone()),
         child_start_sec: shared.child_start_sec,
+        holder_pid: Some(std::process::id() as i32),
+        holder_start_sec: shared.holder_start_sec,
     }
 }
 

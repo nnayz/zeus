@@ -86,9 +86,13 @@ fn a_holder_owns_a_session_end_to_end() {
     assert_eq!(incarnation.len(), 32);
     assert!(incarnation.bytes().all(|byte| byte.is_ascii_hexdigit()));
     assert!(stat.child_start_sec.is_some(), "child birth identity");
+    assert_eq!(stat.holder_pid, Some(std::process::id() as i32));
+    assert!(stat.holder_start_sec.is_some(), "Holder birth identity");
     let same_execution = client.stat().expect("repeat stat");
     assert_eq!(same_execution.incarnation.as_deref(), Some(incarnation));
     assert_eq!(same_execution.child_start_sec, stat.child_start_sec);
+    assert_eq!(same_execution.holder_pid, stat.holder_pid);
+    assert_eq!(same_execution.holder_start_sec, stat.holder_start_sec);
     assert_eq!(
         stat.epoch_offset,
         Some(0),

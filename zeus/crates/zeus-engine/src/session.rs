@@ -118,6 +118,8 @@ pub struct SessionView {
 pub struct LocalExecutionIdentity {
     pub session_id: String,
     pub holder_incarnation: String,
+    pub holder_pid: i32,
+    pub holder_start_sec: i64,
     pub child_pid: i32,
     pub child_start_sec: i64,
 }
@@ -1084,9 +1086,12 @@ impl Session {
         let stat = client.stat().ok()?;
         let incarnation = stat.incarnation?;
         let child_start_sec = stat.child_start_sec?;
+        let holder_pid = stat.holder_pid?;
+        let holder_start_sec = stat.holder_start_sec?;
         let known_pid = self.shared.child_pid.load(Ordering::SeqCst);
         if !stat.alive
             || stat.child_pid <= 1
+            || holder_pid <= 1
             || stat.child_pid != known_pid
             || incarnation.len() != 32
             || !incarnation.bytes().all(|byte| byte.is_ascii_hexdigit())
@@ -1096,6 +1101,8 @@ impl Session {
         Some(LocalExecutionIdentity {
             session_id: self.shared.id.clone(),
             holder_incarnation: incarnation,
+            holder_pid,
+            holder_start_sec,
             child_pid: stat.child_pid,
             child_start_sec,
         })

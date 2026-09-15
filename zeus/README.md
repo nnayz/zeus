@@ -16,7 +16,8 @@ For the proposed local closed-lid execution investigation in #70, see
 [CLOSED_LID_PLAN.md](CLOSED_LID_PLAN.md). Its
 [decision record](CLOSED_LID_DECISIONS.md) and
 [threat model](CLOSED_LID_THREAT_MODEL.md) keep privileged work and shipment
-explicitly gated. This is an exploration, not approval to install a helper.
+explicitly gated. The [spike report](CLOSED_LID_SPIKE_REPORT.md) tracks completed
+and blocked evidence. This is an exploration, not approval to install a helper.
 
 ## Engine
 

@@ -12,7 +12,8 @@ Execution artifacts:
 - [decision record](CLOSED_LID_DECISIONS.md);
 - [threat model](CLOSED_LID_THREAT_MODEL.md);
 - [read-only SDK evidence](CLOSED_LID_EVIDENCE.md); and
-- [release/package spike](CLOSED_LID_RELEASE_SPIKE.md).
+- [release/package spike](CLOSED_LID_RELEASE_SPIKE.md); and
+- [current execution report](CLOSED_LID_SPIKE_REPORT.md).
 
 The goal is explicit, per-session permission for selected **local** sessions to
 make progress while a MacBook lid is closed. Process survival in suspended RAM

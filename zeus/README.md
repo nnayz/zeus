@@ -13,8 +13,10 @@ window/sidebar shell. [`PLAN.md`](PLAN.md) is the historical record of the
 port from the retired Swift client.
 
 For the proposed local closed-lid execution investigation in #70, see
-[CLOSED_LID_PLAN.md](CLOSED_LID_PLAN.md). This is an exploration plan, not approval
-to install a privileged helper.
+[CLOSED_LID_PLAN.md](CLOSED_LID_PLAN.md). Its
+[decision record](CLOSED_LID_DECISIONS.md) and
+[threat model](CLOSED_LID_THREAT_MODEL.md) keep privileged work and shipment
+explicitly gated. This is an exploration, not approval to install a helper.
 
 ## Engine
 

@@ -50,8 +50,10 @@ struct Shared {
     incarnation: String,
     /// Captured once after spawn; paired with the pid to reject pid reuse.
     child_start_sec: Option<i64>,
+    child_birth_token: Option<u64>,
     /// Kernel birth identity of this Holder process, captured once.
     holder_start_sec: Option<i64>,
+    holder_birth_token: Option<u64>,
     finished: AtomicBool,
     listen_fd: AtomicI32,
 }
@@ -99,7 +101,9 @@ impl HolderServer {
         let pty = Pty::spawn(&pty_spec).map_err(|error| HolderError::io("PTY spawn", error))?;
         let child_pid = pty.pid() as i32;
         let child_start_sec = process_tree::start_time(child_pid);
+        let child_birth_token = process_tree::birth_token(child_pid);
         let holder_start_sec = process_tree::start_time(std::process::id() as i32);
+        let holder_birth_token = process_tree::birth_token(std::process::id() as i32);
         let incarnation = random_incarnation()?;
 
         // Nonblocking master: the reader drains in bursts, and writes bound
@@ -127,7 +131,9 @@ impl HolderServer {
             epoch_offset,
             incarnation,
             child_start_sec,
+            child_birth_token,
             holder_start_sec,
+            holder_birth_token,
             finished: AtomicBool::new(false),
             listen_fd: AtomicI32::new(listen_fd),
             spec,
@@ -389,13 +395,17 @@ fn write_pty(shared: &Shared, data: &[u8]) -> HolderResult<()> {
 fn current_stat(shared: &Shared) -> HolderStat {
     let finished = shared.finished.load(Ordering::SeqCst);
     let pty = shared.pty.lock().expect("pty");
-    // SAFETY: kill with signal 0 only checks existence.
-    let child_alive = unsafe { libc::kill(shared.child_pid, 0) } == 0;
+    // A pid can be recycled before the exit watcher closes the socket. Require
+    // the kernel birth identity captured at spawn, not mere pid existence.
+    let child_alive = shared
+        .child_birth_token
+        .is_some_and(|token| process_tree::matches_birth_token(shared.child_pid, token));
     let master_fd = pty.writer().map(|stream| stream.as_raw_fd()).unwrap_or(-1);
     // SAFETY: tcgetpgrp on the master; -1 fd yields an error, mapped to None.
     let foreground = unsafe { libc::tcgetpgrp(master_fd) };
     let size = pty.size().ok();
     HolderStat {
+        session_id: Some(shared.spec.session_id.clone()),
         child_pid: shared.child_pid,
         alive: !finished && child_alive,
         log_offset: shared.log.lock().expect("log").tail_offset(),
@@ -405,8 +415,10 @@ fn current_stat(shared: &Shared) -> HolderStat {
         epoch_offset: Some(shared.epoch_offset),
         incarnation: Some(shared.incarnation.clone()),
         child_start_sec: shared.child_start_sec,
+        child_birth_token: shared.child_birth_token,
         holder_pid: Some(std::process::id() as i32),
         holder_start_sec: shared.holder_start_sec,
+        holder_birth_token: shared.holder_birth_token,
     }
 }
 

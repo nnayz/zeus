@@ -79,6 +79,7 @@ fn the_first_client_size_decides_the_launch_geometry() {
         engine(),
     )
     .expect("spawn returns before any exec");
+    assert!(session.local_execution_identity().is_none());
     // The client attaches and reports its real viewport before the fallback
     // window closes; this must become the exec geometry.
     session.resize(100, 30).expect("propose size");
@@ -89,6 +90,10 @@ fn the_first_client_size_decides_the_launch_geometry() {
     assert!(
         !log_text(&logs, "s_size").contains("24 80"),
         "the child must never have existed at the estimated size"
+    );
+    assert!(
+        session.local_execution_identity().is_none(),
+        "a deferred-origin execution remains ineligible after launch"
     );
 
     session
@@ -149,6 +154,7 @@ fn terminating_before_the_exec_prevents_the_launch() {
 
     let mut session =
         Session::spawn(deferred_spec("s_no", &script, &root), engine()).expect("spawn");
+    assert!(session.local_execution_identity().is_none());
     let exit = session
         .terminate(Duration::from_secs(2))
         .expect("terminate");

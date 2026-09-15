@@ -41,13 +41,25 @@ pub const DEFAULT_DISK_CAPACITY: i64 = 32 << 20;
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct HolderProcessSample {
     pub pid: i32,
+    /// Historical compatibility field. Its unit differs by platform and it is
+    /// not sufficient for new exact-identity decisions.
     #[serde(rename = "startSec")]
     pub start_sec: i64,
+    /// Opaque kernel birth token: microseconds on macOS, `/proc` start ticks on
+    /// Linux. New code uses this exact token and fails closed when it is absent.
+    #[serde(
+        rename = "birthToken",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub birth_token: Option<u64>,
 }
 
 /// A holder's answer to `stat`: the child, its liveness, and the log tail.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct HolderStat {
+    #[serde(rename = "sessionID", default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
     #[serde(rename = "childPID")]
     pub child_pid: i32,
     pub alive: bool,
@@ -91,7 +103,13 @@ pub struct HolderStat {
         skip_serializing_if = "Option::is_none"
     )]
     pub child_start_sec: Option<i64>,
-    /// Holder process identity, paired with `holder_start_sec`. This lets a
+    #[serde(
+        rename = "childBirthToken",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub child_birth_token: Option<u64>,
+    /// Holder process identity, paired with its exact birth token. This lets a
     /// policy consumer reject replacement of the serving process even when a
     /// stale socket or pid file remains.
     #[serde(rename = "holderPID", default, skip_serializing_if = "Option::is_none")]
@@ -102,6 +120,12 @@ pub struct HolderStat {
         skip_serializing_if = "Option::is_none"
     )]
     pub holder_start_sec: Option<i64>,
+    #[serde(
+        rename = "holderBirthToken",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub holder_birth_token: Option<u64>,
 }
 
 /// How the held child ended.
@@ -398,12 +422,13 @@ mod tests {
     }
 
     #[test]
-    fn a_swift_encoded_stat_decodes_with_optionals_present_or_absent() {
-        // What Swift's JSONEncoder produces with every optional set…
+    fn a_holder_stat_decodes_with_new_optionals_present_or_absent() {
+        // A current Rust Holder with every optional set…
         let full: HolderStat = serde_json::from_str(
-            r#"{"childPID":123,"alive":true,"logOffset":4096,"foregroundPID":456,"cols":120,"rows":32,"epochOffset":1024,"incarnation":"00112233445566778899aabbccddeeff","childStartSec":1700,"holderPID":44,"holderStartSec":1600}"#,
+            r#"{"sessionID":"s_1","childPID":123,"alive":true,"logOffset":4096,"foregroundPID":456,"cols":120,"rows":32,"epochOffset":1024,"incarnation":"00112233445566778899aabbccddeeff","childStartSec":1700,"childBirthToken":1700000001,"holderPID":44,"holderStartSec":1600,"holderBirthToken":1600000001}"#,
         )
         .expect("full stat");
+        assert_eq!(full.session_id.as_deref(), Some("s_1"));
         assert_eq!(full.child_pid, 123);
         assert_eq!(full.epoch_offset, Some(1024));
         assert_eq!(
@@ -411,18 +436,23 @@ mod tests {
             Some("00112233445566778899aabbccddeeff")
         );
         assert_eq!(full.child_start_sec, Some(1700));
+        assert_eq!(full.child_birth_token, Some(1_700_000_001));
         assert_eq!(full.holder_pid, Some(44));
         assert_eq!(full.holder_start_sec, Some(1600));
+        assert_eq!(full.holder_birth_token, Some(1_600_000_001));
 
         // …and with them omitted, as a pre-epoch holder would send.
         let sparse: HolderStat =
             serde_json::from_str(r#"{"childPID":9,"alive":false,"logOffset":0}"#).expect("sparse");
+        assert_eq!(sparse.session_id, None);
         assert_eq!(sparse.foreground_pid, None);
         assert_eq!(sparse.epoch_offset, None);
         assert_eq!(sparse.incarnation, None);
         assert_eq!(sparse.child_start_sec, None);
+        assert_eq!(sparse.child_birth_token, None);
         assert_eq!(sparse.holder_pid, None);
         assert_eq!(sparse.holder_start_sec, None);
+        assert_eq!(sparse.holder_birth_token, None);
     }
 
     #[test]

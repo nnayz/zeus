@@ -161,6 +161,109 @@ fn a_held_session_survives_its_session_object_and_is_adoptable() {
 }
 
 #[test]
+fn adoption_rejects_replaced_or_incomplete_exact_holder_identity() {
+    let root = holders_dir("identity");
+    let logs = root.join("logs");
+    let holder = holder_config(&root);
+    let engine = engine();
+
+    let session = Session::spawn(
+        shell_spec("s_identity", "cat", &logs, Some(holder.clone())),
+        Arc::clone(&engine),
+    )
+    .expect("spawn held");
+    let paths = HolderPaths::new(&holder.holders_dir, "s_identity");
+    let client = HolderClient::new(paths.socket());
+    let stat = client.stat().expect("current stat");
+    drop(session);
+
+    let mut replaced = stat.clone();
+    replaced.incarnation = Some("ffeeddccbbaa99887766554433221100".into());
+    let error = Session::adopt(
+        shell_spec("s_identity", "", &logs, Some(holder.clone())),
+        &holder,
+        &replaced,
+        Arc::clone(&engine),
+    )
+    .err()
+    .expect("changed Holder identity must fail adoption");
+    assert!(error.to_string().contains("changed during adoption"));
+
+    let mut incomplete = stat.clone();
+    incomplete.child_birth_token = None;
+    let error = Session::adopt(
+        shell_spec("s_identity", "", &logs, Some(holder.clone())),
+        &holder,
+        &incomplete,
+        Arc::clone(&engine),
+    )
+    .err()
+    .expect("partial exact identity must fail adoption");
+    assert!(error.to_string().contains("incomplete exact identity"));
+
+    // The immediately previous Holder schema already carried incarnation,
+    // holder PID and second-resolution start fields. It remains adoptable for
+    // ordinary sessions, but can never expose a power-eligible identity.
+    let mut legacy = stat;
+    legacy.session_id = None;
+    legacy.child_birth_token = None;
+    legacy.holder_birth_token = None;
+    assert!(legacy.incarnation.is_some());
+    assert!(legacy.holder_pid.is_some());
+    assert!(legacy.child_start_sec.is_some());
+    assert!(legacy.holder_start_sec.is_some());
+    let mut adopted = Session::adopt(
+        shell_spec("s_identity", "", &logs, Some(holder)),
+        &holder_config(&root),
+        &legacy,
+        engine,
+    )
+    .expect("legacy adoption stays compatible");
+    assert!(adopted.local_execution_identity().is_none());
+    adopted
+        .terminate(Duration::from_secs(2))
+        .expect("terminate adopted child");
+}
+
+#[test]
+fn adoption_rejects_a_child_that_exits_after_discovery() {
+    let root = holders_dir("adoption_exit_race");
+    let logs = root.join("logs");
+    let holder = holder_config(&root);
+    let engine = engine();
+
+    let mut session = Session::spawn(
+        shell_spec("s_exit_race", "cat", &logs, Some(holder.clone())),
+        Arc::clone(&engine),
+    )
+    .expect("spawn held");
+    let client = HolderClient::new(HolderPaths::new(&holder.holders_dir, "s_exit_race").socket());
+    let discovered = client.stat().expect("live discovery stat");
+    assert!(discovered.alive);
+    session
+        .terminate(Duration::from_secs(2))
+        .expect("terminate after discovery");
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while client.stat().is_ok_and(|stat| stat.alive) && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    let error = Session::adopt(
+        shell_spec("s_exit_race", "", &logs, Some(holder.clone())),
+        &holder,
+        &discovered,
+        engine,
+    )
+    .err()
+    .expect("fresh non-live stat must fail adoption");
+    assert!(
+        error.to_string().contains("exited during adoption")
+            || error.to_string().contains("disappeared during adoption"),
+        "unexpected adoption error: {error}"
+    );
+}
+
+#[test]
 fn a_registry_restore_adopts_live_holders_from_a_previous_life() {
     let root = holders_dir("registry");
     let logs = root.join("logs");
@@ -291,6 +394,14 @@ fn input_to_a_hibernated_session_queues_and_flushes_on_wake() {
     registry
         .hibernate("s_hib", zeus_proto::HibernationReason::Manual)
         .expect("hibernate");
+    assert!(
+        registry
+            .get("s_hib")
+            .expect("hibernated session")
+            .local_execution_identity()
+            .is_none(),
+        "hibernation immediately revokes execution eligibility"
+    );
 
     // Typed while frozen: queued, not written — cat can't echo while stopped.
     registry
@@ -306,6 +417,14 @@ fn input_to_a_hibernated_session_queues_and_flushes_on_wake() {
 
     // Wake: SIGCONT + flush; the echo lands and the record clears.
     registry.wake_session("s_hib").expect("wake");
+    assert!(
+        registry
+            .get("s_hib")
+            .expect("woken session")
+            .local_execution_identity()
+            .is_some(),
+        "wake restores observable identity but does not itself restore consent"
+    );
     wait_until("queued input flushed", Duration::from_secs(5), || {
         log_contains(&logs, "s_hib", b"typed-while-frozen")
     });

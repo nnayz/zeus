@@ -85,14 +85,31 @@ fn a_holder_owns_a_session_end_to_end() {
     let incarnation = stat.incarnation.as_deref().expect("Holder incarnation");
     assert_eq!(incarnation.len(), 32);
     assert!(incarnation.bytes().all(|byte| byte.is_ascii_hexdigit()));
-    assert!(stat.child_start_sec.is_some(), "child birth identity");
+    assert_eq!(stat.session_id.as_deref(), Some("s_e2e"));
+    assert!(
+        stat.child_start_sec.is_some(),
+        "legacy child start observation"
+    );
+    assert!(
+        stat.child_birth_token.is_some(),
+        "exact child birth identity"
+    );
     assert_eq!(stat.holder_pid, Some(std::process::id() as i32));
-    assert!(stat.holder_start_sec.is_some(), "Holder birth identity");
+    assert!(
+        stat.holder_start_sec.is_some(),
+        "legacy Holder start observation"
+    );
+    assert!(
+        stat.holder_birth_token.is_some(),
+        "exact Holder birth identity"
+    );
     let same_execution = client.stat().expect("repeat stat");
     assert_eq!(same_execution.incarnation.as_deref(), Some(incarnation));
     assert_eq!(same_execution.child_start_sec, stat.child_start_sec);
+    assert_eq!(same_execution.child_birth_token, stat.child_birth_token);
     assert_eq!(same_execution.holder_pid, stat.holder_pid);
     assert_eq!(same_execution.holder_start_sec, stat.holder_start_sec);
+    assert_eq!(same_execution.holder_birth_token, stat.holder_birth_token);
     assert_eq!(
         stat.epoch_offset,
         Some(0),

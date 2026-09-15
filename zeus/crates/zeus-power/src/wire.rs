@@ -1,0 +1,672 @@
+//! Small, versioned, bounded binary IPC models.
+//!
+//! The protocol contains no path, command, argument, environment, or power
+//! setting value. Authentication facts come from the transport, not this wire.
+
+use crate::eligibility::{LocalExecutionIdentity, ProcessIdentity};
+
+pub const MAGIC: [u8; 4] = *b"ZPWR";
+pub const CURRENT_PROTOCOL: ProtocolVersion = ProtocolVersion { major: 1, minor: 0 };
+pub const MAX_FRAME_BYTES: usize = 4096;
+pub const MAX_EXECUTIONS_PER_REQUEST: usize = 64;
+const HEADER_BYTES: usize = 14;
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct BuildId(pub [u8; 32]);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProtocolVersion {
+    pub major: u16,
+    pub minor: u16,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Request {
+    pub client_build_id: BuildId,
+    /// Helper boot identity learned during the mutually authenticated handshake.
+    pub helper_boot_nonce: [u8; 16],
+    /// Fresh Engine identity. It must not be reused after Engine restart.
+    pub engine_incarnation: [u8; 16],
+    /// Strictly increasing within an authenticated connection/incarnation.
+    pub sequence: u64,
+    pub command: RequestCommand,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RequestCommand {
+    Status,
+    Acquire {
+        lease_id: [u8; 16],
+        deadline_ticks: u64,
+        executions: Vec<LocalExecutionIdentity>,
+    },
+    Renew {
+        lease_id: [u8; 16],
+        deadline_ticks: u64,
+        executions: Vec<LocalExecutionIdentity>,
+    },
+    Release {
+        lease_id: [u8; 16],
+    },
+    PrepareUninstall,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Response {
+    /// Echoes the negotiated identities so a response cannot cross helper or
+    /// Engine incarnations unnoticed.
+    pub helper_boot_nonce: [u8; 16],
+    pub engine_incarnation: [u8; 16],
+    pub request_sequence: u64,
+    pub body: ResponseBody,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ResponseBody {
+    Status(StatusResponse),
+    Ack(AckKind),
+    Error(WireErrorCode),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AckKind {
+    Acquired,
+    Renewed,
+    Released,
+    UninstallPrepared,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StatusResponse {
+    pub active: bool,
+    pub allow_sleep_now_latched: bool,
+    pub selected_execution_count: u16,
+    pub deadline_ticks: Option<u64>,
+    pub safety: WireSafetyState,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WireSafetyState {
+    Safe,
+    Unknown,
+    Stale,
+    BatteryPower,
+    BatteryUnreadable,
+    ThermalUnreadable,
+    ThermalUnsafe,
+    Emergency,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WireErrorCode {
+    Unauthorized,
+    Malformed,
+    Replay,
+    StaleIncarnation,
+    IncompatibleProtocol,
+    IncompatibleBuild,
+    Unsafe,
+    Conflict,
+    Internal,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CodecError {
+    FrameTooLarge,
+    Truncated,
+    BadMagic,
+    LengthMismatch,
+    UnsupportedProtocol,
+    WrongFrameKind,
+    UnknownTag,
+    TooManyExecutions,
+    InvalidBoolean,
+    InvalidIdentity,
+    TrailingBytes,
+}
+
+impl Request {
+    pub fn encode(&self) -> Result<Vec<u8>, CodecError> {
+        let mut body = Vec::with_capacity(256);
+        body.extend_from_slice(&self.client_build_id.0);
+        body.extend_from_slice(&self.helper_boot_nonce);
+        body.extend_from_slice(&self.engine_incarnation);
+        put_u64(&mut body, self.sequence);
+        match &self.command {
+            RequestCommand::Status => body.push(0),
+            RequestCommand::Acquire {
+                lease_id,
+                deadline_ticks,
+                executions,
+            } => {
+                body.push(1);
+                encode_lease(&mut body, lease_id, *deadline_ticks, executions)?;
+            }
+            RequestCommand::Renew {
+                lease_id,
+                deadline_ticks,
+                executions,
+            } => {
+                body.push(2);
+                encode_lease(&mut body, lease_id, *deadline_ticks, executions)?;
+            }
+            RequestCommand::Release { lease_id } => {
+                body.push(3);
+                body.extend_from_slice(lease_id);
+            }
+            RequestCommand::PrepareUninstall => body.push(4),
+        }
+        encode_frame(1, &body)
+    }
+
+    pub fn decode(frame: &[u8]) -> Result<Self, CodecError> {
+        let body = decode_frame(frame, 1)?;
+        let mut cursor = Cursor::new(body);
+        let client_build_id = BuildId(cursor.array()?);
+        let helper_boot_nonce = cursor.array()?;
+        let engine_incarnation = cursor.array()?;
+        let sequence = cursor.u64()?;
+        let command = match cursor.u8()? {
+            0 => RequestCommand::Status,
+            1 => {
+                let (lease_id, deadline_ticks, executions) = decode_lease(&mut cursor)?;
+                RequestCommand::Acquire {
+                    lease_id,
+                    deadline_ticks,
+                    executions,
+                }
+            }
+            2 => {
+                let (lease_id, deadline_ticks, executions) = decode_lease(&mut cursor)?;
+                RequestCommand::Renew {
+                    lease_id,
+                    deadline_ticks,
+                    executions,
+                }
+            }
+            3 => RequestCommand::Release {
+                lease_id: cursor.array()?,
+            },
+            4 => RequestCommand::PrepareUninstall,
+            _ => return Err(CodecError::UnknownTag),
+        };
+        cursor.finish()?;
+        Ok(Self {
+            client_build_id,
+            helper_boot_nonce,
+            engine_incarnation,
+            sequence,
+            command,
+        })
+    }
+}
+
+impl Response {
+    pub fn encode(&self) -> Result<Vec<u8>, CodecError> {
+        let mut body = Vec::with_capacity(64);
+        body.extend_from_slice(&self.helper_boot_nonce);
+        body.extend_from_slice(&self.engine_incarnation);
+        put_u64(&mut body, self.request_sequence);
+        match self.body {
+            ResponseBody::Status(status) => {
+                body.push(0);
+                body.push(status.active.into());
+                body.push(status.allow_sleep_now_latched.into());
+                put_u16(&mut body, status.selected_execution_count);
+                match status.deadline_ticks {
+                    Some(deadline) => {
+                        body.push(1);
+                        put_u64(&mut body, deadline);
+                    }
+                    None => body.push(0),
+                }
+                body.push(safety_tag(status.safety));
+            }
+            ResponseBody::Ack(ack) => {
+                body.push(1);
+                body.push(ack_tag(ack));
+            }
+            ResponseBody::Error(error) => {
+                body.push(2);
+                body.push(error_tag(error));
+            }
+        }
+        encode_frame(2, &body)
+    }
+
+    pub fn decode(frame: &[u8]) -> Result<Self, CodecError> {
+        let body = decode_frame(frame, 2)?;
+        let mut cursor = Cursor::new(body);
+        let helper_boot_nonce = cursor.array()?;
+        let engine_incarnation = cursor.array()?;
+        let request_sequence = cursor.u64()?;
+        let response_body = match cursor.u8()? {
+            0 => {
+                let active = cursor.boolean()?;
+                let allow_sleep_now_latched = cursor.boolean()?;
+                let selected_execution_count = cursor.u16()?;
+                let deadline_ticks = if cursor.boolean()? {
+                    Some(cursor.u64()?)
+                } else {
+                    None
+                };
+                let safety = decode_safety(cursor.u8()?)?;
+                ResponseBody::Status(StatusResponse {
+                    active,
+                    allow_sleep_now_latched,
+                    selected_execution_count,
+                    deadline_ticks,
+                    safety,
+                })
+            }
+            1 => ResponseBody::Ack(decode_ack(cursor.u8()?)?),
+            2 => ResponseBody::Error(decode_error(cursor.u8()?)?),
+            _ => return Err(CodecError::UnknownTag),
+        };
+        cursor.finish()?;
+        Ok(Self {
+            helper_boot_nonce,
+            engine_incarnation,
+            request_sequence,
+            body: response_body,
+        })
+    }
+}
+
+fn encode_lease(
+    body: &mut Vec<u8>,
+    lease_id: &[u8; 16],
+    deadline: u64,
+    executions: &[LocalExecutionIdentity],
+) -> Result<(), CodecError> {
+    if executions.len() > MAX_EXECUTIONS_PER_REQUEST {
+        return Err(CodecError::TooManyExecutions);
+    }
+    body.extend_from_slice(lease_id);
+    put_u64(body, deadline);
+    put_u16(body, executions.len() as u16);
+    for execution in executions {
+        encode_execution(body, execution);
+    }
+    Ok(())
+}
+
+fn decode_lease(
+    cursor: &mut Cursor<'_>,
+) -> Result<([u8; 16], u64, Vec<LocalExecutionIdentity>), CodecError> {
+    let lease_id = cursor.array()?;
+    let deadline = cursor.u64()?;
+    let count = usize::from(cursor.u16()?);
+    if count > MAX_EXECUTIONS_PER_REQUEST {
+        return Err(CodecError::TooManyExecutions);
+    }
+    let mut executions = Vec::with_capacity(count);
+    for _ in 0..count {
+        executions.push(decode_execution(cursor)?);
+    }
+    Ok((lease_id, deadline, executions))
+}
+
+fn encode_execution(body: &mut Vec<u8>, execution: &LocalExecutionIdentity) {
+    match execution {
+        LocalExecutionIdentity::Direct {
+            session_id,
+            incarnation,
+            host_boot_id,
+            execution_generation,
+            process,
+        } => {
+            body.push(0);
+            body.extend_from_slice(session_id);
+            body.extend_from_slice(incarnation);
+            body.extend_from_slice(host_boot_id);
+            put_u64(body, *execution_generation);
+            encode_process(body, *process);
+        }
+        LocalExecutionIdentity::Held {
+            session_id,
+            incarnation,
+            host_boot_id,
+            execution_generation,
+            holder,
+            child,
+        } => {
+            body.push(1);
+            body.extend_from_slice(session_id);
+            body.extend_from_slice(incarnation);
+            body.extend_from_slice(host_boot_id);
+            put_u64(body, *execution_generation);
+            encode_process(body, *holder);
+            encode_process(body, *child);
+        }
+    }
+}
+
+fn decode_execution(cursor: &mut Cursor<'_>) -> Result<LocalExecutionIdentity, CodecError> {
+    let tag = cursor.u8()?;
+    let session_id = cursor.array()?;
+    let incarnation = cursor.array()?;
+    let host_boot_id = cursor.array()?;
+    let execution_generation = cursor.u64()?;
+    if session_id == [0; 16]
+        || incarnation == [0; 16]
+        || host_boot_id == [0; 16]
+        || execution_generation == 0
+    {
+        return Err(CodecError::InvalidIdentity);
+    }
+    match tag {
+        0 => Ok(LocalExecutionIdentity::Direct {
+            session_id,
+            incarnation,
+            host_boot_id,
+            execution_generation,
+            process: decode_process(cursor)?,
+        }),
+        1 => Ok(LocalExecutionIdentity::Held {
+            session_id,
+            incarnation,
+            host_boot_id,
+            execution_generation,
+            holder: decode_process(cursor)?,
+            child: decode_process(cursor)?,
+        }),
+        _ => Err(CodecError::UnknownTag),
+    }
+}
+
+fn encode_process(body: &mut Vec<u8>, process: ProcessIdentity) {
+    put_u32(body, process.pid);
+    put_u64(body, process.birth_token);
+}
+
+fn decode_process(cursor: &mut Cursor<'_>) -> Result<ProcessIdentity, CodecError> {
+    let process = ProcessIdentity {
+        pid: cursor.u32()?,
+        birth_token: cursor.u64()?,
+    };
+    if process.pid == 0 || process.birth_token == 0 {
+        return Err(CodecError::InvalidIdentity);
+    }
+    Ok(process)
+}
+
+fn encode_frame(kind: u8, body: &[u8]) -> Result<Vec<u8>, CodecError> {
+    let total = HEADER_BYTES
+        .checked_add(body.len())
+        .ok_or(CodecError::FrameTooLarge)?;
+    if total > MAX_FRAME_BYTES {
+        return Err(CodecError::FrameTooLarge);
+    }
+    let mut frame = Vec::with_capacity(total);
+    frame.extend_from_slice(&MAGIC);
+    put_u32(&mut frame, total as u32);
+    put_u16(&mut frame, CURRENT_PROTOCOL.major);
+    put_u16(&mut frame, CURRENT_PROTOCOL.minor);
+    frame.push(kind);
+    frame.push(0);
+    frame.extend_from_slice(body);
+    Ok(frame)
+}
+
+fn decode_frame(frame: &[u8], expected_kind: u8) -> Result<&[u8], CodecError> {
+    if frame.len() > MAX_FRAME_BYTES {
+        return Err(CodecError::FrameTooLarge);
+    }
+    if frame.len() < HEADER_BYTES {
+        return Err(CodecError::Truncated);
+    }
+    if frame[0..4] != MAGIC {
+        return Err(CodecError::BadMagic);
+    }
+    let declared = u32::from_be_bytes(frame[4..8].try_into().expect("fixed slice")) as usize;
+    if declared != frame.len() {
+        return Err(CodecError::LengthMismatch);
+    }
+    let version = ProtocolVersion {
+        major: u16::from_be_bytes(frame[8..10].try_into().expect("fixed slice")),
+        minor: u16::from_be_bytes(frame[10..12].try_into().expect("fixed slice")),
+    };
+    if version != CURRENT_PROTOCOL {
+        return Err(CodecError::UnsupportedProtocol);
+    }
+    if frame[12] != expected_kind {
+        return Err(CodecError::WrongFrameKind);
+    }
+    if frame[13] != 0 {
+        return Err(CodecError::UnknownTag);
+    }
+    Ok(&frame[HEADER_BYTES..])
+}
+
+struct Cursor<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> Cursor<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, offset: 0 }
+    }
+    fn take(&mut self, count: usize) -> Result<&'a [u8], CodecError> {
+        let end = self
+            .offset
+            .checked_add(count)
+            .ok_or(CodecError::Truncated)?;
+        let value = self
+            .bytes
+            .get(self.offset..end)
+            .ok_or(CodecError::Truncated)?;
+        self.offset = end;
+        Ok(value)
+    }
+    fn array<const N: usize>(&mut self) -> Result<[u8; N], CodecError> {
+        self.take(N)?.try_into().map_err(|_| CodecError::Truncated)
+    }
+    fn u8(&mut self) -> Result<u8, CodecError> {
+        Ok(self.take(1)?[0])
+    }
+    fn boolean(&mut self) -> Result<bool, CodecError> {
+        match self.u8()? {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => Err(CodecError::InvalidBoolean),
+        }
+    }
+    fn u16(&mut self) -> Result<u16, CodecError> {
+        Ok(u16::from_be_bytes(self.array()?))
+    }
+    fn u32(&mut self) -> Result<u32, CodecError> {
+        Ok(u32::from_be_bytes(self.array()?))
+    }
+    fn u64(&mut self) -> Result<u64, CodecError> {
+        Ok(u64::from_be_bytes(self.array()?))
+    }
+    fn finish(self) -> Result<(), CodecError> {
+        if self.offset == self.bytes.len() {
+            Ok(())
+        } else {
+            Err(CodecError::TrailingBytes)
+        }
+    }
+}
+
+fn put_u16(out: &mut Vec<u8>, value: u16) {
+    out.extend_from_slice(&value.to_be_bytes());
+}
+fn put_u32(out: &mut Vec<u8>, value: u32) {
+    out.extend_from_slice(&value.to_be_bytes());
+}
+fn put_u64(out: &mut Vec<u8>, value: u64) {
+    out.extend_from_slice(&value.to_be_bytes());
+}
+
+fn ack_tag(value: AckKind) -> u8 {
+    match value {
+        AckKind::Acquired => 0,
+        AckKind::Renewed => 1,
+        AckKind::Released => 2,
+        AckKind::UninstallPrepared => 3,
+    }
+}
+fn decode_ack(tag: u8) -> Result<AckKind, CodecError> {
+    match tag {
+        0 => Ok(AckKind::Acquired),
+        1 => Ok(AckKind::Renewed),
+        2 => Ok(AckKind::Released),
+        3 => Ok(AckKind::UninstallPrepared),
+        _ => Err(CodecError::UnknownTag),
+    }
+}
+fn safety_tag(value: WireSafetyState) -> u8 {
+    value as u8
+}
+fn decode_safety(tag: u8) -> Result<WireSafetyState, CodecError> {
+    match tag {
+        0 => Ok(WireSafetyState::Safe),
+        1 => Ok(WireSafetyState::Unknown),
+        2 => Ok(WireSafetyState::Stale),
+        3 => Ok(WireSafetyState::BatteryPower),
+        4 => Ok(WireSafetyState::BatteryUnreadable),
+        5 => Ok(WireSafetyState::ThermalUnreadable),
+        6 => Ok(WireSafetyState::ThermalUnsafe),
+        7 => Ok(WireSafetyState::Emergency),
+        _ => Err(CodecError::UnknownTag),
+    }
+}
+fn error_tag(value: WireErrorCode) -> u8 {
+    value as u8
+}
+fn decode_error(tag: u8) -> Result<WireErrorCode, CodecError> {
+    match tag {
+        0 => Ok(WireErrorCode::Unauthorized),
+        1 => Ok(WireErrorCode::Malformed),
+        2 => Ok(WireErrorCode::Replay),
+        3 => Ok(WireErrorCode::StaleIncarnation),
+        4 => Ok(WireErrorCode::IncompatibleProtocol),
+        5 => Ok(WireErrorCode::IncompatibleBuild),
+        6 => Ok(WireErrorCode::Unsafe),
+        7 => Ok(WireErrorCode::Conflict),
+        8 => Ok(WireErrorCode::Internal),
+        _ => Err(CodecError::UnknownTag),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn held() -> LocalExecutionIdentity {
+        LocalExecutionIdentity::Held {
+            session_id: [1; 16],
+            incarnation: [2; 16],
+            host_boot_id: [3; 16],
+            execution_generation: 1,
+            holder: ProcessIdentity {
+                pid: 4,
+                birth_token: 40,
+            },
+            child: ProcessIdentity {
+                pid: 5,
+                birth_token: 50,
+            },
+        }
+    }
+
+    #[test]
+    fn request_and_response_round_trip() {
+        let request = Request {
+            client_build_id: BuildId([9; 32]),
+            helper_boot_nonce: [8; 16],
+            engine_incarnation: [6; 16],
+            sequence: 42,
+            command: RequestCommand::Acquire {
+                lease_id: [7; 16],
+                deadline_ticks: 99,
+                executions: vec![held()],
+            },
+        };
+        assert_eq!(Request::decode(&request.encode().unwrap()), Ok(request));
+
+        let response = Response {
+            helper_boot_nonce: [8; 16],
+            engine_incarnation: [6; 16],
+            request_sequence: 42,
+            body: ResponseBody::Status(StatusResponse {
+                active: true,
+                allow_sleep_now_latched: false,
+                selected_execution_count: 1,
+                deadline_ticks: Some(99),
+                safety: WireSafetyState::Safe,
+            }),
+        };
+        assert_eq!(Response::decode(&response.encode().unwrap()), Ok(response));
+    }
+
+    #[test]
+    fn decoder_rejects_length_version_kind_and_trailing_bytes() {
+        let request = Request {
+            client_build_id: BuildId([0; 32]),
+            helper_boot_nonce: [0; 16],
+            engine_incarnation: [1; 16],
+            sequence: 1,
+            command: RequestCommand::Status,
+        };
+        let valid = request.encode().unwrap();
+
+        let mut bad = valid.clone();
+        bad[4..8].copy_from_slice(&1_u32.to_be_bytes());
+        assert_eq!(Request::decode(&bad), Err(CodecError::LengthMismatch));
+        bad = valid.clone();
+        bad[8..10].copy_from_slice(&2_u16.to_be_bytes());
+        assert_eq!(Request::decode(&bad), Err(CodecError::UnsupportedProtocol));
+        assert_eq!(Response::decode(&valid), Err(CodecError::WrongFrameKind));
+
+        bad = valid;
+        bad.push(0);
+        let len = bad.len() as u32;
+        bad[4..8].copy_from_slice(&len.to_be_bytes());
+        assert_eq!(Request::decode(&bad), Err(CodecError::TrailingBytes));
+    }
+
+    #[test]
+    fn encoder_and_decoder_enforce_execution_bound() {
+        let request = Request {
+            client_build_id: BuildId([0; 32]),
+            helper_boot_nonce: [0; 16],
+            engine_incarnation: [1; 16],
+            sequence: 1,
+            command: RequestCommand::Renew {
+                lease_id: [1; 16],
+                deadline_ticks: 2,
+                executions: vec![held(); MAX_EXECUTIONS_PER_REQUEST + 1],
+            },
+        };
+        assert_eq!(request.encode(), Err(CodecError::TooManyExecutions));
+
+        let mut frame = Request {
+            client_build_id: BuildId([0; 32]),
+            helper_boot_nonce: [0; 16],
+            engine_incarnation: [1; 16],
+            sequence: 1,
+            command: RequestCommand::Acquire {
+                lease_id: [1; 16],
+                deadline_ticks: 2,
+                executions: vec![],
+            },
+        }
+        .encode()
+        .unwrap();
+        // count follows header + build + both incarnations + sequence + tag + lease + deadline.
+        let count_offset = HEADER_BYTES + 32 + 16 + 16 + 8 + 1 + 16 + 8;
+        frame[count_offset..count_offset + 2]
+            .copy_from_slice(&((MAX_EXECUTIONS_PER_REQUEST + 1) as u16).to_be_bytes());
+        assert_eq!(Request::decode(&frame), Err(CodecError::TooManyExecutions));
+    }
+
+    #[test]
+    fn oversized_input_is_rejected_before_parsing() {
+        let frame = vec![0; MAX_FRAME_BYTES + 1];
+        assert_eq!(Request::decode(&frame), Err(CodecError::FrameTooLarge));
+    }
+}

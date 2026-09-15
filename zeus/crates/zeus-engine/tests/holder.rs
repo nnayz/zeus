@@ -82,6 +82,13 @@ fn a_holder_owns_a_session_end_to_end() {
     let stat = client.stat().expect("stat");
     assert!(stat.alive);
     assert!(stat.child_pid > 1);
+    let incarnation = stat.incarnation.as_deref().expect("Holder incarnation");
+    assert_eq!(incarnation.len(), 32);
+    assert!(incarnation.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    assert!(stat.child_start_sec.is_some(), "child birth identity");
+    let same_execution = client.stat().expect("repeat stat");
+    assert_eq!(same_execution.incarnation.as_deref(), Some(incarnation));
+    assert_eq!(same_execution.child_start_sec, stat.child_start_sec);
     assert_eq!(
         stat.epoch_offset,
         Some(0),

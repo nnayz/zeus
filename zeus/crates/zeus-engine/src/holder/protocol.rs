@@ -74,6 +74,23 @@ pub struct HolderStat {
         skip_serializing_if = "Option::is_none"
     )]
     pub epoch_offset: Option<u64>,
+    /// Random identifier created by this exact Holder process. Missing when
+    /// talking to an older Holder; callers that need exact execution identity
+    /// must fail closed instead of substituting the session id or pid.
+    #[serde(
+        rename = "incarnation",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub incarnation: Option<String>,
+    /// Kernel-observed birth identity for `child_pid`. A pid without its start
+    /// identity is not sufficient because macOS and Linux recycle pids.
+    #[serde(
+        rename = "childStartSec",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub child_start_sec: Option<i64>,
 }
 
 /// How the held child ended.
@@ -373,17 +390,24 @@ mod tests {
     fn a_swift_encoded_stat_decodes_with_optionals_present_or_absent() {
         // What Swift's JSONEncoder produces with every optional set…
         let full: HolderStat = serde_json::from_str(
-            r#"{"childPID":123,"alive":true,"logOffset":4096,"foregroundPID":456,"cols":120,"rows":32,"epochOffset":1024}"#,
+            r#"{"childPID":123,"alive":true,"logOffset":4096,"foregroundPID":456,"cols":120,"rows":32,"epochOffset":1024,"incarnation":"00112233445566778899aabbccddeeff","childStartSec":1700}"#,
         )
         .expect("full stat");
         assert_eq!(full.child_pid, 123);
         assert_eq!(full.epoch_offset, Some(1024));
+        assert_eq!(
+            full.incarnation.as_deref(),
+            Some("00112233445566778899aabbccddeeff")
+        );
+        assert_eq!(full.child_start_sec, Some(1700));
 
         // …and with them omitted, as a pre-epoch holder would send.
         let sparse: HolderStat =
             serde_json::from_str(r#"{"childPID":9,"alive":false,"logOffset":0}"#).expect("sparse");
         assert_eq!(sparse.foreground_pid, None);
         assert_eq!(sparse.epoch_offset, None);
+        assert_eq!(sparse.incarnation, None);
+        assert_eq!(sparse.child_start_sec, None);
     }
 
     #[test]

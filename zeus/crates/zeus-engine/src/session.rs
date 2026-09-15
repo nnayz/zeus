@@ -109,6 +109,19 @@ pub struct SessionView {
     pub exited: bool,
 }
 
+/// Exact identity of one live local Holder execution.
+///
+/// Session ids survive respawn and pids are recycled. Closed-lid eligibility
+/// therefore requires all four fields and refuses older Holders that cannot
+/// report them. This is an Engine observation, not persisted user consent.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LocalExecutionIdentity {
+    pub session_id: String,
+    pub holder_incarnation: String,
+    pub child_pid: i32,
+    pub child_start_sec: i64,
+}
+
 /// Small input-side composer mirror used only until the first real prompt is
 /// submitted. It avoids parsing an Agent's rendered screen or reading remote
 /// transcript files, and disappears from the hot path after the title exists.
@@ -1049,6 +1062,43 @@ impl Session {
     /// The child's pid (0 before it is known), for tree enumeration.
     pub fn child_pid(&self) -> i32 {
         self.shared.child_pid.load(Ordering::SeqCst)
+    }
+
+    /// Returns a fresh, exact identity only for a live local held execution.
+    ///
+    /// Direct, remote, deferred, exited, hibernated, pre-incarnation, and
+    /// internally inconsistent sessions fail closed with `None`.
+    pub fn local_execution_identity(&self) -> Option<LocalExecutionIdentity> {
+        if self.shared.exited.load(Ordering::SeqCst)
+            || self.shared.hibernated.load(Ordering::SeqCst)
+            || self
+                .deferred
+                .as_ref()
+                .is_some_and(|state| !state.state.lock().expect("deferred").launched)
+        {
+            return None;
+        }
+        let Transport::Held(client) = &self.transport else {
+            return None;
+        };
+        let stat = client.stat().ok()?;
+        let incarnation = stat.incarnation?;
+        let child_start_sec = stat.child_start_sec?;
+        let known_pid = self.shared.child_pid.load(Ordering::SeqCst);
+        if !stat.alive
+            || stat.child_pid <= 1
+            || stat.child_pid != known_pid
+            || incarnation.len() != 32
+            || !incarnation.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return None;
+        }
+        Some(LocalExecutionIdentity {
+            session_id: self.shared.id.clone(),
+            holder_incarnation: incarnation,
+            child_pid: stat.child_pid,
+            child_start_sec,
+        })
     }
 
     pub fn screen_size(&self) -> (usize, usize) {

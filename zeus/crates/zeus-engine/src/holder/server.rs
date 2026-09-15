@@ -46,6 +46,10 @@ struct Shared {
     /// Log tail at the moment this holder started: the boundary between prior
     /// incarnations' bytes and bytes attributable to THIS child.
     epoch_offset: u64,
+    /// Cryptographically random identity for this exact Holder lifetime.
+    incarnation: String,
+    /// Captured once after spawn; paired with the pid to reject pid reuse.
+    child_start_sec: Option<i64>,
     finished: AtomicBool,
     listen_fd: AtomicI32,
 }
@@ -92,6 +96,8 @@ impl HolderServer {
         };
         let pty = Pty::spawn(&pty_spec).map_err(|error| HolderError::io("PTY spawn", error))?;
         let child_pid = pty.pid() as i32;
+        let child_start_sec = process_tree::start_time(child_pid);
+        let incarnation = random_incarnation()?;
 
         // Nonblocking master: the reader drains in bursts, and writes bound
         // their patience with poll rather than blocking the control loop.
@@ -116,6 +122,8 @@ impl HolderServer {
             pty: Mutex::new(pty),
             log: Mutex::new(log),
             epoch_offset,
+            incarnation,
+            child_start_sec,
             finished: AtomicBool::new(false),
             listen_fd: AtomicI32::new(listen_fd),
             spec,
@@ -391,7 +399,17 @@ fn current_stat(shared: &Shared) -> HolderStat {
         cols: size.map(|(cols, _)| cols),
         rows: size.map(|(_, rows)| rows),
         epoch_offset: Some(shared.epoch_offset),
+        incarnation: Some(shared.incarnation.clone()),
+        child_start_sec: shared.child_start_sec,
     }
+}
+
+fn random_incarnation() -> HolderResult<String> {
+    let mut bytes = [0_u8; 16];
+    getrandom::fill(&mut bytes).map_err(|error| {
+        HolderError::Launch(format!("secure Holder incarnation failed: {error}"))
+    })?;
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
 fn write_pid_file(path: &str) -> HolderResult<()> {

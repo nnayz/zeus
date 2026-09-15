@@ -106,6 +106,11 @@ fn a_held_session_survives_its_session_object_and_is_adoptable() {
         )
         .unwrap();
     let child_pid = session.child_pid();
+    let execution = session
+        .local_execution_identity()
+        .expect("new Holder reports an exact execution identity");
+    assert_eq!(execution.session_id, "s_sur");
+    assert_eq!(execution.child_pid, child_pid);
     drop(session);
 
     // The holder — a separate process — still owns a live child.
@@ -123,6 +128,11 @@ fn a_held_session_survives_its_session_object_and_is_adoptable() {
     )
     .expect("adopt");
     assert_eq!(adopted.child_pid(), child_pid);
+    assert_eq!(
+        adopted.local_execution_identity().as_ref(),
+        Some(&execution),
+        "Engine adoption preserves the exact Holder/child execution"
+    );
     assert_ne!(
         adopted.terminal_control_state().epoch.incarnation,
         lease.epoch.incarnation

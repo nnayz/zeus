@@ -59,7 +59,8 @@ pub use pty::{Exit, Pty, PtySpec};
 pub use registry::Registry;
 pub use screen::HeadlessScreen;
 pub use session::{
-    HolderConfig, RemoteAdoptSpec, RemoteSessionSpec, Session, SessionSpec, SessionView,
+    HolderConfig, LocalExecutionIdentity, RemoteAdoptSpec, RemoteSessionSpec, Session, SessionSpec,
+    SessionView,
 };
 pub use status::{Authority, ReducerOutcome, StatusReducer, StatusSignal};
 

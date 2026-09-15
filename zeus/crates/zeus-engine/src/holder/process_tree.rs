@@ -27,7 +27,7 @@ struct Observed {
 }
 
 /// The start time of `pid`, or `None` if it is gone. The identity check.
-fn start_time(pid: i32) -> Option<i64> {
+pub(crate) fn start_time(pid: i32) -> Option<i64> {
     platform::observe(pid).map(|process| process.start_sec)
 }
 

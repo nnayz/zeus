@@ -39,9 +39,10 @@ Relevant implementation facts, not proof that the feature is feasible:
 
 - `crates/zeus-proto/src/model.rs` has `SessionRecord` and `SessionStatus`, but no
   closed-lid consent, local execution generation, or power lease model.
-- `crates/zeus-engine/src/holder/protocol.rs` reports child PID, liveness, log
-  and epoch offsets, plus optional Holder incarnation and kernel-observed child
-  start identity. The identity fields can be absent for older Holders, and they
+- `crates/zeus-engine/src/holder/protocol.rs` reports session ID, child PID,
+  liveness, log/epoch offsets, optional Holder incarnation, and exact opaque
+  Holder/child birth tokens (with legacy start fields retained). The exact
+  identity fields can be absent for older Holders, and they
   do not by themselves encode consent or the Engine/helper lease identities.
 - `crates/zeus-engine/src/registry.rs` can adopt live holders, respawn under an
   existing record, and hibernate/wake a process tree. Session ID alone therefore
@@ -237,8 +238,9 @@ cannot be made trustworthy, P6 must record **NO-GO**.
 | User problem and candidate mechanism | Issue #70 and `CLOSED_LID_PLAN.md` | DOCUMENTED, NOT VALIDATED | Primary-source review and physical matrix |
 | Current privilege conflict | `../AGENTS.md` | CONFIRMED BY REPO POLICY | Written narrow exception or no-go |
 | Remote scope is separate | `REMOTE_PORT.md`; issue #70 | CONFIRMED BY REPO DESIGN | Regression review showing no remote changes |
-| Session/status model lacks proposed consent/generation | `crates/zeus-proto/src/model.rs` | CONFIRMED BY SOURCE REVIEW | Mock policy model and versioned design |
-| Adoption/respawn/hibernate affect identity policy | `crates/zeus-engine/src/registry.rs`; holder protocol | CONFIRMED BY SOURCE REVIEW | Lifecycle fixtures and adversarial identity tests |
+| Session/status model lacks proposed consent/generation | `crates/zeus-proto/src/model.rs`; pure `zeus-power` policy core | MODEL AND UNIT TESTS COMPLETE; ENGINE CONSENT NOT INTEGRATED | Engine coordinator, caller authorization and UI policy after approval |
+| Adoption/respawn/hibernate affect identity policy | Exact Holder/child birth-token and identity-pinned adoption fixtures | MOCK/LOCAL LIFECYCLE TESTED | Engine restart/upgrade adversarial soak and physical matrix |
+| Lease/recovery semantics | `zeus-power` bounded codec, auth binding, lease reducer and fake recovery backend | PURE MODEL FAULT-TESTED; NO PLATFORM BACKEND | Durable journal, signed IPC, helper-death/global-state resolution |
 | Existing updater is not helper lifecycle support | `crates/zeus-updater/src/install.rs` | CONFIRMED BY SOURCE REVIEW | Signed install/update/rollback/uninstall rehearsal |
 | Desktop packaging baseline | `PACKAGING.md`; `scripts/package.sh` | CONFIRMED BY REPO DOCS | Nested helper signing and notarized artifact tests |
 | `pmset disablesleep` works across macOS 15+ and both CPUs | None in this work | **PHYSICAL TEST NOT RUN** | Attended Apple silicon and Intel test records |

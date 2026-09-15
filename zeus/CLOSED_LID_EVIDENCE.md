@@ -17,9 +17,9 @@ Collected at `2026-09-15T15:40:21Z` on one Apple-silicon development Mac:
 | Command Line Tools macOS SDK | 26.5 |
 | `notarytool` | 1.1.2 (41) |
 
-This one host is outside the macOS 15 physical acceptance matrix requested by
-#70. It provides compile-time/API evidence only. Intel and every supported
-release remain untested.
+This single macOS 27 host does not constitute the macOS 15+ physical acceptance
+matrix requested by #70. It provides compile-time/API evidence only. macOS 15,
+macOS 16, Intel, and cross-version behavior remain untested.
 
 ## Primary local SDK evidence
 

@@ -175,8 +175,9 @@ Session ID
 The complete tuple is not present in repository models. `SessionRecord` in
 `crates/zeus-proto/src/model.rs` has status and host/hibernation fields but no
 power consent or local execution generation. `HolderStat` in
-`crates/zeus-engine/src/holder/protocol.rs` has PID/liveness, optional output
-epoch, and optional Holder incarnation and child start identity. Older Holders
+`crates/zeus-engine/src/holder/protocol.rs` has session ID, PID/liveness,
+optional output epoch, Holder incarnation, and opaque Holder/child birth tokens.
+Older Holders
 can omit those identity fields. `crates/zeus-engine/src/registry.rs` can adopt a
 live Holder, respawn under an existing record, and stop/continue a hibernated
 tree. Thus eligibility must fail closed when exact identity is absent, and it
@@ -248,14 +249,20 @@ observe expiry and restore state. `SleepDisabled` does not expire on its own and
 has no Zeus ownership token. If the helper dies after setting it, the global bit
 can outlive the component responsible for clearing it. A journal describes intent
 but cannot execute recovery. A concurrent utility can also write the same value,
-so read-before/write/read-after cannot establish race-free ownership.
+so read-before/write/read-after cannot establish race-free ownership. Likewise,
+a stable installation owner ID cannot distinguish a stale journal from a live
+same-installation Helper: a second Helper could otherwise "recover" the first
+Helper's valid lease. No platform-enforced exclusive Helper lifetime or boot/lease
+incarnation binding exists in this branch.
 
 This combination is an explicit **NO-GO BLOCKER**. Shipment is forbidden unless
 reviewed evidence demonstrates:
 
 - bounded verified restoration after helper kill, crash loop, launchd throttling,
   registration disablement, corrupt/missing state, interrupted update/removal,
-  reboot, and every journal crash point; and
+  reboot, and every journal crash point;
+- platform-enforced exclusive Helper execution across recovery and mutation,
+  with a journal incarnation that distinguishes a live lease from stale state; and
 - a coexistence rule that does not silently clobber externally controlled state,
   with every remaining race explicitly accepted by security/product review.
 
@@ -284,13 +291,13 @@ weaken authentication, PTY/session identity, safety, or restoration.
 |---|---|---|---|
 | Threat inventory matches requested risks | Issue #70; `CLOSED_LID_PLAN.md` | DOCUMENT REVIEW ONLY | Security review and abuse-case signoff |
 | Privilege exception is allowed | None; conflicts with `../AGENTS.md` | **NOT APPROVED** | Written narrow local-only exception |
-| App/Engine/helper path resists unauthorized proxying | Proposed controls only | **NOT TESTED** | Same-UID, second-user, wrong identity, old signed build, replay tests |
-| Helper IPC is bounded and non-generic | Proposed interface only | **NOT IMPLEMENTED** | Codec/API review, fuzzing, negative command/value/path tests |
-| Exact execution authorization is possible | Repo exposes partial identity facts | DESIGN GAP | Pure reducer plus lifecycle/identity fixtures |
-| Journal recovery is deterministic | Proposed state machine only | **NOT TESTED** | All crash points, permissions, links, corruption, disk full |
+| App/Engine/helper path resists unauthorized proxying | Pure peer-policy and channel/replay/response-binding negative tests | **PARTIAL / PLATFORM NOT TESTED** | Real audit-token consumption, same-UID/user, old signed build and proxy tests |
+| Helper IPC is bounded and non-generic | Fixed 4096-byte codec, bounded TTL/list, exact tags and negative unit tests | **PURE MODEL IMPLEMENTED** | Fuzzing and authenticated signed IPC adapter review |
+| Exact execution authorization is possible | Exact opaque Holder/child birth tokens, pinned adoption and pure eligibility tests | **LOCAL/MOCK TESTED** | Consent/generation Engine integration, restart/upgrade and physical fixtures |
+| Journal recovery is deterministic | Pure state machine has before/after-effect fault tests and refuses ambiguous `Prepared + Disabled`; no durable backend | **PARTIAL / PLATFORM NOT TESTED** | Atomic replace/fsync, permissions, links, torn writes, disk full and physical failure points |
 | Global-boolean coexistence is safe | Issue and plan identify non-tokenized state | **UNRESOLVED NO-GO BLOCKER** | Concurrent physical writers and approved residual-risk decision |
 | Helper-death cleanup is bounded | No self-enforcing lease mechanism | **UNRESOLVED NO-GO BLOCKER** | Signed lab kill/crash-loop/throttle/disable/recovery results |
-| AC/thermal/unknown evidence fails safely | Proposed policy only | **NOT TESTED** | Signal injection and attended physical validation |
+| AC/thermal/unknown evidence fails safely | Pure missing/stale/future/unsafe observation tests | **MOCK TESTED / PLATFORM NOT TESTED** | Real source injection and attended physical validation |
 | `pmset` behavior works on supported Macs | No execution in this work | **PHYSICAL TEST NOT RUN** | macOS 15+ Apple silicon and Intel records |
 | ServiceManagement identity/lifecycle works | No execution in this work | **PHYSICAL TEST NOT RUN** | Signed install/update/rollback/uninstall lab report |
 | Closed-lid Agent makes continuous progress | No execution in this work | **PHYSICAL TEST NOT RUN** | Same PID and start identity plus timestamped progress |

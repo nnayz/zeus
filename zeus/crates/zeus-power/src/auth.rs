@@ -1,6 +1,6 @@
 //! Fail-closed policy for facts obtained from an authenticated local transport.
 
-use crate::wire::{BuildId, ProtocolVersion, Request};
+use crate::wire::{BuildId, ProtocolVersion, Request, Response};
 
 pub const MAX_SIGNING_IDENTITY_BYTES: usize = 256;
 
@@ -147,11 +147,12 @@ impl PeerPolicy {
 /// Connection-scoped proof produced only after the platform peer identity has
 /// passed [`PeerPolicy`]. It binds requests to both live component
 /// incarnations and rejects replay before policy code sees a command.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct ConnectionBinding {
     authenticated_build_id: BuildId,
     helper_boot_nonce: [u8; 16],
     engine_incarnation: [u8; 16],
+    channel_nonce: [u8; 16],
     last_sequence: u64,
 }
 
@@ -161,7 +162,16 @@ pub enum RequestRejection {
     WrongBuild,
     StaleHelperIncarnation,
     StaleEngineIncarnation,
+    StaleChannel,
     Replay,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResponseRejection {
+    StaleHelperIncarnation,
+    StaleEngineIncarnation,
+    StaleChannel,
+    WrongSequence,
 }
 
 impl ConnectionBinding {
@@ -170,15 +180,18 @@ impl ConnectionBinding {
         peer: &AuthenticatedPeerFacts,
         helper_boot_nonce: [u8; 16],
         engine_incarnation: [u8; 16],
+        channel_nonce: [u8; 16],
     ) -> Result<Self, PeerRejection> {
         policy.evaluate(peer)?;
-        if helper_boot_nonce == [0; 16] || engine_incarnation == [0; 16] {
+        if helper_boot_nonce == [0; 16] || engine_incarnation == [0; 16] || channel_nonce == [0; 16]
+        {
             return Err(PeerRejection::InvalidPolicy);
         }
         Ok(Self {
             authenticated_build_id: peer.executable_build_id,
             helper_boot_nonce,
             engine_incarnation,
+            channel_nonce,
             last_sequence: 0,
         })
     }
@@ -196,10 +209,35 @@ impl ConnectionBinding {
         if request.engine_incarnation != self.engine_incarnation {
             return Err(RequestRejection::StaleEngineIncarnation);
         }
+        if request.channel_nonce != self.channel_nonce {
+            return Err(RequestRejection::StaleChannel);
+        }
         if request.sequence == 0 || request.sequence <= self.last_sequence {
             return Err(RequestRejection::Replay);
         }
         self.last_sequence = request.sequence;
+        Ok(())
+    }
+
+    /// Client-side response binding. Construct this binding only after applying
+    /// a Helper-role [`PeerPolicy`] to audit-token/code-signing facts.
+    pub fn authorize_response(
+        &self,
+        response: &Response,
+        expected_sequence: u64,
+    ) -> Result<(), ResponseRejection> {
+        if response.helper_boot_nonce != self.helper_boot_nonce {
+            return Err(ResponseRejection::StaleHelperIncarnation);
+        }
+        if response.engine_incarnation != self.engine_incarnation {
+            return Err(ResponseRejection::StaleEngineIncarnation);
+        }
+        if response.channel_nonce != self.channel_nonce {
+            return Err(ResponseRejection::StaleChannel);
+        }
+        if expected_sequence == 0 || response.request_sequence != expected_sequence {
+            return Err(ResponseRejection::WrongSequence);
+        }
         Ok(())
     }
 }
@@ -334,6 +372,7 @@ mod tests {
             client_build_id: build(7),
             helper_boot_nonce: [3; 16],
             engine_incarnation: [4; 16],
+            channel_nonce: [5; 16],
             sequence,
             command: crate::wire::RequestCommand::Status,
         }
@@ -341,8 +380,9 @@ mod tests {
 
     #[test]
     fn connection_binding_rejects_replay_and_stale_incarnations() {
-        let mut binding = ConnectionBinding::authenticate(&policy(), &peer(), [3; 16], [4; 16])
-            .expect("exact peer binds");
+        let mut binding =
+            ConnectionBinding::authenticate(&policy(), &peer(), [3; 16], [4; 16], [5; 16])
+                .expect("exact peer binds");
         assert_eq!(binding.authorize(&request(1)), Ok(()));
         assert_eq!(
             binding.authorize(&request(1)),
@@ -363,6 +403,13 @@ mod tests {
             Err(RequestRejection::StaleEngineIncarnation)
         );
 
+        let mut stale_channel = request(2);
+        stale_channel.channel_nonce = [9; 16];
+        assert_eq!(
+            binding.authorize(&stale_channel),
+            Err(RequestRejection::StaleChannel)
+        );
+
         let mut wrong_build = request(2);
         wrong_build.client_build_id = build(8);
         assert_eq!(
@@ -370,5 +417,24 @@ mod tests {
             Err(RequestRejection::WrongBuild)
         );
         assert_eq!(binding.authorize(&request(2)), Ok(()));
+
+        let response = Response {
+            helper_boot_nonce: [3; 16],
+            engine_incarnation: [4; 16],
+            channel_nonce: [5; 16],
+            request_sequence: 2,
+            body: crate::wire::ResponseBody::Ack(crate::wire::AckKind::Renewed),
+        };
+        assert_eq!(binding.authorize_response(&response, 2), Ok(()));
+        assert_eq!(
+            binding.authorize_response(&response, 1),
+            Err(ResponseRejection::WrongSequence)
+        );
+        let mut stale_response = response;
+        stale_response.channel_nonce = [9; 16];
+        assert_eq!(
+            binding.authorize_response(&stale_response, 2),
+            Err(ResponseRejection::StaleChannel)
+        );
     }
 }

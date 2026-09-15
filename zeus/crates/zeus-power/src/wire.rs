@@ -8,7 +8,8 @@ use crate::eligibility::{LocalExecutionIdentity, ProcessIdentity};
 pub const MAGIC: [u8; 4] = *b"ZPWR";
 pub const CURRENT_PROTOCOL: ProtocolVersion = ProtocolVersion { major: 1, minor: 0 };
 pub const MAX_FRAME_BYTES: usize = 4096;
-pub const MAX_EXECUTIONS_PER_REQUEST: usize = 64;
+pub const MAX_EXECUTIONS_PER_REQUEST: usize = 48;
+pub const MAX_LEASE_TTL_MILLIS: u32 = 90_000;
 const HEADER_BYTES: usize = 14;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -27,6 +28,9 @@ pub struct Request {
     pub helper_boot_nonce: [u8; 16],
     /// Fresh Engine identity. It must not be reused after Engine restart.
     pub engine_incarnation: [u8; 16],
+    /// Fresh challenge for this authenticated channel. Reconnect creates a new
+    /// value, so replay state never silently resets for captured frames.
+    pub channel_nonce: [u8; 16],
     /// Strictly increasing within an authenticated connection/incarnation.
     pub sequence: u64,
     pub command: RequestCommand,
@@ -37,12 +41,14 @@ pub enum RequestCommand {
     Status,
     Acquire {
         lease_id: [u8; 16],
-        deadline_ticks: u64,
+        /// Bounded duration, never a caller-clock absolute deadline. The Helper
+        /// converts it using its boot-scoped continuous monotonic clock.
+        ttl_millis: u32,
         executions: Vec<LocalExecutionIdentity>,
     },
     Renew {
         lease_id: [u8; 16],
-        deadline_ticks: u64,
+        ttl_millis: u32,
         executions: Vec<LocalExecutionIdentity>,
     },
     Release {
@@ -57,6 +63,7 @@ pub struct Response {
     /// Engine incarnations unnoticed.
     pub helper_boot_nonce: [u8; 16],
     pub engine_incarnation: [u8; 16],
+    pub channel_nonce: [u8; 16],
     pub request_sequence: u64,
     pub body: ResponseBody,
 }
@@ -81,7 +88,7 @@ pub struct StatusResponse {
     pub active: bool,
     pub allow_sleep_now_latched: bool,
     pub selected_execution_count: u16,
-    pub deadline_ticks: Option<u64>,
+    pub remaining_ttl_millis: Option<u32>,
     pub safety: WireSafetyState,
 }
 
@@ -122,6 +129,7 @@ pub enum CodecError {
     TooManyExecutions,
     InvalidBoolean,
     InvalidIdentity,
+    InvalidTtl,
     TrailingBytes,
 }
 
@@ -131,24 +139,25 @@ impl Request {
         body.extend_from_slice(&self.client_build_id.0);
         body.extend_from_slice(&self.helper_boot_nonce);
         body.extend_from_slice(&self.engine_incarnation);
+        body.extend_from_slice(&self.channel_nonce);
         put_u64(&mut body, self.sequence);
         match &self.command {
             RequestCommand::Status => body.push(0),
             RequestCommand::Acquire {
                 lease_id,
-                deadline_ticks,
+                ttl_millis,
                 executions,
             } => {
                 body.push(1);
-                encode_lease(&mut body, lease_id, *deadline_ticks, executions)?;
+                encode_lease(&mut body, lease_id, *ttl_millis, executions)?;
             }
             RequestCommand::Renew {
                 lease_id,
-                deadline_ticks,
+                ttl_millis,
                 executions,
             } => {
                 body.push(2);
-                encode_lease(&mut body, lease_id, *deadline_ticks, executions)?;
+                encode_lease(&mut body, lease_id, *ttl_millis, executions)?;
             }
             RequestCommand::Release { lease_id } => {
                 body.push(3);
@@ -165,22 +174,23 @@ impl Request {
         let client_build_id = BuildId(cursor.array()?);
         let helper_boot_nonce = cursor.array()?;
         let engine_incarnation = cursor.array()?;
+        let channel_nonce = cursor.array()?;
         let sequence = cursor.u64()?;
         let command = match cursor.u8()? {
             0 => RequestCommand::Status,
             1 => {
-                let (lease_id, deadline_ticks, executions) = decode_lease(&mut cursor)?;
+                let (lease_id, ttl_millis, executions) = decode_lease(&mut cursor)?;
                 RequestCommand::Acquire {
                     lease_id,
-                    deadline_ticks,
+                    ttl_millis,
                     executions,
                 }
             }
             2 => {
-                let (lease_id, deadline_ticks, executions) = decode_lease(&mut cursor)?;
+                let (lease_id, ttl_millis, executions) = decode_lease(&mut cursor)?;
                 RequestCommand::Renew {
                     lease_id,
-                    deadline_ticks,
+                    ttl_millis,
                     executions,
                 }
             }
@@ -195,6 +205,7 @@ impl Request {
             client_build_id,
             helper_boot_nonce,
             engine_incarnation,
+            channel_nonce,
             sequence,
             command,
         })
@@ -206,17 +217,24 @@ impl Response {
         let mut body = Vec::with_capacity(64);
         body.extend_from_slice(&self.helper_boot_nonce);
         body.extend_from_slice(&self.engine_incarnation);
+        body.extend_from_slice(&self.channel_nonce);
         put_u64(&mut body, self.request_sequence);
         match self.body {
             ResponseBody::Status(status) => {
                 body.push(0);
                 body.push(status.active.into());
                 body.push(status.allow_sleep_now_latched.into());
+                if usize::from(status.selected_execution_count) > MAX_EXECUTIONS_PER_REQUEST {
+                    return Err(CodecError::TooManyExecutions);
+                }
                 put_u16(&mut body, status.selected_execution_count);
-                match status.deadline_ticks {
-                    Some(deadline) => {
+                match status.remaining_ttl_millis {
+                    Some(ttl_millis) => {
+                        if ttl_millis == 0 || ttl_millis > MAX_LEASE_TTL_MILLIS {
+                            return Err(CodecError::InvalidTtl);
+                        }
                         body.push(1);
-                        put_u64(&mut body, deadline);
+                        put_u32(&mut body, ttl_millis);
                     }
                     None => body.push(0),
                 }
@@ -239,14 +257,22 @@ impl Response {
         let mut cursor = Cursor::new(body);
         let helper_boot_nonce = cursor.array()?;
         let engine_incarnation = cursor.array()?;
+        let channel_nonce = cursor.array()?;
         let request_sequence = cursor.u64()?;
         let response_body = match cursor.u8()? {
             0 => {
                 let active = cursor.boolean()?;
                 let allow_sleep_now_latched = cursor.boolean()?;
                 let selected_execution_count = cursor.u16()?;
-                let deadline_ticks = if cursor.boolean()? {
-                    Some(cursor.u64()?)
+                if usize::from(selected_execution_count) > MAX_EXECUTIONS_PER_REQUEST {
+                    return Err(CodecError::TooManyExecutions);
+                }
+                let remaining_ttl_millis = if cursor.boolean()? {
+                    let ttl = cursor.u32()?;
+                    if ttl == 0 || ttl > MAX_LEASE_TTL_MILLIS {
+                        return Err(CodecError::InvalidTtl);
+                    }
+                    Some(ttl)
                 } else {
                     None
                 };
@@ -255,7 +281,7 @@ impl Response {
                     active,
                     allow_sleep_now_latched,
                     selected_execution_count,
-                    deadline_ticks,
+                    remaining_ttl_millis,
                     safety,
                 })
             }
@@ -267,6 +293,7 @@ impl Response {
         Ok(Self {
             helper_boot_nonce,
             engine_incarnation,
+            channel_nonce,
             request_sequence,
             body: response_body,
         })
@@ -276,14 +303,17 @@ impl Response {
 fn encode_lease(
     body: &mut Vec<u8>,
     lease_id: &[u8; 16],
-    deadline: u64,
+    ttl_millis: u32,
     executions: &[LocalExecutionIdentity],
 ) -> Result<(), CodecError> {
     if executions.len() > MAX_EXECUTIONS_PER_REQUEST {
         return Err(CodecError::TooManyExecutions);
     }
+    if ttl_millis == 0 || ttl_millis > MAX_LEASE_TTL_MILLIS {
+        return Err(CodecError::InvalidTtl);
+    }
     body.extend_from_slice(lease_id);
-    put_u64(body, deadline);
+    put_u32(body, ttl_millis);
     put_u16(body, executions.len() as u16);
     for execution in executions {
         encode_execution(body, execution);
@@ -293,9 +323,12 @@ fn encode_lease(
 
 fn decode_lease(
     cursor: &mut Cursor<'_>,
-) -> Result<([u8; 16], u64, Vec<LocalExecutionIdentity>), CodecError> {
+) -> Result<([u8; 16], u32, Vec<LocalExecutionIdentity>), CodecError> {
     let lease_id = cursor.array()?;
-    let deadline = cursor.u64()?;
+    let ttl_millis = cursor.u32()?;
+    if ttl_millis == 0 || ttl_millis > MAX_LEASE_TTL_MILLIS {
+        return Err(CodecError::InvalidTtl);
+    }
     let count = usize::from(cursor.u16()?);
     if count > MAX_EXECUTIONS_PER_REQUEST {
         return Err(CodecError::TooManyExecutions);
@@ -304,7 +337,7 @@ fn decode_lease(
     for _ in 0..count {
         executions.push(decode_execution(cursor)?);
     }
-    Ok((lease_id, deadline, executions))
+    Ok((lease_id, ttl_millis, executions))
 }
 
 fn encode_execution(body: &mut Vec<u8>, execution: &LocalExecutionIdentity) {
@@ -579,10 +612,11 @@ mod tests {
             client_build_id: BuildId([9; 32]),
             helper_boot_nonce: [8; 16],
             engine_incarnation: [6; 16],
+            channel_nonce: [5; 16],
             sequence: 42,
             command: RequestCommand::Acquire {
                 lease_id: [7; 16],
-                deadline_ticks: 99,
+                ttl_millis: 99,
                 executions: vec![held()],
             },
         };
@@ -591,12 +625,13 @@ mod tests {
         let response = Response {
             helper_boot_nonce: [8; 16],
             engine_incarnation: [6; 16],
+            channel_nonce: [5; 16],
             request_sequence: 42,
             body: ResponseBody::Status(StatusResponse {
                 active: true,
                 allow_sleep_now_latched: false,
                 selected_execution_count: 1,
-                deadline_ticks: Some(99),
+                remaining_ttl_millis: Some(99),
                 safety: WireSafetyState::Safe,
             }),
         };
@@ -609,6 +644,7 @@ mod tests {
             client_build_id: BuildId([0; 32]),
             helper_boot_nonce: [0; 16],
             engine_incarnation: [1; 16],
+            channel_nonce: [2; 16],
             sequence: 1,
             command: RequestCommand::Status,
         };
@@ -635,33 +671,85 @@ mod tests {
             client_build_id: BuildId([0; 32]),
             helper_boot_nonce: [0; 16],
             engine_incarnation: [1; 16],
+            channel_nonce: [2; 16],
             sequence: 1,
             command: RequestCommand::Renew {
                 lease_id: [1; 16],
-                deadline_ticks: 2,
+                ttl_millis: 2,
                 executions: vec![held(); MAX_EXECUTIONS_PER_REQUEST + 1],
             },
         };
         assert_eq!(request.encode(), Err(CodecError::TooManyExecutions));
 
+        let maximum = Request {
+            client_build_id: BuildId([0; 32]),
+            helper_boot_nonce: [1; 16],
+            engine_incarnation: [2; 16],
+            channel_nonce: [3; 16],
+            sequence: 1,
+            command: RequestCommand::Acquire {
+                lease_id: [4; 16],
+                ttl_millis: MAX_LEASE_TTL_MILLIS,
+                executions: vec![held(); MAX_EXECUTIONS_PER_REQUEST],
+            },
+        };
+        let encoded = maximum.encode().expect("documented maximum fits frame");
+        assert!(encoded.len() <= MAX_FRAME_BYTES);
+        assert_eq!(Request::decode(&encoded), Ok(maximum));
+
         let mut frame = Request {
             client_build_id: BuildId([0; 32]),
             helper_boot_nonce: [0; 16],
             engine_incarnation: [1; 16],
+            channel_nonce: [2; 16],
             sequence: 1,
             command: RequestCommand::Acquire {
                 lease_id: [1; 16],
-                deadline_ticks: 2,
+                ttl_millis: 2,
                 executions: vec![],
             },
         }
         .encode()
         .unwrap();
-        // count follows header + build + both incarnations + sequence + tag + lease + deadline.
-        let count_offset = HEADER_BYTES + 32 + 16 + 16 + 8 + 1 + 16 + 8;
+        // count follows header + build + helper/Engine/channel nonces + sequence + tag + lease + TTL.
+        let count_offset = HEADER_BYTES + 32 + 16 + 16 + 16 + 8 + 1 + 16 + 4;
         frame[count_offset..count_offset + 2]
             .copy_from_slice(&((MAX_EXECUTIONS_PER_REQUEST + 1) as u16).to_be_bytes());
         assert_eq!(Request::decode(&frame), Err(CodecError::TooManyExecutions));
+    }
+
+    #[test]
+    fn ttl_and_status_counts_are_bounded() {
+        for ttl_millis in [0, MAX_LEASE_TTL_MILLIS + 1] {
+            let request = Request {
+                client_build_id: BuildId([1; 32]),
+                helper_boot_nonce: [2; 16],
+                engine_incarnation: [3; 16],
+                channel_nonce: [4; 16],
+                sequence: 1,
+                command: RequestCommand::Acquire {
+                    lease_id: [5; 16],
+                    ttl_millis,
+                    executions: vec![],
+                },
+            };
+            assert_eq!(request.encode(), Err(CodecError::InvalidTtl));
+        }
+
+        let response = Response {
+            helper_boot_nonce: [2; 16],
+            engine_incarnation: [3; 16],
+            channel_nonce: [4; 16],
+            request_sequence: 1,
+            body: ResponseBody::Status(StatusResponse {
+                active: true,
+                allow_sleep_now_latched: false,
+                selected_execution_count: (MAX_EXECUTIONS_PER_REQUEST + 1) as u16,
+                remaining_ttl_millis: Some(1),
+                safety: WireSafetyState::Safe,
+            }),
+        };
+        assert_eq!(response.encode(), Err(CodecError::TooManyExecutions));
     }
 
     #[test]

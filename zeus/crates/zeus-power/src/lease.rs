@@ -4,6 +4,9 @@ use std::collections::BTreeSet;
 
 use crate::eligibility::{EligibleExecution, LocalExecutionIdentity};
 
+/// Milliseconds from one boot-scoped continuous monotonic clock that advances
+/// through system sleep (for example, `mach_continuous_time` on macOS).
+/// Values from another boot or clock domain must never enter one coordinator.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct MonotonicTime(pub u64);
 
@@ -73,7 +76,7 @@ impl Default for LeasePolicy {
             maximum_signal_age: 30_000,
             maximum_renew_window: 90_000,
             maximum_total_duration: 8 * 60 * 60 * 1_000,
-            maximum_selected_executions: 64,
+            maximum_selected_executions: crate::wire::MAX_EXECUTIONS_PER_REQUEST,
         }
     }
 }

@@ -38,8 +38,18 @@ pub enum SleepObservation {
     Unknown,
 }
 
+mod sealed {
+    pub trait Sealed {}
+}
+
 /// Semantic effects only. There is no arbitrary command, path, or boolean setter.
-pub trait RecoveryBackend {
+///
+/// Production implementations must make journal replacement atomic and durable
+/// through file and parent-directory synchronization. A successful write must
+/// survive restart as the complete old or complete new record, never torn data.
+/// The trait is sealed so callers cannot bypass [`RecoveryMachine`] with a
+/// separately implemented mutating backend.
+pub trait RecoveryBackend: sealed::Sealed {
     type Error;
     fn read_journal(&mut self) -> Result<JournalObservation, Self::Error>;
     fn write_journal(&mut self, record: RecoveryRecord) -> Result<(), Self::Error>;
@@ -64,6 +74,7 @@ pub enum AmbiguousReason {
     UnexpectedSystemState,
     InvalidRecord,
     MutationNotVerified,
+    PreparedOwnershipUnproven,
     RestorationNotVerified,
 }
 
@@ -81,23 +92,36 @@ pub enum RecoveryState {
 pub enum RecoveryError<E> {
     Backend(E),
     NotReady,
+    InvalidGeneration,
     Conflict(ConflictReason),
     Ambiguous(AmbiguousReason),
 }
 
 pub struct RecoveryMachine<B: RecoveryBackend> {
     backend: B,
+    /// Stable installation owner loaded from root-owned state. It is not a
+    /// per-process nonce; helper restarts must present the same owner.
     owner: [u8; 16],
+    last_generation: u64,
     state: RecoveryState,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RecoveryConfigError {
+    ZeroOwner,
+}
+
 impl<B: RecoveryBackend> RecoveryMachine<B> {
-    pub fn new(backend: B, owner: [u8; 16]) -> Self {
-        Self {
+    pub fn new(backend: B, owner: [u8; 16]) -> Result<Self, RecoveryConfigError> {
+        if owner == [0; 16] {
+            return Err(RecoveryConfigError::ZeroOwner);
+        }
+        Ok(Self {
             backend,
             owner,
+            last_generation: 0,
             state: RecoveryState::Recovering,
-        }
+        })
     }
 
     pub fn state(&self) -> RecoveryState {
@@ -106,7 +130,8 @@ impl<B: RecoveryBackend> RecoveryMachine<B> {
     pub fn backend(&self) -> &B {
         &self.backend
     }
-    pub fn into_backend(self) -> B {
+    #[cfg(test)]
+    fn into_backend(self) -> B {
         self.backend
     }
 
@@ -132,6 +157,10 @@ impl<B: RecoveryBackend> RecoveryMachine<B> {
                 if !valid_record(record) {
                     return self.ambiguous(AmbiguousReason::InvalidRecord);
                 }
+                if record.owner != self.owner {
+                    return self.conflict(ConflictReason::DifferentOwner);
+                }
+                self.last_generation = self.last_generation.max(record.generation);
                 let observed = self.call(|b| b.observe_sleep())?;
                 match (record.phase, observed) {
                     (JournalPhase::Prepared, SleepObservation::Enabled) => {
@@ -139,8 +168,13 @@ impl<B: RecoveryBackend> RecoveryMachine<B> {
                         self.state = RecoveryState::Ready;
                         Ok(())
                     }
-                    (JournalPhase::Prepared, SleepObservation::Disabled)
-                    | (JournalPhase::Owned, SleepObservation::Disabled)
+                    // Prepared proves durable intent, not that Zeus performed
+                    // the global mutation. Another utility could have written
+                    // the same boolean before Zeus did. Never clear it blindly.
+                    (JournalPhase::Prepared, SleepObservation::Disabled) => {
+                        self.ambiguous(AmbiguousReason::PreparedOwnershipUnproven)
+                    }
+                    (JournalPhase::Owned, SleepObservation::Disabled)
                     | (JournalPhase::Restoring, SleepObservation::Disabled) => self.restore(record),
                     (JournalPhase::Restoring, SleepObservation::Enabled) => {
                         self.call(|b| b.clear_journal())?;
@@ -162,6 +196,12 @@ impl<B: RecoveryBackend> RecoveryMachine<B> {
         if self.state != RecoveryState::Ready {
             return Err(RecoveryError::NotReady);
         }
+        if generation == 0 || generation <= self.last_generation {
+            return Err(RecoveryError::InvalidGeneration);
+        }
+        // A failed attempt consumes its generation so an in-process replay can
+        // never retry the same intent after an ambiguous side effect.
+        self.last_generation = generation;
         match self.call(|b| b.read_journal())? {
             JournalObservation::Missing => {}
             JournalObservation::Valid(record) if record.owner != self.owner => {
@@ -296,6 +336,7 @@ pub mod fake {
         pub sleep: SleepObservation,
         operations: usize,
         fail_before: Option<usize>,
+        fail_after: Option<usize>,
     }
 
     impl FakeBackend {
@@ -305,20 +346,26 @@ pub mod fake {
                 sleep: SleepObservation::Enabled,
                 operations: 0,
                 fail_before: None,
+                fail_after: None,
             }
         }
         pub fn fail_before_operation(&mut self, operation: usize) {
             self.operations = 0;
             self.fail_before = Some(operation);
         }
+        pub fn fail_after_operation(&mut self, operation: usize) {
+            self.operations = 0;
+            self.fail_after = Some(operation);
+        }
         pub fn clear_fault(&mut self) {
             self.fail_before = None;
+            self.fail_after = None;
             self.operations = 0;
         }
         pub fn operation_count(&self) -> usize {
             self.operations
         }
-        fn step(&mut self) -> Result<(), FakeError> {
+        fn begin(&mut self) -> Result<(), FakeError> {
             self.operations += 1;
             if self.fail_before == Some(self.operations) {
                 Err(FakeError::InjectedCrash)
@@ -326,37 +373,50 @@ pub mod fake {
                 Ok(())
             }
         }
+        fn end(&mut self) -> Result<(), FakeError> {
+            if self.fail_after == Some(self.operations) {
+                Err(FakeError::InjectedCrash)
+            } else {
+                Ok(())
+            }
+        }
     }
+
+    impl sealed::Sealed for FakeBackend {}
 
     impl RecoveryBackend for FakeBackend {
         type Error = FakeError;
         fn read_journal(&mut self) -> Result<JournalObservation, Self::Error> {
-            self.step()?;
-            Ok(self.journal)
+            self.begin()?;
+            let value = self.journal;
+            self.end()?;
+            Ok(value)
         }
         fn write_journal(&mut self, record: RecoveryRecord) -> Result<(), Self::Error> {
-            self.step()?;
+            self.begin()?;
             self.journal = JournalObservation::Valid(record);
-            Ok(())
+            self.end()
         }
         fn clear_journal(&mut self) -> Result<(), Self::Error> {
-            self.step()?;
+            self.begin()?;
             self.journal = JournalObservation::Missing;
-            Ok(())
+            self.end()
         }
         fn observe_sleep(&mut self) -> Result<SleepObservation, Self::Error> {
-            self.step()?;
-            Ok(self.sleep)
+            self.begin()?;
+            let value = self.sleep;
+            self.end()?;
+            Ok(value)
         }
         fn disable_sleep(&mut self) -> Result<(), Self::Error> {
-            self.step()?;
+            self.begin()?;
             self.sleep = SleepObservation::Disabled;
-            Ok(())
+            self.end()
         }
         fn restore_normal_sleep(&mut self) -> Result<(), Self::Error> {
-            self.step()?;
+            self.begin()?;
             self.sleep = SleepObservation::Enabled;
-            Ok(())
+            self.end()
         }
     }
 }
@@ -368,9 +428,13 @@ mod tests {
 
     const OWNER: [u8; 16] = [7; 16];
 
+    fn new_machine(backend: FakeBackend) -> RecoveryMachine<FakeBackend> {
+        RecoveryMachine::new(backend, OWNER).expect("valid owner")
+    }
+
     fn restart_and_recover(mut backend: FakeBackend) -> RecoveryMachine<FakeBackend> {
         backend.clear_fault();
-        let mut restarted = RecoveryMachine::new(backend, OWNER);
+        let mut restarted = new_machine(backend);
         restarted.startup_recover().unwrap();
         assert_eq!(restarted.state(), RecoveryState::Ready);
         assert_eq!(restarted.backend().sleep, SleepObservation::Enabled);
@@ -380,7 +444,7 @@ mod tests {
 
     #[test]
     fn acquire_release_and_uninstall_are_verified() {
-        let mut machine = RecoveryMachine::new(FakeBackend::normal(), OWNER);
+        let mut machine = new_machine(FakeBackend::normal());
         machine.startup_recover().unwrap();
         machine.acquire(1).unwrap();
         assert!(matches!(machine.state(), RecoveryState::Owned(_)));
@@ -391,32 +455,87 @@ mod tests {
     }
 
     #[test]
-    fn acquisition_crash_points_recover_deterministically() {
+    fn acquisition_crash_points_recover_or_remain_ambiguous_without_clobbering() {
         // Operations: journal read, sleep read, journal prepare, disable,
-        // readback, journal owned. A crash before each operation is recoverable.
-        for crash_at in 1..=6 {
+        // readback, journal owned. Before mutation, restart safely returns Ready.
+        for crash_at in 1..=4 {
             let mut backend = FakeBackend::normal();
-            let mut initial = RecoveryMachine::new(backend.clone(), OWNER);
+            let mut initial = new_machine(backend.clone());
             initial.startup_recover().unwrap();
             backend = initial.into_backend();
             backend.fail_before_operation(crash_at);
-            let mut machine = RecoveryMachine::new(backend, OWNER);
-            machine.state = RecoveryState::Ready;
-            assert!(machine.acquire(1).is_err(), "crash point {crash_at}");
-            restart_and_recover(machine.into_backend());
+            let mut attempt = new_machine(backend);
+            attempt.state = RecoveryState::Ready;
+            assert!(attempt.acquire(1).is_err(), "crash point {crash_at}");
+            restart_and_recover(attempt.into_backend());
         }
 
-        // Crash immediately after the final durable commit.
-        let mut machine = RecoveryMachine::new(FakeBackend::normal(), OWNER);
+        // Once the global bit changed but only Prepared is durable, restart
+        // cannot prove Zeus performed the mutation. It leaves the bit alone and
+        // reports the explicit no-go ambiguity instead of blindly restoring.
+        for crash_at in 5..=6 {
+            let mut backend = FakeBackend::normal();
+            let mut initial = new_machine(backend.clone());
+            initial.startup_recover().unwrap();
+            backend = initial.into_backend();
+            backend.fail_before_operation(crash_at);
+            let mut attempt = new_machine(backend);
+            attempt.state = RecoveryState::Ready;
+            assert!(attempt.acquire(1).is_err(), "crash point {crash_at}");
+            let mut restarted = new_machine(attempt.into_backend());
+            assert_eq!(
+                restarted.startup_recover(),
+                Err(RecoveryError::Ambiguous(
+                    AmbiguousReason::PreparedOwnershipUnproven
+                ))
+            );
+            assert_eq!(restarted.backend().sleep, SleepObservation::Disabled);
+        }
+
+        // Crash immediately after the final durable Owned commit is recoverable.
+        let mut machine = new_machine(FakeBackend::normal());
         machine.startup_recover().unwrap();
         machine.acquire(1).unwrap();
         restart_and_recover(machine.into_backend());
     }
 
     #[test]
+    fn acquisition_failures_after_side_effect_never_blindly_restore_prepared_state() {
+        for crash_at in [1, 2, 3, 6] {
+            let mut backend = FakeBackend::normal();
+            let mut initial = new_machine(backend.clone());
+            initial.startup_recover().unwrap();
+            backend = initial.into_backend();
+            backend.fail_after_operation(crash_at);
+            let mut attempt = new_machine(backend);
+            attempt.state = RecoveryState::Ready;
+            assert!(attempt.acquire(1).is_err(), "after operation {crash_at}");
+            restart_and_recover(attempt.into_backend());
+        }
+        for crash_at in [4, 5] {
+            let mut backend = FakeBackend::normal();
+            let mut initial = new_machine(backend.clone());
+            initial.startup_recover().unwrap();
+            backend = initial.into_backend();
+            backend.fail_after_operation(crash_at);
+            let mut attempt = new_machine(backend);
+            attempt.state = RecoveryState::Ready;
+            assert!(attempt.acquire(1).is_err(), "after operation {crash_at}");
+            let mut restarted = new_machine(attempt.into_backend());
+            assert_eq!(
+                restarted.startup_recover(),
+                Err(RecoveryError::Ambiguous(
+                    AmbiguousReason::PreparedOwnershipUnproven
+                ))
+            );
+            assert_eq!(restarted.backend().sleep, SleepObservation::Disabled);
+        }
+    }
+
+    #[test]
     fn release_crash_points_are_idempotently_recovered() {
         for crash_at in 1..=6 {
-            let mut machine = RecoveryMachine::new(FakeBackend::normal(), OWNER);
+            let mut machine = new_machine(FakeBackend::normal());
             machine.startup_recover().unwrap();
             machine.acquire(1).unwrap();
             let mut backend = machine.into_backend();
@@ -425,7 +544,7 @@ mod tests {
                 JournalObservation::Valid(record) => record,
                 _ => unreachable!(),
             };
-            let mut releasing = RecoveryMachine::new(backend, OWNER);
+            let mut releasing = new_machine(backend);
             releasing.state = RecoveryState::Owned(owned);
             assert!(releasing.release().is_err(), "crash point {crash_at}");
             restart_and_recover(releasing.into_backend());
@@ -436,7 +555,7 @@ mod tests {
     fn preexisting_external_state_and_corrupt_journal_are_not_clobbered() {
         let mut external = FakeBackend::normal();
         external.sleep = SleepObservation::Disabled;
-        let mut machine = RecoveryMachine::new(external, OWNER);
+        let mut machine = new_machine(external);
         assert_eq!(
             machine.startup_recover(),
             Err(RecoveryError::Conflict(ConflictReason::PreExistingDisabled))
@@ -445,7 +564,7 @@ mod tests {
 
         let mut corrupt = FakeBackend::normal();
         corrupt.journal = JournalObservation::Corrupt;
-        let mut machine = RecoveryMachine::new(corrupt, OWNER);
+        let mut machine = new_machine(corrupt);
         assert_eq!(
             machine.startup_recover(),
             Err(RecoveryError::Ambiguous(AmbiguousReason::CorruptJournal))
@@ -455,7 +574,7 @@ mod tests {
 
     #[test]
     fn externally_changed_owned_state_becomes_ambiguous() {
-        let mut machine = RecoveryMachine::new(FakeBackend::normal(), OWNER);
+        let mut machine = new_machine(FakeBackend::normal());
         machine.startup_recover().unwrap();
         machine.acquire(1).unwrap();
         machine.backend.sleep = SleepObservation::Enabled;
@@ -483,14 +602,27 @@ mod tests {
         let mut backend = FakeBackend::normal();
         backend.journal = JournalObservation::Valid(record);
         backend.sleep = SleepObservation::Disabled;
-        let mut machine = RecoveryMachine::new(backend, OWNER);
-        // Startup is recovery mode and may clean a stale valid journal regardless
-        // of build owner. Live acquisition never takes over another owner.
-        machine.state = RecoveryState::Ready;
+        let mut machine = new_machine(backend);
         assert_eq!(
-            machine.acquire(2),
+            machine.startup_recover(),
             Err(RecoveryError::Conflict(ConflictReason::DifferentOwner))
         );
         assert_eq!(machine.backend().sleep, SleepObservation::Disabled);
+    }
+
+    #[test]
+    fn zero_owner_and_replayed_generations_fail_before_mutation() {
+        assert!(matches!(
+            RecoveryMachine::new(FakeBackend::normal(), [0; 16]),
+            Err(RecoveryConfigError::ZeroOwner)
+        ));
+        let mut machine = new_machine(FakeBackend::normal());
+        machine.startup_recover().unwrap();
+        assert_eq!(machine.acquire(0), Err(RecoveryError::InvalidGeneration));
+        assert_eq!(machine.backend().journal, JournalObservation::Missing);
+        assert_eq!(machine.backend().sleep, SleepObservation::Enabled);
+        machine.acquire(1).unwrap();
+        machine.release().unwrap();
+        assert_eq!(machine.acquire(1), Err(RecoveryError::InvalidGeneration));
     }
 }

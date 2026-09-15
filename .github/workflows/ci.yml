@@ -58,6 +58,8 @@ jobs:
         run: |
           bash zeus/scripts/test-publish-github-release.sh
           bash zeus/scripts/test-publish-homebrew-cask.sh
+      - name: Test optional power helper package guard
+        run: bash zeus/scripts/check-power-helper-package.sh --self-test
       - name: Install and audit browser sidecar
         working-directory: sidecar
         run: |

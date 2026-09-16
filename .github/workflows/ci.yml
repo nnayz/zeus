@@ -66,6 +66,34 @@ jobs:
           npm ci
           npm audit --omit=dev
 
+  closed-lid-safety:
+    name: Closed-lid mock safety
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: zeus
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5.0.0
+      - name: Cache focused Rust dependencies
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            zeus/target
+          key: ${{ runner.os }}-closed-lid-${{ hashFiles('zeus/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-closed-lid-
+      - name: Enforce mock-only source boundary and test power policy
+        run: cargo test --locked -p zeus-power
+      - name: Test exact Holder execution identity on Linux
+        run: |
+          cargo test --locked -p zeus-engine holder::protocol::tests --lib
+          cargo test --locked -p zeus-engine holder::process_tree::tests --lib
+          cargo test --locked -p zeus-engine --test holder --test holder_session --test deferred --test session
+      - name: Test fail-closed optional package validation
+        run: bash scripts/check-power-helper-package.sh --self-test
+
   app:
     name: Rust app (zeus)
     runs-on: macos-15
@@ -229,6 +257,19 @@ jobs:
         env:
           ZEUS_DIST_DIR: ${{ runner.temp }}/zeus-dist
         run: zeus/scripts/package.sh
+      - name: Verify power helper remains unavailable
+        run: |
+          app="${RUNNER_TEMP}/zeus-dist/zeus.app"
+          helper="${app}/Contents/Library/HelperTools/com.zeus.zeus.power-helper"
+          set +e
+          output="$(zeus/scripts/check-power-helper-package.sh "${app}" 2>&1)"
+          status=$?
+          set -e
+          printf '%s\n' "${output}"
+          test "${status}" -eq 3
+          grep -Fq 'power_helper_unavailable' <<<"${output}"
+          test ! -e "${helper}"
+          test ! -L "${helper}"
       - name: Verify bundle structure and signature
         run: |
           app="${RUNNER_TEMP}/zeus-dist/zeus.app"

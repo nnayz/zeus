@@ -77,6 +77,10 @@ fn a_session_reaches_needs_input_on_its_own() {
         engine(),
     )
     .expect("spawn");
+    assert!(
+        session.local_execution_identity().is_none(),
+        "proposed v1 never treats direct local execution as eligible"
+    );
 
     let reached = wait_until(Duration::from_secs(15), || {
         matches!(session.status(), SessionStatus::NeedsInput(_))

@@ -6,10 +6,11 @@
 use crate::eligibility::{LocalExecutionIdentity, ProcessIdentity};
 
 pub const MAGIC: [u8; 4] = *b"ZPWR";
-pub const CURRENT_PROTOCOL: ProtocolVersion = ProtocolVersion { major: 1, minor: 0 };
+pub const CURRENT_PROTOCOL: ProtocolVersion = ProtocolVersion { major: 1, minor: 1 };
 pub const MAX_FRAME_BYTES: usize = 4096;
 pub const MAX_EXECUTIONS_PER_REQUEST: usize = 48;
 pub const MAX_LEASE_TTL_MILLIS: u32 = 90_000;
+pub const MAX_CONSENT_DURATION_MILLIS: u32 = 8 * 60 * 60 * 1_000;
 const HEADER_BYTES: usize = 14;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -41,20 +42,30 @@ pub enum RequestCommand {
     Status,
     Acquire {
         lease_id: [u8; 16],
+        consent_generation: u64,
+        consent_nonce: [u8; 16],
         /// Bounded duration, never a caller-clock absolute deadline. The Helper
         /// converts it using its boot-scoped continuous monotonic clock.
         ttl_millis: u32,
+        /// Immutable first-acquire horizon enforced by the Helper. Renewal can
+        /// shorten but never reset this bound.
+        maximum_total_duration_millis: u32,
         executions: Vec<LocalExecutionIdentity>,
     },
     Renew {
         lease_id: [u8; 16],
+        consent_generation: u64,
+        consent_nonce: [u8; 16],
         ttl_millis: u32,
         executions: Vec<LocalExecutionIdentity>,
     },
     Release {
         lease_id: [u8; 16],
+        consent_generation: u64,
     },
-    PrepareUninstall,
+    PrepareUninstall {
+        transaction_id: [u8; 16],
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -129,7 +140,13 @@ pub enum CodecError {
     TooManyExecutions,
     InvalidBoolean,
     InvalidIdentity,
+    InvalidLeaseId,
+    InvalidConsent,
+    EmptyExecutions,
+    DuplicateExecution,
+    MixedBootIdentity,
     InvalidTtl,
+    InvalidTotalDuration,
     TrailingBytes,
 }
 
@@ -145,25 +162,62 @@ impl Request {
             RequestCommand::Status => body.push(0),
             RequestCommand::Acquire {
                 lease_id,
+                consent_generation,
+                consent_nonce,
                 ttl_millis,
+                maximum_total_duration_millis,
                 executions,
             } => {
                 body.push(1);
-                encode_lease(&mut body, lease_id, *ttl_millis, executions)?;
+                encode_lease(
+                    &mut body,
+                    lease_id,
+                    *consent_generation,
+                    consent_nonce,
+                    *ttl_millis,
+                    Some(*maximum_total_duration_millis),
+                    executions,
+                )?;
             }
             RequestCommand::Renew {
                 lease_id,
+                consent_generation,
+                consent_nonce,
                 ttl_millis,
                 executions,
             } => {
                 body.push(2);
-                encode_lease(&mut body, lease_id, *ttl_millis, executions)?;
+                encode_lease(
+                    &mut body,
+                    lease_id,
+                    *consent_generation,
+                    consent_nonce,
+                    *ttl_millis,
+                    None,
+                    executions,
+                )?;
             }
-            RequestCommand::Release { lease_id } => {
+            RequestCommand::Release {
+                lease_id,
+                consent_generation,
+            } => {
+                if *lease_id == [0; 16] {
+                    return Err(CodecError::InvalidLeaseId);
+                }
+                if *consent_generation == 0 {
+                    return Err(CodecError::InvalidConsent);
+                }
                 body.push(3);
                 body.extend_from_slice(lease_id);
+                put_u64(&mut body, *consent_generation);
             }
-            RequestCommand::PrepareUninstall => body.push(4),
+            RequestCommand::PrepareUninstall { transaction_id } => {
+                if *transaction_id == [0; 16] {
+                    return Err(CodecError::InvalidLeaseId);
+                }
+                body.push(4);
+                body.extend_from_slice(transaction_id);
+            }
         }
         encode_frame(1, &body)
     }
@@ -179,25 +233,49 @@ impl Request {
         let command = match cursor.u8()? {
             0 => RequestCommand::Status,
             1 => {
-                let (lease_id, ttl_millis, executions) = decode_lease(&mut cursor)?;
+                let lease = decode_lease(&mut cursor, true)?;
                 RequestCommand::Acquire {
-                    lease_id,
-                    ttl_millis,
-                    executions,
+                    lease_id: lease.lease_id,
+                    consent_generation: lease.consent_generation,
+                    consent_nonce: lease.consent_nonce,
+                    ttl_millis: lease.ttl_millis,
+                    maximum_total_duration_millis: lease
+                        .maximum_total_duration_millis
+                        .expect("acquire includes total duration"),
+                    executions: lease.executions,
                 }
             }
             2 => {
-                let (lease_id, ttl_millis, executions) = decode_lease(&mut cursor)?;
+                let lease = decode_lease(&mut cursor, false)?;
                 RequestCommand::Renew {
-                    lease_id,
-                    ttl_millis,
-                    executions,
+                    lease_id: lease.lease_id,
+                    consent_generation: lease.consent_generation,
+                    consent_nonce: lease.consent_nonce,
+                    ttl_millis: lease.ttl_millis,
+                    executions: lease.executions,
                 }
             }
-            3 => RequestCommand::Release {
-                lease_id: cursor.array()?,
-            },
-            4 => RequestCommand::PrepareUninstall,
+            3 => {
+                let lease_id = cursor.array()?;
+                let consent_generation = cursor.u64()?;
+                if lease_id == [0; 16] {
+                    return Err(CodecError::InvalidLeaseId);
+                }
+                if consent_generation == 0 {
+                    return Err(CodecError::InvalidConsent);
+                }
+                RequestCommand::Release {
+                    lease_id,
+                    consent_generation,
+                }
+            }
+            4 => {
+                let transaction_id = cursor.array()?;
+                if transaction_id == [0; 16] {
+                    return Err(CodecError::InvalidLeaseId);
+                }
+                RequestCommand::PrepareUninstall { transaction_id }
+            }
             _ => return Err(CodecError::UnknownTag),
         };
         cursor.finish()?;
@@ -303,17 +381,27 @@ impl Response {
 fn encode_lease(
     body: &mut Vec<u8>,
     lease_id: &[u8; 16],
+    consent_generation: u64,
+    consent_nonce: &[u8; 16],
     ttl_millis: u32,
+    maximum_total_duration_millis: Option<u32>,
     executions: &[LocalExecutionIdentity],
 ) -> Result<(), CodecError> {
-    if executions.len() > MAX_EXECUTIONS_PER_REQUEST {
-        return Err(CodecError::TooManyExecutions);
-    }
-    if ttl_millis == 0 || ttl_millis > MAX_LEASE_TTL_MILLIS {
-        return Err(CodecError::InvalidTtl);
-    }
+    validate_lease(
+        lease_id,
+        consent_generation,
+        consent_nonce,
+        ttl_millis,
+        maximum_total_duration_millis,
+        executions,
+    )?;
     body.extend_from_slice(lease_id);
+    put_u64(body, consent_generation);
+    body.extend_from_slice(consent_nonce);
     put_u32(body, ttl_millis);
+    if let Some(duration) = maximum_total_duration_millis {
+        put_u32(body, duration);
+    }
     put_u16(body, executions.len() as u16);
     for execution in executions {
         encode_execution(body, execution);
@@ -321,14 +409,21 @@ fn encode_lease(
     Ok(())
 }
 
-fn decode_lease(
-    cursor: &mut Cursor<'_>,
-) -> Result<([u8; 16], u32, Vec<LocalExecutionIdentity>), CodecError> {
+struct DecodedLease {
+    lease_id: [u8; 16],
+    consent_generation: u64,
+    consent_nonce: [u8; 16],
+    ttl_millis: u32,
+    maximum_total_duration_millis: Option<u32>,
+    executions: Vec<LocalExecutionIdentity>,
+}
+
+fn decode_lease(cursor: &mut Cursor<'_>, acquire: bool) -> Result<DecodedLease, CodecError> {
     let lease_id = cursor.array()?;
+    let consent_generation = cursor.u64()?;
+    let consent_nonce = cursor.array()?;
     let ttl_millis = cursor.u32()?;
-    if ttl_millis == 0 || ttl_millis > MAX_LEASE_TTL_MILLIS {
-        return Err(CodecError::InvalidTtl);
-    }
+    let maximum_total_duration_millis = if acquire { Some(cursor.u32()?) } else { None };
     let count = usize::from(cursor.u16()?);
     if count > MAX_EXECUTIONS_PER_REQUEST {
         return Err(CodecError::TooManyExecutions);
@@ -337,7 +432,71 @@ fn decode_lease(
     for _ in 0..count {
         executions.push(decode_execution(cursor)?);
     }
-    Ok((lease_id, ttl_millis, executions))
+    validate_lease(
+        &lease_id,
+        consent_generation,
+        &consent_nonce,
+        ttl_millis,
+        maximum_total_duration_millis,
+        &executions,
+    )?;
+    Ok(DecodedLease {
+        lease_id,
+        consent_generation,
+        consent_nonce,
+        ttl_millis,
+        maximum_total_duration_millis,
+        executions,
+    })
+}
+
+fn validate_lease(
+    lease_id: &[u8; 16],
+    consent_generation: u64,
+    consent_nonce: &[u8; 16],
+    ttl_millis: u32,
+    maximum_total_duration_millis: Option<u32>,
+    executions: &[LocalExecutionIdentity],
+) -> Result<(), CodecError> {
+    if *lease_id == [0; 16] {
+        return Err(CodecError::InvalidLeaseId);
+    }
+    if consent_generation == 0 || *consent_nonce == [0; 16] {
+        return Err(CodecError::InvalidConsent);
+    }
+    if executions.is_empty() {
+        return Err(CodecError::EmptyExecutions);
+    }
+    if executions.len() > MAX_EXECUTIONS_PER_REQUEST {
+        return Err(CodecError::TooManyExecutions);
+    }
+    if ttl_millis == 0 || ttl_millis > MAX_LEASE_TTL_MILLIS {
+        return Err(CodecError::InvalidTtl);
+    }
+    if let Some(duration) = maximum_total_duration_millis
+        && (duration == 0 || duration > MAX_CONSENT_DURATION_MILLIS)
+    {
+        return Err(CodecError::InvalidTotalDuration);
+    }
+    let unique: std::collections::BTreeSet<_> = executions.iter().collect();
+    if unique.len() != executions.len() {
+        return Err(CodecError::DuplicateExecution);
+    }
+    let first_boot = execution_boot_id(&executions[0]);
+    if executions
+        .iter()
+        .any(|execution| execution_boot_id(execution) != first_boot)
+    {
+        return Err(CodecError::MixedBootIdentity);
+    }
+    Ok(())
+}
+
+fn execution_boot_id(execution: &LocalExecutionIdentity) -> [u8; 16] {
+    match execution {
+        LocalExecutionIdentity::Direct { host_boot_id, .. }
+        | LocalExecutionIdentity::Held { host_boot_id, .. } => *host_boot_id,
+    }
 }
 
 fn encode_execution(body: &mut Vec<u8>, execution: &LocalExecutionIdentity) {
@@ -590,18 +749,22 @@ mod tests {
     use super::*;
 
     fn held() -> LocalExecutionIdentity {
+        held_with(1)
+    }
+
+    fn held_with(value: u8) -> LocalExecutionIdentity {
         LocalExecutionIdentity::Held {
-            session_id: [1; 16],
-            incarnation: [2; 16],
+            session_id: [value; 16],
+            incarnation: [value.wrapping_add(1); 16],
             host_boot_id: [3; 16],
-            execution_generation: 1,
+            execution_generation: u64::from(value),
             holder: ProcessIdentity {
-                pid: 4,
-                birth_token: 40,
+                pid: u32::from(value) + 1,
+                birth_token: u64::from(value) + 40,
             },
             child: ProcessIdentity {
-                pid: 5,
-                birth_token: 50,
+                pid: u32::from(value) + 100,
+                birth_token: u64::from(value) + 50,
             },
         }
     }
@@ -616,7 +779,10 @@ mod tests {
             sequence: 42,
             command: RequestCommand::Acquire {
                 lease_id: [7; 16],
+                consent_generation: 6,
+                consent_nonce: [6; 16],
                 ttl_millis: 99,
+                maximum_total_duration_millis: 1_000,
                 executions: vec![held()],
             },
         };
@@ -675,6 +841,8 @@ mod tests {
             sequence: 1,
             command: RequestCommand::Renew {
                 lease_id: [1; 16],
+                consent_generation: 6,
+                consent_nonce: [6; 16],
                 ttl_millis: 2,
                 executions: vec![held(); MAX_EXECUTIONS_PER_REQUEST + 1],
             },
@@ -689,8 +857,13 @@ mod tests {
             sequence: 1,
             command: RequestCommand::Acquire {
                 lease_id: [4; 16],
+                consent_generation: 6,
+                consent_nonce: [6; 16],
                 ttl_millis: MAX_LEASE_TTL_MILLIS,
-                executions: vec![held(); MAX_EXECUTIONS_PER_REQUEST],
+                maximum_total_duration_millis: 1_000,
+                executions: (1..=MAX_EXECUTIONS_PER_REQUEST as u8)
+                    .map(held_with)
+                    .collect(),
             },
         };
         let encoded = maximum.encode().expect("documented maximum fits frame");
@@ -705,14 +878,18 @@ mod tests {
             sequence: 1,
             command: RequestCommand::Acquire {
                 lease_id: [1; 16],
+                consent_generation: 6,
+                consent_nonce: [6; 16],
                 ttl_millis: 2,
-                executions: vec![],
+                maximum_total_duration_millis: 1_000,
+                executions: vec![held()],
             },
         }
         .encode()
         .unwrap();
-        // count follows header + build + helper/Engine/channel nonces + sequence + tag + lease + TTL.
-        let count_offset = HEADER_BYTES + 32 + 16 + 16 + 16 + 8 + 1 + 16 + 4;
+        // Count follows the fixed request identity, command tag, lease,
+        // consent identity, TTL, and original total-duration bound.
+        let count_offset = HEADER_BYTES + 32 + 16 + 16 + 16 + 8 + 1 + 16 + 8 + 16 + 4 + 4;
         frame[count_offset..count_offset + 2]
             .copy_from_slice(&((MAX_EXECUTIONS_PER_REQUEST + 1) as u16).to_be_bytes());
         assert_eq!(Request::decode(&frame), Err(CodecError::TooManyExecutions));
@@ -729,8 +906,11 @@ mod tests {
                 sequence: 1,
                 command: RequestCommand::Acquire {
                     lease_id: [5; 16],
+                    consent_generation: 6,
+                    consent_nonce: [6; 16],
                     ttl_millis,
-                    executions: vec![],
+                    maximum_total_duration_millis: 1_000,
+                    executions: vec![held()],
                 },
             };
             assert_eq!(request.encode(), Err(CodecError::InvalidTtl));
@@ -750,6 +930,67 @@ mod tests {
             }),
         };
         assert_eq!(response.encode(), Err(CodecError::TooManyExecutions));
+    }
+
+    #[test]
+    fn lease_identity_and_selection_fail_closed() {
+        let request = |command| Request {
+            client_build_id: BuildId([1; 32]),
+            helper_boot_nonce: [2; 16],
+            engine_incarnation: [3; 16],
+            channel_nonce: [4; 16],
+            sequence: 1,
+            command,
+        };
+        let acquire = |lease_id, consent_generation, consent_nonce, duration, executions| {
+            RequestCommand::Acquire {
+                lease_id,
+                consent_generation,
+                consent_nonce,
+                ttl_millis: 1,
+                maximum_total_duration_millis: duration,
+                executions,
+            }
+        };
+        assert_eq!(
+            request(acquire([0; 16], 1, [1; 16], 1, vec![held()])).encode(),
+            Err(CodecError::InvalidLeaseId)
+        );
+        assert_eq!(
+            request(acquire([1; 16], 0, [1; 16], 1, vec![held()])).encode(),
+            Err(CodecError::InvalidConsent)
+        );
+        assert_eq!(
+            request(acquire([1; 16], 1, [0; 16], 1, vec![held()])).encode(),
+            Err(CodecError::InvalidConsent)
+        );
+        assert_eq!(
+            request(acquire([1; 16], 1, [1; 16], 1, vec![])).encode(),
+            Err(CodecError::EmptyExecutions)
+        );
+        assert_eq!(
+            request(acquire([1; 16], 1, [1; 16], 1, vec![held(), held()],)).encode(),
+            Err(CodecError::DuplicateExecution)
+        );
+        let mut other_boot = held_with(2);
+        if let LocalExecutionIdentity::Held { host_boot_id, .. } = &mut other_boot {
+            *host_boot_id = [9; 16];
+        }
+        assert_eq!(
+            request(acquire([1; 16], 1, [1; 16], 1, vec![held(), other_boot],)).encode(),
+            Err(CodecError::MixedBootIdentity)
+        );
+        assert_eq!(
+            request(acquire(
+                [1; 16],
+                1,
+                [1; 16],
+                MAX_CONSENT_DURATION_MILLIS + 1,
+                vec![held()],
+            ))
+            .encode(),
+            Err(CodecError::InvalidTotalDuration)
+        );
     }
 
     #[test]

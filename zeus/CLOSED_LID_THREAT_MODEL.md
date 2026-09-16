@@ -7,15 +7,17 @@ and `CLOSED_LID_PLAN.md`. It describes a possible local macOS-only power helper.
 It does not treat any mock or parallel spike as evidence of a privileged helper,
 physical power behavior, or ServiceManagement feasibility.
 
-- Architecture exception: **NOT APPROVED**.
-- Privileged/ServiceManagement lab spike: **NOT APPROVED**.
-- Shipment go/no-go: **NOT APPROVED**.
-- Physical `pmset` tests: **NOT RUN**.
-- Physical ServiceManagement tests: **NOT RUN**.
+- Architecture exception: **APPROVED** by `nnayz` on 2026-09-16.
+- Privileged/ServiceManagement dedicated-Mac lab spike: **APPROVED**.
+- Production-target implementation: **APPROVED**.
+- Shipment: **CONDITIONALLY AUTHORIZED; RELEASE GATES NOT YET SATISFIED**.
+- Physical `pmset` tests: **AUTHORIZED, NOT RUN**.
+- Physical ServiceManagement tests: **AUTHORIZED, NOT RUN**.
 
-The model does not authorize privileged actions. It does not change the remote
-architecture in `REMOTE_PORT.md`. Remote Holder persistence, SSH, and remote
-sessions are outside this helper's authority.
+The model authorizes privileged actions only within the narrow issue #70 section
+of `../AGENTS.md`. It does not change the remote architecture in `REMOTE_PORT.md`.
+Remote Holder persistence, SSH, and remote sessions are outside this helper's
+authority.
 
 Aquarium is a **behavior-only reference** through the description in issue #70.
 Aquarium code provenance for this threat model is **NONE**: no source was copied,
@@ -290,7 +292,7 @@ weaken authentication, PTY/session identity, safety, or restoration.
 | Claim/gate | Current evidence | Status | Required evidence |
 |---|---|---|---|
 | Threat inventory matches requested risks | Issue #70; `CLOSED_LID_PLAN.md` | DOCUMENT REVIEW ONLY | Security review and abuse-case signoff |
-| Privilege exception is allowed | None; conflicts with `../AGENTS.md` | **NOT APPROVED** | Written narrow local-only exception |
+| Privilege exception is allowed | Owner-approved narrow issue #70 section in `../AGENTS.md` | **APPROVED** | Keep implementation within the recorded local-only constraints |
 | App/Engine/helper path resists unauthorized proxying | Pure peer-policy and channel/replay/response-binding negative tests | **PARTIAL / PLATFORM NOT TESTED** | Real audit-token consumption, same-UID/user, old signed build and proxy tests |
 | Helper IPC is bounded and non-generic | Fixed 4096-byte codec, bounded TTL/list, exact tags and negative unit tests | **PURE MODEL IMPLEMENTED** | Fuzzing and authenticated signed IPC adapter review |
 | Exact execution authorization is possible | Exact opaque Holder/child birth tokens, pinned adoption and pure eligibility tests | **LOCAL/MOCK TESTED** | Consent/generation Engine integration, restart/upgrade and physical fixtures |
@@ -362,7 +364,9 @@ and stop conditions. Silence is rejection, not acceptance.
 
 ## Current disposition
 
-The design remains at documentation/mock stage. Architecture exception and
-shipment go/no-go are **NOT APPROVED**. The helper-death/global-boolean problem is
-an explicit unresolved **NO-GO BLOCKER**. Physical `pmset` and ServiceManagement
-tests are **NOT RUN**.
+The implementation remains at the documentation/mock stage, but the narrow
+architecture exception, production-target work, and dedicated physical-lab work
+are now owner-approved. Shipment is conditionally authorized and remains blocked
+until all release gates pass. The helper-death/global-boolean problem is an
+explicit unresolved **NO-GO BLOCKER**. Physical `pmset` and ServiceManagement
+tests are **AUTHORIZED, NOT RUN**.

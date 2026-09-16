@@ -9,8 +9,11 @@ models, fault-injection tests, and read-only package validation.
 
 It deliberately does **not** add a privileged executable, ServiceManagement
 metadata, a `pmset` backend, installation UI, or a user-visible **Safe to close**
-claim. The architecture exception and physical lab work remain **NOT APPROVED**.
-The shipment decision therefore remains **NO DECISION / NOT APPROVED**.
+claim. After this mock spike was completed, the solo repository owner approved
+the narrow production-targeted exception in `../AGENTS.md` on 2026-09-16.
+Implementation and dedicated physical-lab work may proceed on a separate branch.
+Shipment is conditionally authorized but cannot become an effective `GO` until
+all recorded release gates pass.
 
 No Aquarium source was read, copied, translated, vendored, or used to author the
 code in this branch.
@@ -70,13 +73,10 @@ Final workspace command results must be copied into the draft PR after they run.
 
 ## Review gates before any next code phase
 
-A maintainer can review and merge this branch as a **non-privileged exploration**.
-Before a follow-up adds a signed lab helper, complete the P0 decision template in
-`CLOSED_LID_DECISIONS.md` with named reviewers and a dedicated-Mac recovery plan.
-That approval must state exactly which local-only lines in `../AGENTS.md` it
-excepts. It must not alter `REMOTE_PORT.md` behavior.
-
-The next authorized lab PR, if approved, must remain mock-first and separate:
+This branch remains a **non-privileged exploration**. The owner-approved issue #70
+exception now permits a separate production-targeted follow-up while leaving
+`REMOTE_PORT.md` behavior unchanged. That follow-up must remain mock-first and
+must keep real effects restricted to explicit, attended physical-lab runs:
 
 1. package a separately identified test helper and ServiceManagement plist;
 2. extract peer audit-token facts and evaluate the real code signature at the

@@ -68,8 +68,71 @@ The Rust toolchain is pinned by `zeus/rust-toolchain.toml` to Rust 1.95.0, editi
 - Never log credentials, authentication responses, full environments, Agent prompts, or protocol payloads that may contain secrets.
 - Keep SSH protocol stdin exclusively for Helper frames. On macOS, route OpenSSH prompts through the packaged Rust `zeus-ssh-askpass`; do not parse passwords or host-key answers in the Engine.
 - A failed upload/install may clean up only its own nonce temp file. It must not delete validated binaries or session state.
-- Never request elevation or host-wide configuration: no `sudo`, package installation, PAM/sshd changes, system services, persistent user units/LaunchAgents, or `loginctl enable-linger`.
+- Except for the closed-lid power exception below, never request elevation or host-wide configuration: no `sudo`, package installation, PAM/sshd changes, system services, persistent user units/LaunchAgents, or `loginctl enable-linger`.
 - Detect persistence rather than assuming `setsid()` survives logout. Surface `native-detach`, `user-supervisor`, and `non-persistent` distinctly. Use only an already-available, no-configuration transient user supervisor; otherwise report non-persistent. Never fall back to `tmux`.
+
+## Closed-lid power exception — issue #70
+
+The repository owner (`nnayz`) acts as maintainer, security reviewer, and release
+approver for this solo project. The owner authorizes a production-targeted local
+macOS closed-lid implementation and, after the release gates below pass,
+production shipment. This is a narrow exception to the prohibition on elevation,
+host-wide power configuration, and system services. It does not modify any remote
+architecture rule.
+
+The implementation may:
+
+- add a minimal, Rust-owned, macOS-only privileged power Helper managed through
+  supported ServiceManagement APIs;
+- request authorization through supported macOS UI and registration flows;
+- package the exact signed universal Helper and fixed registration metadata with
+  the desktop app;
+- use a root-owned durable journal and an exclusive Helper lifetime lock;
+- perform only the fixed, internally generated power reads/writes required for
+  the reviewed closed-lid mechanism, including an absolute `/usr/bin/pmset`
+  invocation if physical validation establishes it as the supported mechanism;
+- integrate explicit per-execution consent, bounded leases, safety revocation,
+  status, update/rollback, prepare-uninstall, and recovery into the local Rust
+  Engine and desktop app.
+
+The exception does not permit:
+
+- `sudo`, arbitrary command execution, caller-provided executable paths,
+  caller-provided power keys/values, shell-composed commands, package-manager
+  installation, PAM/sshd changes, or LaunchAgents;
+- any power mutation from ordinary unit tests, CI, build scripts, package
+  validation, or an unprivileged fallback;
+- remote power control or changes to `REMOTE_PORT.md` behavior;
+- weakening Helper/app/Engine identity checks, journal ownership/permissions,
+  exact local execution identity, bounded leases, or fail-closed behavior;
+- claiming readiness merely because registration or one closed-lid trial works.
+
+Production shipment is authorized only when all of these release gates pass and
+are recorded in `zeus/CLOSED_LID_DECISIONS.md` and
+`zeus/CLOSED_LID_SPIKE_REPORT.md`:
+
+- signed and notarized packaging, registration, upgrade, rollback, app
+  relocation, and uninstall tests;
+- exclusive Helper execution and a journal/lease incarnation that prevents a
+  second live Helper from restoring the first Helper's lease;
+- bounded recovery evidence for Engine exit, Helper kill/restart/crash loop,
+  registration disablement, interrupted update/removal, reboot, corrupt or
+  missing journal, and command timeout/failure;
+- an owner-approved coexistence rule for the non-tokenized system-wide setting,
+  with ambiguous ownership failing closed rather than silently restoring;
+- independent AC, battery, thermal, lid, boot, monotonic-clock, and Helper-health
+  enforcement at the privileged boundary;
+- attended physical tests on every supported macOS/architecture entry proving
+  same-process progress while closed and ordinary lid sleep after release and
+  each failure path;
+- measured latency, energy, inactive wakeup/CPU, and restoration bounds meeting
+  the recorded acceptance thresholds.
+
+Real power tests must be explicit opt-in runs on a dedicated, attended,
+ventilated Mac with recovery access and recorded initial/final power state. They
+must never run in ordinary CI. Until every production gate passes, builds must
+report the feature as unavailable or experimental and must not present an
+unqualified “Safe to close” claim.
 
 ## Build and verification
 

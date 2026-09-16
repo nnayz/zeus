@@ -9,6 +9,7 @@
 #![forbid(unsafe_code)]
 
 pub mod auth;
+pub mod consent;
 pub mod eligibility;
 pub mod lease;
 pub mod recovery;

@@ -83,6 +83,12 @@ pub enum ConsentRemovalReason {
     Expired,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConsentReconciliation {
+    pub active: Vec<ConsentGrant>,
+    pub removed: Vec<(ConsentGrant, ConsentRemovalReason)>,
+}
+
 /// In-memory authority for the current Engine process.
 ///
 /// Consent is intentionally not serializable. Engine restart, adoption, wake,
@@ -122,8 +128,9 @@ impl ConsentCoordinator {
         self.engine_incarnation
     }
 
-    pub fn grants(&self) -> impl ExactSizeIterator<Item = &ConsentGrant> {
-        self.grants.values()
+    #[cfg(test)]
+    fn grant_count(&self) -> usize {
+        self.grants.len()
     }
 
     /// Replaces the complete selection after a fresh explicit user action.
@@ -192,13 +199,25 @@ impl ConsentCoordinator {
         Ok(())
     }
 
-    /// Sticky against delayed authorization messages because all later grants
-    /// still need a generation greater than the consumed generation.
-    pub fn revoke_all(&mut self) -> Vec<(ConsentGrant, ConsentRemovalReason)> {
-        std::mem::take(&mut self.grants)
+    /// Revokes all grants and consumes an authenticated action generation.
+    ///
+    /// The genuine desktop-to-Engine action path must allocate the generation
+    /// in order. Consuming it fences delayed authorize messages at or below the
+    /// revocation action, so Allow Sleep Now cannot be undone by queued work.
+    pub fn revoke_all(
+        &mut self,
+        now: MonotonicTime,
+        revocation_generation: u64,
+    ) -> Result<Vec<(ConsentGrant, ConsentRemovalReason)>, ConsentError> {
+        self.advance(now)?;
+        if revocation_generation == 0 || revocation_generation <= self.last_consent_generation {
+            return Err(ConsentError::GenerationNotIncreasing);
+        }
+        self.last_consent_generation = revocation_generation;
+        Ok(std::mem::take(&mut self.grants)
             .into_values()
             .map(|grant| (grant, ConsentRemovalReason::UserRevoked))
-            .collect()
+            .collect())
     }
 
     /// Retains only still-eligible exact identities and unexpired grants.
@@ -210,7 +229,7 @@ impl ConsentCoordinator {
         &mut self,
         now: MonotonicTime,
         eligible: impl IntoIterator<Item = EligibleExecution>,
-    ) -> Result<Vec<(ConsentGrant, ConsentRemovalReason)>, ConsentError> {
+    ) -> Result<ConsentReconciliation, ConsentError> {
         self.advance(now)?;
         let eligible: BTreeSet<_> = eligible
             .into_iter()
@@ -232,11 +251,17 @@ impl ConsentCoordinator {
                 true
             }
         });
-        Ok(removed)
+        Ok(ConsentReconciliation {
+            active: self.grants.values().cloned().collect(),
+            removed,
+        })
     }
 
     fn advance(&mut self, now: MonotonicTime) -> Result<(), ConsentError> {
         if now < self.last_now {
+            // A clock-domain failure invalidates every deadline. Do not expose
+            // the prior grants after returning an error.
+            self.grants.clear();
             return Err(ConsentError::ClockRegression);
         }
         self.last_now = now;
@@ -303,16 +328,21 @@ mod tests {
                 [eligible(7, 101)],
             )
             .unwrap();
-        let grant = coordinator.grants().next().unwrap();
+        let grant = coordinator
+            .reconcile(MonotonicTime(100), [eligible(7, 101)])
+            .unwrap()
+            .active
+            .pop()
+            .unwrap();
         assert_eq!(grant.engine_incarnation(), [9; 16]);
         assert_eq!(grant.consent_generation(), 1);
 
-        let removed = coordinator
+        let result = coordinator
             .reconcile(MonotonicTime(200), [eligible(8, 101)])
             .unwrap();
-        assert_eq!(removed.len(), 1);
-        assert_eq!(removed[0].1, ConsentRemovalReason::ExecutionChanged);
-        assert_eq!(coordinator.grants().len(), 0);
+        assert_eq!(result.removed.len(), 1);
+        assert_eq!(result.removed[0].1, ConsentRemovalReason::ExecutionChanged);
+        assert!(result.active.is_empty());
     }
 
     #[test]
@@ -327,11 +357,11 @@ mod tests {
                 [eligible(7, 101)],
             )
             .unwrap();
-        let removed = coordinator
+        let result = coordinator
             .reconcile(MonotonicTime(200), [eligible(7, 202)])
             .unwrap();
-        assert_eq!(removed[0].1, ConsentRemovalReason::ExecutionChanged);
-        assert!(coordinator.grants().next().is_none());
+        assert_eq!(result.removed[0].1, ConsentRemovalReason::ExecutionChanged);
+        assert!(result.active.is_empty());
     }
 
     #[test]
@@ -346,11 +376,14 @@ mod tests {
                 [eligible(7, 101)],
             )
             .unwrap();
-        assert_eq!(coordinator.revoke_all().len(), 1);
+        assert_eq!(
+            coordinator.revoke_all(MonotonicTime(101), 5).unwrap().len(),
+            1
+        );
         assert_eq!(
             coordinator.authorize_selection(
                 MonotonicTime(101),
-                4,
+                5,
                 [6; 16],
                 MonotonicTime(500),
                 [eligible(7, 101)],
@@ -360,7 +393,7 @@ mod tests {
         coordinator
             .authorize_selection(
                 MonotonicTime(101),
-                5,
+                6,
                 [6; 16],
                 MonotonicTime(500),
                 [eligible(7, 101)],
@@ -369,7 +402,7 @@ mod tests {
 
         let restarted =
             ConsentCoordinator::new(ConsentPolicy::default(), [8; 16], MonotonicTime(101)).unwrap();
-        assert_eq!(restarted.grants().len(), 0);
+        assert_eq!(restarted.grant_count(), 0);
         assert_ne!(
             restarted.engine_incarnation(),
             coordinator.engine_incarnation()
@@ -398,11 +431,30 @@ mod tests {
                 [eligible(7, 101)],
             )
             .unwrap();
-        let removed = coordinator
+        let result = coordinator
             .reconcile(MonotonicTime(500), [eligible(7, 101)])
             .unwrap();
-        assert_eq!(removed[0].1, ConsentRemovalReason::Expired);
-        assert!(coordinator.grants().next().is_none());
+        assert_eq!(result.removed[0].1, ConsentRemovalReason::Expired);
+        assert!(result.active.is_empty());
+    }
+
+    #[test]
+    fn clock_regression_clears_every_grant() {
+        let mut coordinator = coordinator();
+        coordinator
+            .authorize_selection(
+                MonotonicTime(100),
+                1,
+                [6; 16],
+                MonotonicTime(500),
+                [eligible(7, 101)],
+            )
+            .unwrap();
+        assert_eq!(
+            coordinator.reconcile(MonotonicTime(99), [eligible(7, 101)]),
+            Err(ConsentError::ClockRegression)
+        );
+        assert_eq!(coordinator.grant_count(), 0);
     }
 
     #[test]
@@ -427,7 +479,11 @@ mod tests {
             ),
             Err(ConsentError::DuplicateExecution)
         );
-        assert_eq!(coordinator.grants().len(), 1);
-        assert_eq!(coordinator.grants().next().unwrap().consent_generation(), 1);
+        assert_eq!(coordinator.grant_count(), 1);
+        let active = coordinator
+            .reconcile(MonotonicTime(101), [eligible(7, 101)])
+            .unwrap()
+            .active;
+        assert_eq!(active[0].consent_generation(), 1);
     }
 }

@@ -446,8 +446,10 @@ mod tests {
             )
             .unwrap();
         consent
-            .grants()
-            .cloned()
+            .reconcile(MonotonicTime(1), executions.iter().copied().map(eligible))
+            .unwrap()
+            .active
+            .into_iter()
             .map(|grant| LeaseIntent { grant })
             .collect()
     }

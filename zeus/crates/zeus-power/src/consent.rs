@@ -13,11 +13,38 @@ use crate::lease::MonotonicTime;
 /// One explicit authorization for one exact local execution.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConsentGrant {
-    pub engine_incarnation: [u8; 16],
-    pub consent_generation: u64,
-    pub execution: LocalExecutionIdentity,
-    pub granted_at: MonotonicTime,
-    pub deadline: MonotonicTime,
+    engine_incarnation: [u8; 16],
+    consent_generation: u64,
+    consent_nonce: [u8; 16],
+    execution: LocalExecutionIdentity,
+    granted_at: MonotonicTime,
+    deadline: MonotonicTime,
+}
+
+impl ConsentGrant {
+    pub fn engine_incarnation(&self) -> [u8; 16] {
+        self.engine_incarnation
+    }
+
+    pub fn consent_generation(&self) -> u64 {
+        self.consent_generation
+    }
+
+    pub fn consent_nonce(&self) -> [u8; 16] {
+        self.consent_nonce
+    }
+
+    pub fn execution(&self) -> &LocalExecutionIdentity {
+        &self.execution
+    }
+
+    pub fn granted_at(&self) -> MonotonicTime {
+        self.granted_at
+    }
+
+    pub fn deadline(&self) -> MonotonicTime {
+        self.deadline
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -41,6 +68,7 @@ pub enum ConsentError {
     InvalidEngineIncarnation,
     ClockRegression,
     GenerationNotIncreasing,
+    InvalidConsentNonce,
     EmptySelection,
     TooManyExecutions,
     DeadlineNotFuture,
@@ -107,12 +135,16 @@ impl ConsentCoordinator {
         &mut self,
         now: MonotonicTime,
         consent_generation: u64,
+        consent_nonce: [u8; 16],
         deadline: MonotonicTime,
         executions: impl IntoIterator<Item = EligibleExecution>,
     ) -> Result<(), ConsentError> {
         self.advance(now)?;
         if consent_generation == 0 || consent_generation <= self.last_consent_generation {
             return Err(ConsentError::GenerationNotIncreasing);
+        }
+        if consent_nonce == [0; 16] {
+            return Err(ConsentError::InvalidConsentNonce);
         }
         if deadline <= now {
             return Err(ConsentError::DeadlineNotFuture);
@@ -149,6 +181,7 @@ impl ConsentCoordinator {
                 let grant = ConsentGrant {
                     engine_incarnation: self.engine_incarnation,
                     consent_generation,
+                    consent_nonce,
                     execution: execution.clone(),
                     granted_at: now,
                     deadline,
@@ -265,13 +298,14 @@ mod tests {
             .authorize_selection(
                 MonotonicTime(100),
                 1,
+                [6; 16],
                 MonotonicTime(500),
                 [eligible(7, 101)],
             )
             .unwrap();
         let grant = coordinator.grants().next().unwrap();
-        assert_eq!(grant.engine_incarnation, [9; 16]);
-        assert_eq!(grant.consent_generation, 1);
+        assert_eq!(grant.engine_incarnation(), [9; 16]);
+        assert_eq!(grant.consent_generation(), 1);
 
         let removed = coordinator
             .reconcile(MonotonicTime(200), [eligible(8, 101)])
@@ -288,6 +322,7 @@ mod tests {
             .authorize_selection(
                 MonotonicTime(100),
                 1,
+                [6; 16],
                 MonotonicTime(500),
                 [eligible(7, 101)],
             )
@@ -306,6 +341,7 @@ mod tests {
             .authorize_selection(
                 MonotonicTime(100),
                 4,
+                [6; 16],
                 MonotonicTime(500),
                 [eligible(7, 101)],
             )
@@ -315,6 +351,7 @@ mod tests {
             coordinator.authorize_selection(
                 MonotonicTime(101),
                 4,
+                [6; 16],
                 MonotonicTime(500),
                 [eligible(7, 101)],
             ),
@@ -324,6 +361,7 @@ mod tests {
             .authorize_selection(
                 MonotonicTime(101),
                 5,
+                [6; 16],
                 MonotonicTime(500),
                 [eligible(7, 101)],
             )
@@ -345,6 +383,7 @@ mod tests {
             coordinator.authorize_selection(
                 MonotonicTime(100),
                 1,
+                [6; 16],
                 MonotonicTime(1_101),
                 [eligible(7, 101)],
             ),
@@ -354,6 +393,7 @@ mod tests {
             .authorize_selection(
                 MonotonicTime(100),
                 1,
+                [6; 16],
                 MonotonicTime(500),
                 [eligible(7, 101)],
             )
@@ -372,6 +412,7 @@ mod tests {
             .authorize_selection(
                 MonotonicTime(100),
                 1,
+                [6; 16],
                 MonotonicTime(500),
                 [eligible(7, 101)],
             )
@@ -380,12 +421,13 @@ mod tests {
             coordinator.authorize_selection(
                 MonotonicTime(101),
                 2,
+                [6; 16],
                 MonotonicTime(500),
                 [eligible(8, 101), eligible(8, 101)],
             ),
             Err(ConsentError::DuplicateExecution)
         );
         assert_eq!(coordinator.grants().len(), 1);
-        assert_eq!(coordinator.grants().next().unwrap().consent_generation, 1);
+        assert_eq!(coordinator.grants().next().unwrap().consent_generation(), 1);
     }
 }

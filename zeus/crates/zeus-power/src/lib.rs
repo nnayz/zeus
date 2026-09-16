@@ -12,5 +12,7 @@ pub mod auth;
 pub mod consent;
 pub mod eligibility;
 pub mod lease;
+#[cfg(unix)]
+pub mod persistence;
 pub mod recovery;
 pub mod wire;

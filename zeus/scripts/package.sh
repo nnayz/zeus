@@ -26,6 +26,8 @@ universal_mcp_binary="${universal_dir}/zeus-mcp"
 universal_engine_binary="${universal_dir}/zeusd-rs"
 universal_holder_binary="${universal_dir}/zeus-holder"
 universal_askpass_binary="${universal_dir}/zeus-ssh-askpass"
+universal_power_helper_binary="${universal_dir}/com.zeus.zeus.power-helper"
+power_helper_plist="${workspace_dir}/crates/zeus-power-helper/assets/com.zeus.zeus.power-helper.plist"
 
 # Toolchain location. The migration-era toolchain lived in /tmp, which macOS
 # sweeps -- a reboot deleted it mid-project and releases could not be built at
@@ -104,6 +106,14 @@ cargo build --release --package zeus-engine --bin zeusd-rs --bin zeus-holder \
 cargo build --release --package zeus-engine --bin zeusd-rs --bin zeus-holder \
     --bin zeus-ssh-askpass \
     --target x86_64-apple-darwin
+# Issue #70 first milestone: build an inert, macOS-only package scaffold. The
+# executable has no registration, authorization, IPC listener, journal, or power
+# operation and always reports unavailable. Packaging it establishes only the
+# nested-code signing and fixed service-management launchd metadata contract.
+cargo build --release --package zeus-power-helper --bin zeus-power-helper \
+    --features macos-service-scaffold --target aarch64-apple-darwin
+cargo build --release --package zeus-power-helper --bin zeus-power-helper \
+    --features macos-service-scaffold --target x86_64-apple-darwin
 lipo -create \
     "${target_dir}/aarch64-apple-darwin/release/zeusd-rs" \
     "${target_dir}/x86_64-apple-darwin/release/zeusd-rs" \
@@ -116,12 +126,22 @@ lipo -create \
     "${target_dir}/aarch64-apple-darwin/release/zeus-ssh-askpass" \
     "${target_dir}/x86_64-apple-darwin/release/zeus-ssh-askpass" \
     -output "${universal_askpass_binary}"
+lipo -create \
+    "${target_dir}/aarch64-apple-darwin/release/zeus-power-helper" \
+    "${target_dir}/x86_64-apple-darwin/release/zeus-power-helper" \
+    -output "${universal_power_helper_binary}"
 lipo "${universal_engine_binary}" -verify_arch arm64 x86_64
 lipo "${universal_holder_binary}" -verify_arch arm64 x86_64
 lipo "${universal_askpass_binary}" -verify_arch arm64 x86_64
+lipo "${universal_power_helper_binary}" -verify_arch arm64 x86_64
 cp "${universal_engine_binary}" "${app_bin_dir}/zeusd-rs"
 cp "${universal_holder_binary}" "${app_bin_dir}/zeus-holder"
 cp "${universal_askpass_binary}" "${app_bin_dir}/zeus-ssh-askpass"
+power_helper_dir="${app_path}/Contents/Library/HelperTools"
+power_launchd_dir="${app_path}/Contents/Library/LaunchDaemons"
+mkdir -p "${power_helper_dir}" "${power_launchd_dir}"
+cp "${universal_power_helper_binary}" "${power_helper_dir}/com.zeus.zeus.power-helper"
+cp "${power_helper_plist}" "${power_launchd_dir}/com.zeus.zeus.power-helper.plist"
 
 # The default SSH transport bootstraps one exact Rust Helper artifact selected
 # by remote OS/architecture. This build is independent of all daemon products
@@ -170,6 +190,8 @@ codesign --force --options runtime "${ts_flag[@]}" --sign "${sign_id}" "${app_bi
 codesign --force --options runtime "${ts_flag[@]}" --sign "${sign_id}" "${app_bin_dir}/zeusd-rs"
 codesign --force --options runtime "${ts_flag[@]}" --sign "${sign_id}" "${app_bin_dir}/zeus-holder"
 codesign --force --options runtime "${ts_flag[@]}" --sign "${sign_id}" "${app_bin_dir}/zeus-ssh-askpass"
+codesign --force --options runtime "${ts_flag[@]}" --identifier com.zeus.zeus.power-helper \
+    --sign "${sign_id}" "${power_helper_dir}/com.zeus.zeus.power-helper"
 # The Apple remote Helper is deliberately NOT signed here. Signing rewrites the
 # Mach-O, and its length and digest are already recorded in the catalog manifest
 # that the Engine verifies before upload; signing after the fact invalidates the
@@ -183,6 +205,11 @@ codesign --force --options runtime "${ts_flag[@]}" \
     "${app_path}"
 
 codesign --verify --deep --strict "${app_path}"
+if [[ "${sign_id}" != "-" ]]; then
+    "${script_dir}/check-power-helper-package.sh" "${app_path}"
+else
+    echo "==> Power Helper scaffold is ad-hoc signed; feature remains unavailable"
+fi
 
 notary_profile="${APPLE_NOTARIZATION_KEYCHAIN_PROFILE:-${APPLE_KEYCHAIN_PROFILE:-${NOTARY_PROFILE:-}}}"
 notary_apple_id="${APPLE_NOTARIZATION_APPLE_ID:-${APPLE_ID:-}}"

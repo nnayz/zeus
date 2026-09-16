@@ -8679,6 +8679,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "zeus-power-helper"
+version = "0.1.0"
+dependencies = [
+ "plist",
+ "zeus-power",
+]
+
+[[package]]
 name = "zeus-proto"
 version = "0.3.0"
 dependencies = [

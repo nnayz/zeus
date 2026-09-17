@@ -2,18 +2,17 @@
 
 ## Outcome of this draft
 
-This branch executes the parts of `CLOSED_LID_PLAN.md` that are allowed by the
-current repository architecture: source review, independent threat modeling,
-exact local execution identity, pure eligibility/authentication/lease/recovery
-models, fault-injection tests, and read-only package validation.
+This branch began as the approved mock spike and now carries the first inert
+production-targeted lifecycle/package milestone described in
+`CLOSED_LID_MILESTONE_1.md`: exact consent generations, consent-bound protocol
+1.1 requests, exclusive Helper lifetime, durable journal primitives, and a
+macOS-only signed package scaffold.
 
-It deliberately does **not** add a privileged executable, ServiceManagement
-metadata, a `pmset` backend, installation UI, or a user-visible **Safe to close**
-claim. After this mock spike was completed, the solo repository owner approved
-the narrow production-targeted exception in `../AGENTS.md` on 2026-09-16.
-Implementation and dedicated physical-lab work may proceed on a separate branch.
-Shipment is conditionally authorized but cannot become an effective `GO` until
-all recorded release gates pass.
+The scaffold deliberately has no service registration call, authorization
+request, privileged listener, `pmset` backend, installation UI, or user-visible
+**Safe to close** claim. It always reports `power_helper_unavailable`. Shipment
+is conditionally authorized but cannot become an effective `GO` until every
+recorded release gate passes. No signed lifecycle or physical power test has run.
 
 No Aquarium source was read, copied, translated, vendored, or used to author the
 code in this branch.
@@ -25,11 +24,11 @@ code in this branch.
 | P0 decisions/provenance | `CLOSED_LID_DECISIONS.md`, local SDK observations in `CLOSED_LID_EVIDENCE.md` | Maintainer/security/legal lab approval absent; web/current licensing review not performed |
 | Threat boundary | `CLOSED_LID_THREAT_MODEL.md` with actors, two-hop authorization, global-setting and helper-death blockers | No platform audit-token or code-signing adapter exists |
 | Exact local identity | Additive session ID, Holder incarnation, and opaque Holder/child birth tokens; fresh PID-reuse checks; identity-pinned adoption; `Session::local_execution_identity` tests | Older Holders and any missing observation remain usable but power-ineligible; host boot identity and consent are not integrated into Engine state |
-| P1 protocol/auth model | `zeus-power::wire` bounded fixed v1 messages; `auth` exact role/UID/executable/team/requirement/build/protocol/capability policy and replay/incarnation binding | Trusted facts are supplied by a future platform adapter; this is not authenticated macOS IPC |
-| P2 eligibility | Pure reducer accepts only an explicitly selected, exact, live, awake local Held execution; status is diagnostic only | No GUI action, persisted consent, Engine coordinator, or governor integration is exposed |
+| P1 protocol/auth model | `zeus-power::wire` bounded protocol 1.1 consent-bound requests; `auth` exact role/UID/executable/team/requirement/build/protocol/capability policy and replay/incarnation binding | Trusted facts are supplied by a future platform adapter; this is not authenticated macOS IPC |
+| P2 eligibility | Pure reducer plus in-memory consent coordinator bind one explicit generation/nonce/deadline to exact live Held executions; lease activation requires those grants | No authenticated GUI action, Engine runtime integration, or governor integration is exposed |
 | P3 lease/safety | Monotonic aggregate coordinator, caps, sticky Allow Sleep Now/safety trips, AC and fresh sensor requirements | Observations are test inputs; no IOKit/power/thermal source is connected |
-| P3 recovery | Prepared/Owned/Restoring state machine and fake semantic backend with injected failure tests | No root-owned durable journal, exclusive Helper lifetime, live-incarnation proof, or system mutation; global boolean/helper-death blockers unresolved |
-| P4 release | `CLOSED_LID_RELEASE_SPIKE.md` and read-only `scripts/check-power-helper-package.sh`; CI self-test | Current package correctly reports helper unavailable; no signed helper, registration, updater transaction, or uninstall path |
+| P3 recovery | Prepared/Owned/Restoring/RemovalPrepared model; exclusive `CLOEXEC` lifetime lock; bounded checksummed journal with boot/Helper/Engine/lease/consent incarnations and atomic durable file operations | Filesystem fixtures use the current UID; no privileged adapter or system mutation; global boolean/helper-death blockers unresolved |
+| P4 release | Universal inert Helper/package/signing scaffold, fixed demand-only launchd metadata, `CLOSED_LID_RELEASE_SPIKE.md`, and read-only package validation | No registration API, signed/notarized lifecycle evidence, updater transaction, or uninstall flow; runtime remains unavailable |
 | P5 physical/performance | Required matrix and proposed budgets documented | No physical closed-lid, Intel, macOS 15+, ServiceManagement, energy, or recovery measurement was run |
 | P6 decision | Explicit evidence gaps and stop conditions | Cannot make a shipment go/no-go until the blocked physical/security work is authorized and completed |
 

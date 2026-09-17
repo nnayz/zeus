@@ -253,11 +253,11 @@ cannot be made trustworthy, P6 must record **NO-GO**.
 | User problem and candidate mechanism | Issue #70 and `CLOSED_LID_PLAN.md` | DOCUMENTED, NOT VALIDATED | Primary-source review and physical matrix |
 | Current privilege conflict | `../AGENTS.md` | CONFIRMED BY REPO POLICY | Written narrow exception or no-go |
 | Remote scope is separate | `REMOTE_PORT.md`; issue #70 | CONFIRMED BY REPO DESIGN | Regression review showing no remote changes |
-| Session/status model lacks proposed consent/generation | `crates/zeus-proto/src/model.rs`; pure `zeus-power` policy core | MODEL AND UNIT TESTS COMPLETE; ENGINE CONSENT NOT INTEGRATED | Engine coordinator, caller authorization and UI policy after approval |
+| Session/status model lacks proposed consent/generation | `crates/zeus-proto/src/model.rs`; exact in-memory consent grants and consent-bound lease reducer in `zeus-power` | PURE MODEL TESTED; ENGINE RUNTIME CONSENT NOT INTEGRATED | Authenticated desktop caller, Engine coordinator, governor and UI policy |
 | Adoption/respawn/hibernate affect identity policy | Exact Holder/child birth-token and identity-pinned adoption fixtures | MOCK/LOCAL LIFECYCLE TESTED | Engine restart/upgrade adversarial soak and physical matrix |
-| Lease/recovery semantics | `zeus-power` bounded codec, auth binding, lease reducer and fake recovery backend | PURE MODEL FAULT-TESTED; NO PLATFORM BACKEND | Durable journal, signed IPC, helper-death/global-state resolution |
+| Lease/recovery semantics | `zeus-power` protocol 1.1, consent-bound lease reducer, exclusive lifetime lock, bounded checksummed atomic journal, and fake recovery backend | FILESYSTEM/MODEL TESTED; NO PRIVILEGED PLATFORM BACKEND | Signed IPC, root-path physical tests, helper-death/global-state resolution |
 | Existing updater is not helper lifecycle support | `crates/zeus-updater/src/install.rs` | CONFIRMED BY SOURCE REVIEW | Signed install/update/rollback/uninstall rehearsal |
-| Desktop packaging baseline | `PACKAGING.md`; `scripts/package.sh` | CONFIRMED BY REPO DOCS | Nested helper signing and notarized artifact tests |
+| Desktop packaging baseline | `PACKAGING.md`; universal inert nested Helper and fixed launchd metadata in `scripts/package.sh` | BUILDABLE SCAFFOLD; SIGNED/NOTARIZED LIFECYCLE NOT RUN | Final artifact identity, registration, notarization, upgrade/rollback/uninstall tests |
 | `pmset disablesleep` works across macOS 15+ and both CPUs | None in this work | **PHYSICAL TEST NOT RUN** | Attended Apple silicon and Intel test records |
 | ServiceManagement registration/authenticated IPC works | None in this work | **PHYSICAL TEST NOT RUN** | Signed isolated lab prototype and adversarial tests |
 | Same process makes progress with lid closed | None in this work | **PHYSICAL TEST NOT RUN** | PID plus start-identity, timestamped progress soak |

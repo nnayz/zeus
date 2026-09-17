@@ -4,8 +4,8 @@ use plist::{Dictionary, Value};
 use zeus_power_helper::{HELPER_IDENTIFIER, MACH_SERVICE_NAME};
 
 fn metadata() -> Dictionary {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("assets/com.zeus.zeus.power-helper.plist");
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/com.zeus.zeus.power-helper.plist");
     Value::from_file(path)
         .expect("parse fixed launchd metadata")
         .into_dictionary()

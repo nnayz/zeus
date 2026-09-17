@@ -56,8 +56,16 @@ struct SendText: Codable { let expected: ControlEpoch; let commandSeq: UInt64; l
 struct APIError: Codable { let code: String }
 
 enum CompanionError: LocalizedError {
-    case invalidPairing, expiredPairing, serverMismatch, unsupportedVersion, http(Int, String), missingToken
+    case invalidPairing, expiredPairing, serverMismatch, unsupportedVersion, http(Int, String), missingToken, insecureOrigin
     var errorDescription: String? {
-        switch self { case .invalidPairing: "The pairing payload is invalid."; case .expiredPairing: "The pairing code has expired."; case .serverMismatch: "The server identity did not match."; case .unsupportedVersion: "This Companion API version is unsupported."; case .http(let status, let code): "Gateway error (\(status)): \(code)"; case .missingToken: "Pair this device first." }
+        switch self {
+        case .invalidPairing: "The pairing payload is invalid."
+        case .expiredPairing: "The pairing code has expired."
+        case .insecureOrigin: "HTTPS is required. The Companion gateway must use HTTPS."
+        case .serverMismatch: "The server identity did not match."
+        case .unsupportedVersion: "This Companion API version is unsupported."
+        case .http(let status, let code): "Gateway error (\(status)): \(code)"
+        case .missingToken: "Pair this device first."
+        }
     }
 }

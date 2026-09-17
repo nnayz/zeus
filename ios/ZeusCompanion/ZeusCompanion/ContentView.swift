@@ -66,17 +66,42 @@ private struct SessionDetailView: View {
                 ScrollView([.horizontal, .vertical]) { Text(screen.text.isEmpty ? "(no screen output)" : screen.text).font(.system(.footnote, design: .monospaced)).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading).padding(8) }
                     .frame(minHeight: 180, maxHeight: 360).background(.black, in: RoundedRectangle(cornerRadius: 8)).foregroundStyle(.green)
             }
-            if let control { Text("Control sequence \(control.commandSeq)").font(.caption).foregroundStyle(.secondary) }
-            Button("Take control") { Task { await takeControl() } }
-            HStack { TextField("Prompt", text: $prompt, axis: .vertical); Button("Send") { Task { await send() } }.disabled(prompt.isEmpty || control == nil) }
+            if let control {
+                HStack {
+                    Label("In control", systemImage: "checkmark.shield.fill").foregroundStyle(.green)
+                    Spacer()
+                    Text("Control sequence \(control.commandSeq)").font(.caption).foregroundStyle(.secondary)
+                }
+            } else {
+                Button("Take control") { Task { await takeControl() } }
+            }
+            HStack {
+                TextField("Prompt", text: $prompt, axis: .vertical)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                Button("Send") { Task { await send() } }
+                    .disabled(prompt.isEmpty || control == nil)
+            }
         }
     }
     private func takeControl() async {
         guard let client = model.client, let currentScreen = model.screen else { return }
-        do { control = try await client.acquire(session.id, expected: currentScreen.control.epoch) } catch let issue { model.error = issue.localizedDescription }
+        do {
+            let next = try await client.acquire(session.id, expected: currentScreen.control.epoch)
+            self.control = next
+            await model.select(session)
+        } catch let issue {
+            model.error = issue.localizedDescription
+        }
     }
     private func send() async {
         guard let client = model.client, let control, !prompt.isEmpty else { return }
-        do { self.control = try await client.send(session.id, expected: control.epoch, commandSeq: control.commandSeq, text: prompt); prompt = ""; await model.select(session) } catch let issue { model.error = issue.localizedDescription }
+        do {
+            self.control = try await client.send(session.id, expected: control.epoch, commandSeq: control.commandSeq + 1, text: prompt)
+            prompt = ""
+            await model.select(session)
+        } catch let issue {
+            model.error = issue.localizedDescription
+        }
     }
 }

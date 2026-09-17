@@ -21,7 +21,8 @@ for tool in cargo node; do
 done
 
 # Create owner-only directory
-mkdir -m 700 -p "${CERTS_DIR}"
+mkdir -p "${CERTS_DIR}"
+chmod 700 "${DEV_DIR}" "${CERTS_DIR}"
 
 # Reuse existing certificates if available from previous setup or generate fresh with mkcert
 if [[ ! -f "${CERT_FILE}" || ! -f "${KEY_FILE}" ]]; then

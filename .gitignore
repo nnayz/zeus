@@ -23,3 +23,13 @@ docs/book/
 site/node_modules/
 site/.svelte-kit/
 site/build/
+
+# Companion development and test artifacts
+.companion-dev/
+.zeus-companion-dev/
+.zeus-test/
+*.pem
+pair*.json
+
+# Xcode workspace data
+*.xcworkspace/

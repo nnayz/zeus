@@ -11,3 +11,19 @@ in Keychain and validates the server ID and API major version before use.
 
 The gateway must be reachable over HTTPS from the device. HTTP is intentionally
 not supported by the native client.
+
+## Local Development and Testing
+
+To run a self-contained local testing gateway on your Mac:
+
+```sh
+./scripts/companion-dev.sh
+```
+
+This script:
+- Verifies local TLS certificates (using `mkcert` or an existing certificate in `~/.zeus-companion-dev/certs`).
+- Starts an isolated test Engine running an interactive shell (`/bin/zsh -l`).
+- Starts an HTTPS reverse proxy on port 8443.
+- Copies the fresh pairing JSON payload directly to your macOS clipboard.
+
+Run the app in an iOS Simulator, paste the payload into **Pair with Zeus**, and tap **Pair device**.

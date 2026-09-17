@@ -329,6 +329,10 @@ impl<B: RecoveryBackend> RecoveryMachine<B> {
         if record.prior_state != SleepObservation::Enabled {
             return self.ambiguous(AmbiguousReason::InvalidRecord);
         }
+        // The process-lifetime lock must already prove that no prior Helper is
+        // live. Record the current writer incarnation before any restoration so
+        // a crash cannot make a successor confuse the stale writer with itself.
+        record.helper_instance = self.context.helper_instance;
         record.phase = JournalPhase::Restoring;
         self.call(|b| b.write_journal(record))?;
         self.call(|b| b.restore_normal_sleep())?;
@@ -678,6 +682,32 @@ mod tests {
             machine.backend().journal,
             JournalObservation::Valid(_)
         ));
+    }
+
+    #[test]
+    fn exclusive_successor_records_its_incarnation_before_restoring() {
+        let mut original = new_machine(FakeBackend::normal());
+        original.startup_recover().unwrap();
+        original.acquire(acquisition(1)).unwrap();
+        let mut backend = original.into_backend();
+        let old_helper = match backend.journal {
+            JournalObservation::Valid(record) => record.helper_instance,
+            _ => unreachable!(),
+        };
+        assert_eq!(old_helper, [5; 16]);
+
+        // Simulate a successor that already acquired the external lifetime lock.
+        let mut successor_context = context();
+        successor_context.helper_instance = [8; 16];
+        backend.fail_after_operation(3); // restoring journal write completed
+        let mut successor = RecoveryMachine::new(backend, successor_context).unwrap();
+        assert!(successor.startup_recover().is_err());
+        let record = match successor.backend().journal {
+            JournalObservation::Valid(record) => record,
+            _ => unreachable!(),
+        };
+        assert_eq!(record.phase, JournalPhase::Restoring);
+        assert_eq!(record.helper_instance, [8; 16]);
     }
 
     #[test]

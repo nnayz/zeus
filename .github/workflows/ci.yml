@@ -257,19 +257,32 @@ jobs:
         env:
           ZEUS_DIST_DIR: ${{ runner.temp }}/zeus-dist
         run: zeus/scripts/package.sh
-      - name: Verify power helper remains unavailable
+      - name: Verify inert power helper scaffold remains unavailable
         run: |
           app="${RUNNER_TEMP}/zeus-dist/zeus.app"
           helper="${app}/Contents/Library/HelperTools/com.zeus.zeus.power-helper"
-          set +e
-          output="$(zeus/scripts/check-power-helper-package.sh "${app}" 2>&1)"
-          status=$?
-          set -e
-          printf '%s\n' "${output}"
-          test "${status}" -eq 3
-          grep -Fq 'power_helper_unavailable' <<<"${output}"
-          test ! -e "${helper}"
+          test -f "${helper}"
           test ! -L "${helper}"
+          test -x "${helper}"
+          lipo "${helper}" -verify_arch arm64 x86_64
+
+          set +e
+          helper_output="$("${helper}" 2>&1)"
+          helper_status=$?
+          set -e
+          printf '%s\n' "${helper_output}"
+          test "${helper_status}" -eq 78
+          grep -Fq 'power_helper_unavailable' <<<"${helper_output}"
+
+          # The unsigned package job uses an ad-hoc signature. It must package
+          # the exact inert scaffold, but the signed release checker must still
+          # reject it rather than treating an ad-hoc bundle as production-valid.
+          set +e
+          checker_output="$(zeus/scripts/check-power-helper-package.sh "${app}" 2>&1)"
+          checker_status=$?
+          set -e
+          printf '%s\n' "${checker_output}"
+          test "${checker_status}" -ne 0
       - name: Verify bundle structure and signature
         run: |
           app="${RUNNER_TEMP}/zeus-dist/zeus.app"

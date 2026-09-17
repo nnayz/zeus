@@ -1,8 +1,8 @@
-//! Regression guards for the intentionally non-privileged issue #70 spike.
+//! Regression guards for the inert issue #70 policy and package milestone.
 //!
-//! These tests are tripwires, not a security proof. An approved privileged lab
-//! phase must replace them deliberately rather than silently growing a command
-//! or service-registration seam inside this mock-only crate.
+//! These tests are tripwires, not a security proof. The separately packaged
+//! Helper scaffold may exist, but ordinary source and scripts must not silently
+//! grow a registration call, command seam, or host-power mutation.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -90,7 +90,7 @@ fn policy_core_has_no_process_ffi_or_binary_seam() {
 }
 
 #[test]
-fn workspace_has_no_power_mutation_or_service_registration_code() {
+fn workspace_has_no_power_mutation_or_registration_code() {
     let root = workspace_root();
     let forbidden = [
         joined(&["pm", "set"]),
@@ -117,7 +117,7 @@ fn workspace_has_no_power_mutation_or_service_registration_code() {
 }
 
 #[test]
-fn no_power_helper_artifact_is_present() {
+fn no_prebuilt_or_installed_power_helper_artifact_is_present() {
     let root = workspace_root();
     let helper_name = joined(&["com.zeus.zeus.", "power-helper"]);
     let mut artifacts = Vec::new();
@@ -132,6 +132,6 @@ fn no_power_helper_artifact_is_present() {
     }
     assert!(
         artifacts.is_empty(),
-        "privileged helper artifacts require separate written approval: {artifacts:?}"
+        "prebuilt Helper artifacts must not be checked into source: {artifacts:?}"
     );
 }

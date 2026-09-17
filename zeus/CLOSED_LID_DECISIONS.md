@@ -3,21 +3,25 @@
 ## Status snapshot
 
 This record covers the P0 investigation gate in `CLOSED_LID_PLAN.md` for
-[issue #70](https://github.com/nnayz/zeus/issues/70). It does not approve an
-implementation.
+[issue #70](https://github.com/nnayz/zeus/issues/70). On 2026-09-16 the solo
+repository owner (`nnayz`) approved the narrow production-targeted exception in
+`../AGENTS.md`, acting as maintainer, security reviewer, and release approver.
+The approval authorizes implementation and an eventual production shipment only
+after the recorded release gates pass; it does not certify the current spike.
 
 | Decision | Current status |
 |---|---|
-| Local macOS privilege/ServiceManagement architecture exception | **NOT APPROVED** |
-| Privileged or real-`pmset` lab spike | **NOT APPROVED** |
-| Shipment go/no-go | **NOT APPROVED** |
-| Physical `pmset disablesleep` testing | **NOT RUN** |
-| Physical ServiceManagement registration testing | **NOT RUN** |
+| Local macOS privilege/ServiceManagement architecture exception | **APPROVED — NARROW ISSUE #70 EXCEPTION** |
+| Privileged or real-`pmset` physical-lab spike | **APPROVED — EXPLICIT OPT-IN DEDICATED MAC ONLY** |
+| Production-target implementation | **APPROVED** |
+| Shipment go/no-go | **CONDITIONALLY AUTHORIZED; RELEASE GATES NOT YET SATISFIED** |
+| Physical `pmset disablesleep` testing | **AUTHORIZED, NOT RUN** |
+| Physical ServiceManagement registration testing | **AUTHORIZED, NOT RUN** |
 
-Until the first two rows receive written approval, work is limited to documents,
-mock backends, pure policy reducers, and tests that cannot change host power
-state or register a privileged service. Shipment needs the later P6 decision;
-approval of a lab spike would not approve shipment.
+Work may now proceed under the exact exception in `../AGENTS.md`. Until the P1-P5
+security, lifecycle, physical, and performance evidence is recorded, builds must
+remain unavailable or experimental and cannot make an unqualified readiness
+claim.
 
 ## Decision scope and repository facts
 
@@ -27,13 +31,12 @@ RAM does not meet that promise. Remote sessions are separate: `REMOTE_PORT.md`
 assigns remote persistence to the existing bootstrapped Remote PTY Holder. This
 investigation must not change remote transport, SSH, or remote persistence.
 
-The proposed local helper conflicts with the current repository rules in
-`../AGENTS.md`, which prohibit elevation, host-wide configuration, and system
-services. Therefore, a minimal local macOS power helper is an **architecture
-exception**, not an application of an existing helper precedent. That exception
-is **NOT APPROVED**. If it is later approved, the record must name the exact rules
-being excepted and the narrow local-only replacement constraints before the
-architecture documents are changed.
+The proposed local helper conflicts with the repository's default prohibition on
+elevation, host-wide configuration, and system services. The owner-approved
+issue #70 section in `../AGENTS.md` is the controlling narrow exception. It allows
+a minimal local macOS power Helper and fixed reviewed operations while preserving
+all remote boundaries, the `sudo` prohibition, fail-closed behavior, and the
+physical/release evidence gates.
 
 Relevant implementation facts, not proof that the feature is feasible:
 
@@ -80,26 +83,33 @@ Copy and complete this section for a review. Do not replace evidence links with
 verbal assurances.
 
 ```text
-Decision ID: P0-CL-____
+Decision ID: P0-CL-2026-09-16
 Issue: #70
-Decision date: ____
-Decision owner: ____
-Security reviewer: ____
-macOS/release reviewer: ____
-Legal/provenance reviewer: ____
+Decision date: 2026-09-16
+Decision owner: Nasrul Huda (`nnayz`; repository owner)
+Security reviewer: Nasrul Huda (`nnayz`; solo-project owner acting in this role)
+macOS/release reviewer: Nasrul Huda (`nnayz`; solo-project owner acting in this role)
+Legal/provenance reviewer: Nasrul Huda (`nnayz`; independent implementation only)
 
 Scope requested:
-  [ ] documents and mock-only work
-  [ ] signed, isolated physical-lab spike
-  [ ] other: ____
+  [x] documents and mock-only work
+  [x] signed, isolated physical-lab spike
+  [x] production-target implementation subject to the recorded release gates
 
 Architecture exception:
-  Status: [ NOT APPROVED | APPROVED | REJECTED ]
-  Exact ../AGENTS.md rules affected: ____
-  Exact permitted component and authority: ____
-  Why an unprivileged design cannot meet the user promise: ____
-  Explicitly unchanged remote boundaries: ____
-  Expiry/review date for the exception: ____
+  Status: APPROVED on 2026-09-16 by `nnayz`
+  Exact ../AGENTS.md rules affected: the default prohibition on elevation,
+    host-wide power configuration, and system services; only the issue #70
+    section is excepted
+  Exact permitted component and authority: minimal Rust-owned macOS power Helper,
+    supported ServiceManagement registration, and fixed reviewed power operations
+  Why an unprivileged design cannot meet the user promise: ordinary user-space
+    sleep assertions do not establish continued execution through lid closure;
+    the candidate system-wide mechanism requires privilege, subject to physical proof
+  Explicitly unchanged remote boundaries: all `REMOTE_PORT.md` transport,
+    Holder, SSH, packaging, persistence, and capability rules
+  Expiry/review date for the exception: no automatic expiry; mandatory re-review
+    before broadening operations, platforms, remote scope, or release gates
 
 Mechanism decision:
   Candidate operation/API: ____
@@ -109,11 +119,11 @@ Mechanism decision:
   Undocumented-behavior stop condition: ____
 
 Code provenance:
-  Independently authored: [ YES | NO ]
+  Independently authored: YES
   Aquarium classification: BEHAVIOR-ONLY
-  Aquarium code used: [ MUST BE NO unless separately licensed and approved ]
-  License/permission evidence, if any: ____
-  NOTICE/attribution duties, if any: ____
+  Aquarium code used: NO
+  License/permission evidence, if any: no third-party implementation used
+  NOTICE/attribution duties, if any: none identified for independently authored work
 
 Security and recovery:
   Threat-model revision/link: ____
@@ -140,25 +150,30 @@ Evidence:
   Energy/wakeup measurements: ____
   Unresolved risks: ____
 
-P0 outcome (lab spike only): [ NOT APPROVED | APPROVED | NO-GO ]
-P0 rationale and stop conditions: ____
-Approval signatures: ____
+P0 outcome: APPROVED for the narrow issue #70 exception
+P0 rationale and stop conditions: implementation may proceed, but ambiguous
+  ownership, failed recovery, identity mismatch, unsafe power/thermal state, or
+  missing physical evidence remains a stop condition
+Approval signature: `nnayz`, repository owner, 2026-09-16
 
-Separate P6 shipment outcome: NOT APPROVED
+Separate P6 shipment outcome: CONDITIONALLY AUTHORIZED BY OWNER; GO IS NOT
+EFFECTIVE UNTIL EVERY RELEASE GATE IS SATISFIED AND RECORDED
 ```
 
 ### Required interpretation
 
-- P0 may authorize only the stated lab scope. It does not authorize a production
-  implementation or shipping.
+- The owner-approved repository policy now authorizes a production-target
+  implementation and conditional shipment, but does not waive any release gate.
 - A P0 approval must not silently weaken `REMOTE_PORT.md` or create a remote
   architecture exception.
-- P6 must choose `GO`, `NARROWER RE-SPIKE`, or `NO-GO` only after P1-P5 evidence
-  is attached. Until then, the shipment state remains **NOT APPROVED**.
+- P6 must record `GO`, `NARROWER RE-SPIKE`, or `NO-GO` after P1-P5 evidence is
+  attached. Conditional authorization does not become an effective `GO` before
+  that evidence exists.
 
-## Proposed policy decisions for a future spike
+## Approved implementation policy, subject to validation
 
-These are hypotheses to test, not accepted product requirements:
+These are approved implementation constraints. Their platform assumptions remain
+hypotheses that must pass the recorded physical and release gates:
 
 1. The feature is off by default. Helper installation is not session consent.
 2. Consent names exact live local held executions and expires at the earlier of
@@ -238,11 +253,11 @@ cannot be made trustworthy, P6 must record **NO-GO**.
 | User problem and candidate mechanism | Issue #70 and `CLOSED_LID_PLAN.md` | DOCUMENTED, NOT VALIDATED | Primary-source review and physical matrix |
 | Current privilege conflict | `../AGENTS.md` | CONFIRMED BY REPO POLICY | Written narrow exception or no-go |
 | Remote scope is separate | `REMOTE_PORT.md`; issue #70 | CONFIRMED BY REPO DESIGN | Regression review showing no remote changes |
-| Session/status model lacks proposed consent/generation | `crates/zeus-proto/src/model.rs`; pure `zeus-power` policy core | MODEL AND UNIT TESTS COMPLETE; ENGINE CONSENT NOT INTEGRATED | Engine coordinator, caller authorization and UI policy after approval |
+| Session/status model lacks proposed consent/generation | `crates/zeus-proto/src/model.rs`; exact in-memory consent grants and consent-bound lease reducer in `zeus-power` | PURE MODEL TESTED; ENGINE RUNTIME CONSENT NOT INTEGRATED | Authenticated desktop caller, Engine coordinator, governor and UI policy |
 | Adoption/respawn/hibernate affect identity policy | Exact Holder/child birth-token and identity-pinned adoption fixtures | MOCK/LOCAL LIFECYCLE TESTED | Engine restart/upgrade adversarial soak and physical matrix |
-| Lease/recovery semantics | `zeus-power` bounded codec, auth binding, lease reducer and fake recovery backend | PURE MODEL FAULT-TESTED; NO PLATFORM BACKEND | Durable journal, signed IPC, helper-death/global-state resolution |
+| Lease/recovery semantics | `zeus-power` protocol 1.1, consent-bound lease reducer, exclusive lifetime lock, bounded checksummed atomic journal, and fake recovery backend | FILESYSTEM/MODEL TESTED; NO PRIVILEGED PLATFORM BACKEND | Signed IPC, root-path physical tests, helper-death/global-state resolution |
 | Existing updater is not helper lifecycle support | `crates/zeus-updater/src/install.rs` | CONFIRMED BY SOURCE REVIEW | Signed install/update/rollback/uninstall rehearsal |
-| Desktop packaging baseline | `PACKAGING.md`; `scripts/package.sh` | CONFIRMED BY REPO DOCS | Nested helper signing and notarized artifact tests |
+| Desktop packaging baseline | `PACKAGING.md`; universal inert nested Helper and fixed launchd metadata in `scripts/package.sh` | BUILDABLE SCAFFOLD; SIGNED/NOTARIZED LIFECYCLE NOT RUN | Final artifact identity, registration, notarization, upgrade/rollback/uninstall tests |
 | `pmset disablesleep` works across macOS 15+ and both CPUs | None in this work | **PHYSICAL TEST NOT RUN** | Attended Apple silicon and Intel test records |
 | ServiceManagement registration/authenticated IPC works | None in this work | **PHYSICAL TEST NOT RUN** | Signed isolated lab prototype and adversarial tests |
 | Same process makes progress with lid closed | None in this work | **PHYSICAL TEST NOT RUN** | PID plus start-identity, timestamped progress soak |
@@ -281,7 +296,8 @@ must never run in ordinary CI or on a developer's active machine. These tests ar
 
 ## Current conclusion
 
-P0 architecture exception: **NOT APPROVED**. Privileged lab work: **NOT
-APPROVED**. Shipment go/no-go: **NOT APPROVED**. The required next action is
-maintainer/security/legal review of the P0 template and the no-go blocker, not a
-power-state prototype.
+P0 architecture exception and dedicated physical-lab work: **APPROVED** by the
+solo repository owner on 2026-09-16 under the narrow `../AGENTS.md` exception.
+Production-target implementation is authorized. Shipment is conditionally
+authorized but remains blocked until P1-P5 evidence closes every mandatory
+security, recovery, physical, lifecycle, and performance gate.

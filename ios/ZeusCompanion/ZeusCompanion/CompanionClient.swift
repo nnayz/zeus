@@ -3,11 +3,13 @@ import Foundation
 final class CompanionClient {
     let origin: URL; private(set) var token: String; let serverID: String
     init(origin: URL, token: String, serverID: String) throws {
-        guard origin.scheme == "https", origin.host != nil else { throw CompanionError.invalidPairing }
+        guard origin.scheme == "https" else { throw CompanionError.insecureOrigin }
+        guard origin.host != nil else { throw CompanionError.invalidPairing }
         self.origin = origin; self.token = token; self.serverID = serverID
     }
     static func pair(_ payload: PairPayload, deviceName: String) async throws -> (CompanionClient, PairResponse) {
-        guard payload.origin.scheme == "https", payload.expiresAtMS > UInt64(Date().timeIntervalSince1970 * 1000) else { throw CompanionError.expiredPairing }
+        guard payload.origin.scheme == "https" else { throw CompanionError.insecureOrigin }
+        guard payload.expiresAtMS > UInt64(Date().timeIntervalSince1970 * 1000) else { throw CompanionError.expiredPairing }
         let client = try CompanionClient(origin: payload.origin, token: "", serverID: payload.serverID)
         let response: PairResponse = try await client.request("/v1/pair", method: "POST", body: PairRequest(apiMajor: 1, expectedServerID: payload.serverID, code: payload.code, deviceName: deviceName), authenticated: false)
         guard response.serverID == payload.serverID else { throw CompanionError.serverMismatch }
@@ -24,7 +26,8 @@ final class CompanionClient {
     func acquire(_ id: String, expected: ControlEpoch) async throws -> ControlState { try await request("/v1/sessions/\(id)/control/acquire", method: "POST", body: AcquireControl(expected: expected, takeover: true)) }
     func send(_ id: String, expected: ControlEpoch, commandSeq: UInt64, text: String) async throws -> ControlState { try await request("/v1/sessions/\(id)/text", method: "POST", body: SendText(expected: expected, commandSeq: commandSeq, text: text, submit: true)) }
     private func request<T: Decodable>(_ path: String, method: String = "GET", body: (any Encodable)? = nil, authenticated: Bool = true) async throws -> T {
-        var request = URLRequest(url: origin.appending(path: path)); request.httpMethod = method; request.timeoutInterval = 10
+        guard let url = URL(string: path, relativeTo: origin)?.absoluteURL else { throw CompanionError.invalidPairing }
+        var request = URLRequest(url: url); request.httpMethod = method; request.timeoutInterval = 10
         request.setValue("application/json", forHTTPHeaderField: "Accept"); if authenticated { guard !token.isEmpty else { throw CompanionError.missingToken }; request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
         if let body { request.httpBody = try JSONEncoder().encode(AnyEncodable(body)); request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
         let (data, response) = try await URLSession.shared.data(for: request); guard let http = response as? HTTPURLResponse else { throw CompanionError.http(0, "Invalid response") }

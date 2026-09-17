@@ -16,7 +16,7 @@ async fn main() -> io::Result<()> {
         .map(std::path::PathBuf::from)
         .ok_or_else(|| invalid("expected enrollment output path"))?;
     let fixture = support::Fixture::new().await;
-    let _session = fixture.spawn_echo().await;
+    let _session = fixture.spawn_shell().await;
     let now = now_ms();
     let code = fixture
         .auth

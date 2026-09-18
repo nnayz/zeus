@@ -192,6 +192,40 @@ impl Fixture {
         }
         id
     }
+    pub async fn spawn_shell(&self) -> String {
+        let cwd = std::env::var("HOME").unwrap_or_else(|_| self.temp.path().display().to_string());
+        let result = self
+            .daemon
+            .request(
+                "session.spawn",
+                Some(&serde_json::json!({
+                    "kind": {"shell": {}},
+                    "cwd": cwd,
+                    "argv": ["/bin/sh", "-c", "printf 'fixture-ready\n'; exec /bin/zsh -l"],
+                    "title": "zsh",
+                    "initialCols": 80,
+                    "initialRows": 24
+                })),
+                Some(Duration::from_secs(5)),
+            )
+            .await
+            .unwrap();
+        let id = result["id"].as_str().unwrap().to_owned();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if self
+                .client
+                .screen(&id)
+                .await
+                .is_ok_and(|s| s.text.contains("fixture-ready"))
+            {
+                break;
+            }
+            assert!(tokio::time::Instant::now() < deadline);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        id
+    }
     pub async fn stop_gateway(&mut self) {
         self.shutdown.send_replace(true);
         if let Some(task) = self.gateway.take() {

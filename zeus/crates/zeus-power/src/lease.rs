@@ -2,7 +2,8 @@
 
 use std::collections::BTreeSet;
 
-use crate::eligibility::{EligibleExecution, LocalExecutionIdentity};
+use crate::consent::ConsentGrant;
+use crate::eligibility::LocalExecutionIdentity;
 
 /// Milliseconds from one boot-scoped continuous monotonic clock that advances
 /// through system sleep (for example, `mach_continuous_time` on macOS).
@@ -83,8 +84,9 @@ impl Default for LeasePolicy {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LeaseIntent {
-    pub execution: EligibleExecution,
-    pub requested_deadline: MonotonicTime,
+    /// Capability issued only by the Engine consent coordinator after an
+    /// explicit user action for this exact execution generation.
+    pub grant: ConsentGrant,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -102,7 +104,10 @@ pub enum LeaseState {
     Inactive(InactiveReason),
     DesiredActive {
         executions: BTreeSet<LocalExecutionIdentity>,
-        /// Maximum deadline across the selected exact executions, bounded by policy.
+        engine_incarnation: [u8; 16],
+        consent_generation: u64,
+        consent_nonce: [u8; 16],
+        /// One atomic selection has one immutable original consent deadline.
         deadline: MonotonicTime,
     },
 }
@@ -115,6 +120,8 @@ pub enum CoordinatorError {
     DeadlineNotFuture,
     DeadlineTooFar,
     TooManyExecutions,
+    ConsentGenerationMismatch,
+    MixedConsentSelection,
 }
 
 #[derive(Clone, Debug)]
@@ -221,23 +228,43 @@ impl LeaseCoordinator {
             .checked_add(self.policy.maximum_total_duration)
             .ok_or(CoordinatorError::DeadlineTooFar)?;
         let allowed_limit = renew_limit.min(total_limit);
+        let expected_generation = self.arm_epoch.expect("armed checked");
+        let first = &intents[0].grant;
+        if first.consent_generation() != expected_generation {
+            self.state = LeaseState::Inactive(InactiveReason::InvalidInput);
+            return Err(CoordinatorError::ConsentGenerationMismatch);
+        }
+        let engine_incarnation = first.engine_incarnation();
+        let consent_nonce = first.consent_nonce();
+        let deadline = first.deadline();
+        if deadline <= now {
+            self.state = LeaseState::Inactive(InactiveReason::InvalidInput);
+            return Err(CoordinatorError::DeadlineNotFuture);
+        }
+        if deadline.0 > allowed_limit {
+            self.state = LeaseState::Inactive(InactiveReason::InvalidInput);
+            return Err(CoordinatorError::DeadlineTooFar);
+        }
+
         let mut selected = BTreeSet::new();
-        let mut maximum_deadline = now;
         for intent in intents {
-            if intent.requested_deadline <= now {
+            let grant = &intent.grant;
+            if grant.engine_incarnation() != engine_incarnation
+                || grant.consent_generation() != expected_generation
+                || grant.consent_nonce() != consent_nonce
+                || grant.deadline() != deadline
+            {
                 self.state = LeaseState::Inactive(InactiveReason::InvalidInput);
-                return Err(CoordinatorError::DeadlineNotFuture);
+                return Err(CoordinatorError::MixedConsentSelection);
             }
-            if intent.requested_deadline.0 > allowed_limit {
-                self.state = LeaseState::Inactive(InactiveReason::InvalidInput);
-                return Err(CoordinatorError::DeadlineTooFar);
-            }
-            selected.insert(intent.execution.identity().clone());
-            maximum_deadline = maximum_deadline.max(intent.requested_deadline);
+            selected.insert(grant.execution().clone());
         }
         self.state = LeaseState::DesiredActive {
             executions: selected,
-            deadline: maximum_deadline,
+            engine_incarnation,
+            consent_generation: expected_generation,
+            consent_nonce,
+            deadline,
         };
         Ok(&self.state)
     }
@@ -348,6 +375,7 @@ fn checked<T: Copy>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::consent::{ConsentCoordinator, ConsentPolicy};
     use crate::eligibility::*;
 
     fn safety(at: u64) -> SafetyObservations {
@@ -405,35 +433,48 @@ mod tests {
         .unwrap()
     }
 
+    fn intents(executions: &[u8], generation: u64, deadline: u64) -> Vec<LeaseIntent> {
+        let mut consent =
+            ConsentCoordinator::new(ConsentPolicy::default(), [8; 16], MonotonicTime(0)).unwrap();
+        consent
+            .authorize_selection(
+                MonotonicTime(1),
+                generation,
+                [generation as u8; 16],
+                MonotonicTime(deadline),
+                executions.iter().copied().map(eligible),
+            )
+            .unwrap();
+        consent
+            .reconcile(MonotonicTime(1), executions.iter().copied().map(eligible))
+            .unwrap()
+            .active
+            .into_iter()
+            .map(|grant| LeaseIntent { grant })
+            .collect()
+    }
+
     #[test]
-    fn aggregates_unique_executions_and_maximum_deadline() {
+    fn activates_one_atomic_consent_selection() {
         let mut coordinator =
             LeaseCoordinator::new(LeasePolicy::default(), MonotonicTime(0)).unwrap();
         coordinator.arm(MonotonicTime(1), 1).unwrap();
-        let one = eligible(1);
-        let intents = vec![
-            LeaseIntent {
-                execution: one.clone(),
-                requested_deadline: MonotonicTime(20),
-            },
-            LeaseIntent {
-                execution: eligible(2),
-                requested_deadline: MonotonicTime(30),
-            },
-            LeaseIntent {
-                execution: one,
-                requested_deadline: MonotonicTime(25),
-            },
-        ];
+        let intents = intents(&[1, 2], 1, 30);
         let state = coordinator
             .reconcile(MonotonicTime(10), &intents, safety(10))
             .unwrap();
         match state {
             LeaseState::DesiredActive {
                 executions,
+                engine_incarnation,
+                consent_generation,
+                consent_nonce,
                 deadline,
             } => {
                 assert_eq!(executions.len(), 2);
+                assert_eq!(*engine_incarnation, [8; 16]);
+                assert_eq!(*consent_generation, 1);
+                assert_eq!(*consent_nonce, [1; 16]);
                 assert_eq!(*deadline, MonotonicTime(30));
             }
             _ => panic!("not active"),
@@ -449,10 +490,7 @@ mod tests {
         };
         let mut coordinator = LeaseCoordinator::new(policy, MonotonicTime(0)).unwrap();
         coordinator.arm(MonotonicTime(1), 1).unwrap();
-        let intent = LeaseIntent {
-            execution: eligible(1),
-            requested_deadline: MonotonicTime(12),
-        };
+        let intent = intents(&[1], 1, 12).pop().unwrap();
         assert!(matches!(
             coordinator.reconcile(MonotonicTime(2), &[intent], safety(2)),
             Ok(LeaseState::DesiredActive { .. })
@@ -478,10 +516,7 @@ mod tests {
             LeaseCoordinator::new(LeasePolicy::default(), MonotonicTime(0)).unwrap();
         coordinator.arm(MonotonicTime(1), 7).unwrap();
         coordinator.allow_sleep_now();
-        let intent = LeaseIntent {
-            execution: eligible(1),
-            requested_deadline: MonotonicTime(20),
-        };
+        let intent = intents(&[1], 7, 20).pop().unwrap();
         assert_eq!(
             coordinator
                 .reconcile(MonotonicTime(2), std::slice::from_ref(&intent), safety(2))
@@ -493,8 +528,13 @@ mod tests {
             Err(CoordinatorError::ArmEpochNotIncreasing)
         );
         coordinator.arm(MonotonicTime(3), 8).unwrap();
-        assert!(matches!(
+        assert_eq!(
             coordinator.reconcile(MonotonicTime(4), &[intent], safety(4)),
+            Err(CoordinatorError::ConsentGenerationMismatch)
+        );
+        let fresh = intents(&[1], 8, 20).pop().unwrap();
+        assert!(matches!(
+            coordinator.reconcile(MonotonicTime(4), &[fresh], safety(4)),
             Ok(LeaseState::DesiredActive { .. })
         ));
     }
@@ -537,10 +577,7 @@ mod tests {
         let mut coordinator =
             LeaseCoordinator::new(LeasePolicy::default(), MonotonicTime(0)).unwrap();
         coordinator.arm(MonotonicTime(1), 1).unwrap();
-        let intent = LeaseIntent {
-            execution: eligible(1),
-            requested_deadline: MonotonicTime(50),
-        };
+        let intent = intents(&[1], 1, 50).pop().unwrap();
         let mut unsafe_facts = safety(2);
         unsafe_facts.helper_healthy.as_mut().unwrap().value = false;
         assert!(matches!(
@@ -558,8 +595,13 @@ mod tests {
             &LeaseState::Inactive(InactiveReason::NotArmed)
         );
         coordinator.arm(MonotonicTime(4), 2).unwrap();
-        assert!(matches!(
+        assert_eq!(
             coordinator.reconcile(MonotonicTime(5), &[intent], safety(5)),
+            Err(CoordinatorError::ConsentGenerationMismatch)
+        );
+        let fresh = intents(&[1], 2, 50).pop().unwrap();
+        assert!(matches!(
+            coordinator.reconcile(MonotonicTime(5), &[fresh], safety(5)),
             Ok(LeaseState::DesiredActive { .. })
         ));
     }

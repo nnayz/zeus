@@ -2,10 +2,13 @@
 
 ## Status and boundary
 
-This is release-spike evidence, not approval to ship a privileged helper. It does
-not change the package, register a service, install a daemon, or change power
-state. `CLOSED_LID_PLAN.md` remains the controlling proposal and its stop/go
-gates still apply.
+This is release-spike and inert package-scaffold evidence, not approval to ship
+an operational privileged helper. The first production-target milestone now
+packages an independently signed macOS-only executable and fixed demand-only
+launchd metadata, but it does not register a service, request authorization,
+listen for IPC, install a daemon, or change power state. The executable always
+reports `power_helper_unavailable`. `CLOSED_LID_PLAN.md` remains controlling and
+all stop/go gates still apply.
 
 This spike fixes one testable **future package contract** so a release artifact
 cannot silently find a helper in an alternate location:
@@ -16,10 +19,11 @@ zeus.app/Contents/Library/HelperTools/com.zeus.zeus.power-helper
 
 The helper's signing identifier is fixed as
 `com.zeus.zeus.power-helper`. The release app identifier remains
-`com.zeus.zeus`. Picking this path and identifier for validation does not define
-the future ServiceManagement plist, registration API, protocol, entitlements,
-or installed path. Those require the separate macOS/security prototype and
-review in `CLOSED_LID_PLAN.md`.
+`com.zeus.zeus`. The first milestone now fixes demand-only launchd metadata at
+`Contents/Library/LaunchDaemons/com.zeus.zeus.power-helper.plist` and protocol
+1.1 policy models. It still does not implement a registration API, authenticated
+transport, privileged entitlements, or installed runtime identity. Those require
+the separate signed macOS/security lab and review in `CLOSED_LID_PLAN.md`.
 
 ## Read-only bundle check
 
@@ -65,9 +69,10 @@ Exit status is fail closed:
 | `2` | Usage, platform, or required Apple-tool error |
 | `3` | `power_helper_unavailable`: helper is absent at the exact path |
 
-Exit `3` is the expected result for current Zeus packages. It is still nonzero:
-the optional closed-lid feature must remain unavailable. Ordinary Zeus sessions
-must continue to work.
+Exit `3` remains expected for loose or older Zeus packages without the scaffold.
+A packaged scaffold can pass this read-only contract, but the optional closed-lid
+feature still remains unavailable because no registration or operational backend
+exists. Ordinary Zeus sessions must continue to work.
 
 `--self-test` uses throwaway files and mocked `lipo`/`codesign` results. It covers
 the success path plus missing, symlink, architecture, strict-signature, Team ID,

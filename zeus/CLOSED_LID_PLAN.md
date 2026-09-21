@@ -2,10 +2,12 @@
 
 ## Status and scope
 
-Consolidated exploration plan for [#70](https://github.com/nnayz/zeus/issues/70).
-**Proposed; no privileged-helper implementation or architecture exception is
-approved by this document.** Complete the investigation and record a go/no-go
-before opening a production implementation issue.
+Consolidated exploration and execution plan for
+[#70](https://github.com/nnayz/zeus/issues/70). The solo repository owner approved
+the narrow production-targeted exception in `../AGENTS.md` on 2026-09-16.
+Implementation and explicit dedicated-Mac lab work may proceed. Conditional
+shipment authorization becomes effective only after every P1-P5 release gate is
+satisfied and the P6 record says `GO`.
 
 Execution artifacts:
 
@@ -33,16 +35,13 @@ optional feature is absent, disabled, incompatible, unhealthy, or unsupported.
 
 ## 1. Constraints and decisions to close
 
-`../AGENTS.md` prohibits elevation, host-wide configuration, and system services.
-`REMOTE_PORT.md` is the active remote baseline; `PLAN.md` is historical, not
-permission to introduce a different architecture. Stop at that conflict:
-maintainers must explicitly approve a narrowly scoped **local macOS power**
-exception before any privileged prototype. Never broaden the remote exception
-because there is none. Record the approval and exact affected rules; update
-`AGENTS.md` and the relevant architecture boundary in `REMOTE_PORT.md` only when
-approved, without changing remote behavior.
+`../AGENTS.md` now contains the controlling narrow exception to its default
+prohibition on elevation, host-wide configuration, and system services.
+`REMOTE_PORT.md` remains the active, unchanged remote baseline; `PLAN.md` is
+historical and does not authorize a different remote architecture. The exception
+is local macOS power work only.
 
-| Decision | Proposed direction, not yet approved | Evidence required to close |
+| Decision | Approved implementation direction | Evidence required to close for shipment |
 |---|---|---|
 | Mechanism and platform support | Investigate fixed `pmset` operations; fail closed outside a verified matrix | Primary Apple documentation/SDK review, macOS 15+ physical-Mac tests on Apple silicon and Intel, behavior on OS updates, distribution/notarization review |
 | Licensing | Independently authored Rust; do not copy, translate, vendor, or derive Aquarium source | Record provenance. The issue reports Aquarium had no license when filed; recheck before any reuse. Compatible license or written permission plus license obligations and `NOTICE` attribution are required for derived code |

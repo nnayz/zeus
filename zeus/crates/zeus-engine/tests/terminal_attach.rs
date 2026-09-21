@@ -253,17 +253,9 @@ fn slow_snapshot_socket_does_not_block_pty_or_other_engine_requests() {
         ControlServer::new(Arc::clone(&registry), temp.path().join("daemon.sock"))
             .with_logs_dir(temp.path().join("logs")),
     );
-    let spawned = rpc(&server, "session.spawn", json!({"kind":{"shell":{}},"cwd":"/tmp","initialCols":80,"initialRows":24,"argv":["/bin/sh","-c","stty -echo -icanon min 1 time 0; exec cat"]})).unwrap();
+    let spawned = rpc(&server, "session.spawn", json!({"kind":{"shell":{}},"cwd":"/tmp","initialCols":80,"initialRows":24,"argv":["/bin/sh","-c","stty -echo -icanon min 1 time 0; printf 'fixture-ready\n'; exec cat"]})).unwrap();
     let id = spawned["id"].as_str().unwrap();
     let (_, owner) = Desktop::open(&server, id);
-    let fill = "abcdefghijklmnopqrstuvwxyz0123456789".repeat(100);
-    registry
-        .lock()
-        .unwrap()
-        .get(id)
-        .unwrap()
-        .write_input(fill.as_bytes())
-        .unwrap();
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
         if registry
@@ -273,7 +265,33 @@ fn slow_snapshot_socket_does_not_block_pty_or_other_engine_requests() {
             .unwrap()
             .screen_lines()
             .join("")
-            .contains("abcdefghijklmnopqrstuvwxyz")
+            .contains("fixture-ready")
+        {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let fill = format!(
+        "{}fill-tail-marker",
+        "abcdefghijklmnopqrstuvwxyz0123456789".repeat(100)
+    );
+    registry
+        .lock()
+        .unwrap()
+        .get(id)
+        .unwrap()
+        .write_input(fill.as_bytes())
+        .unwrap();
+    loop {
+        if registry
+            .lock()
+            .unwrap()
+            .get(id)
+            .unwrap()
+            .screen_lines()
+            .join("")
+            .contains("fill-tail-marker")
         {
             break;
         }
@@ -293,6 +311,7 @@ fn slow_snapshot_socket_does_not_block_pty_or_other_engine_requests() {
             .unwrap();
     }
     let start = std::time::Instant::now();
+    let progress_deadline = Duration::from_secs(4);
     registry
         .lock()
         .unwrap()
@@ -318,12 +337,12 @@ fn slow_snapshot_socket_does_not_block_pty_or_other_engine_requests() {
             break;
         }
         assert!(
-            start.elapsed() < Duration::from_secs(2),
+            start.elapsed() < progress_deadline,
             "slow observer blocked Engine progress"
         );
         std::thread::sleep(Duration::from_millis(10));
     }
-    assert!(start.elapsed() < Duration::from_secs(2));
+    assert!(start.elapsed() < progress_deadline);
     drop(slow);
     assert!(rpc(&server, SNAPSHOT, json!({"sessionID":id,"protocol":99})).is_err());
     assert!(

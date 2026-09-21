@@ -9,6 +9,7 @@ members = [
     "crates/zeus-engine",
     "crates/zeus-node",
     "crates/zeus-mcp",
+    "crates/zeus-power",
     "crates/zeus-proto",
     "crates/zeus-pty",
     "crates/zeus-remote",

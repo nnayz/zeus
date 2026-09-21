@@ -12,6 +12,13 @@ renderer, shared design system, session store, usage accounting, and
 window/sidebar shell. [`PLAN.md`](PLAN.md) is the historical record of the
 port from the retired Swift client.
 
+For the proposed local closed-lid execution investigation in #70, see
+[CLOSED_LID_PLAN.md](CLOSED_LID_PLAN.md). Its
+[decision record](CLOSED_LID_DECISIONS.md) and
+[threat model](CLOSED_LID_THREAT_MODEL.md) keep privileged work and shipment
+explicitly gated. The [spike report](CLOSED_LID_SPIKE_REPORT.md) tracks completed
+and blocked evidence. This is an exploration, not approval to install a helper.
+
 ## Engine
 
 Sessions are owned by *holder* processes, not the Engine: the Engine can

@@ -23,12 +23,34 @@ struct Observed {
     ppid: i32,
     pgid: i32,
     start_sec: i64,
+    birth_token: u64,
     stopped: bool,
+    zombie: bool,
 }
 
 /// The start time of `pid`, or `None` if it is gone. The identity check.
-fn start_time(pid: i32) -> Option<i64> {
+pub(crate) fn start_time(pid: i32) -> Option<i64> {
     platform::observe(pid).map(|process| process.start_sec)
+}
+
+/// Opaque kernel process-birth identity with enough precision to reject
+/// same-second PID reuse on macOS.
+pub(crate) fn birth_token(pid: i32) -> Option<u64> {
+    platform::observe(pid).map(|process| process.birth_token)
+}
+
+pub(crate) fn matches_birth_token(pid: i32, token: u64) -> bool {
+    platform::observe(pid).is_some_and(|process| !process.zombie && process.birth_token == token)
+}
+
+fn sample_matches(sample: &HolderProcessSample) -> bool {
+    platform::observe(sample.pid).is_some_and(|process| {
+        !process.zombie
+            && match sample.birth_token {
+                Some(token) => process.birth_token == token,
+                None => process.start_sec == sample.start_sec,
+            }
+    })
 }
 
 /// Walks the tree under `root`: children transitively, plus every member of
@@ -69,7 +91,11 @@ pub fn enumerate(root: i32) -> Vec<HolderProcessSample> {
         .filter_map(|pid| {
             // Fresh per-pid lookup, as Swift did: the sample must carry the
             // identity as observed now, not a stale snapshot.
-            start_time(pid).map(|start_sec| HolderProcessSample { pid, start_sec })
+            platform::observe(pid).map(|process| HolderProcessSample {
+                pid,
+                start_sec: process.start_sec,
+                birth_token: Some(process.birth_token),
+            })
         })
         .collect()
 }
@@ -99,10 +125,7 @@ pub fn signal(root: i32, signal: i32) -> Vec<HolderProcessSample> {
                 break;
             }
         }
-        return tree
-            .into_iter()
-            .filter(|sample| start_time(sample.pid) == Some(sample.start_sec))
-            .collect();
+        return tree.into_iter().filter(sample_matches).collect();
     }
 
     let tree = enumerate(root);
@@ -112,7 +135,7 @@ pub fn signal(root: i32, signal: i32) -> Vec<HolderProcessSample> {
     }
     signal_group(root, signal);
     for sample in &ordered {
-        if start_time(sample.pid) == Some(sample.start_sec) {
+        if sample_matches(sample) {
             // SAFETY: identity just re-verified; plain kill(2).
             unsafe { libc::kill(sample.pid, signal) };
         }
@@ -129,10 +152,7 @@ pub fn kill_tree(root: i32) {
 
     let deadline = Instant::now() + Duration::from_millis(500);
     while Instant::now() < deadline {
-        if tree
-            .iter()
-            .all(|sample| start_time(sample.pid) != Some(sample.start_sec))
-        {
+        if tree.iter().all(|sample| !sample_matches(sample)) {
             return;
         }
         std::thread::sleep(Duration::from_millis(20));
@@ -142,7 +162,7 @@ pub fn kill_tree(root: i32) {
     signal_group(root, libc::SIGKILL);
     let unique: HashSet<HolderProcessSample> = tree.into_iter().collect();
     for sample in unique {
-        if start_time(sample.pid) == Some(sample.start_sec) {
+        if sample_matches(&sample) {
             // SAFETY: identity just re-verified; plain kill(2).
             unsafe {
                 libc::kill(sample.pid, libc::SIGKILL);
@@ -178,6 +198,7 @@ mod platform {
     const PROC_ALL_PIDS: u32 = 1;
     const PROC_PIDTBSDINFO: libc::c_int = 3;
     const SSTOP: u32 = 4;
+    const SZOMB: u32 = 5;
     const MAXCOMLEN: usize = 16;
 
     #[repr(C)]
@@ -224,6 +245,10 @@ mod platform {
         ) -> libc::c_int;
     }
 
+    pub(super) fn compose_birth_token(seconds: u64, microseconds: u64) -> Option<u64> {
+        seconds.checked_mul(1_000_000)?.checked_add(microseconds)
+    }
+
     pub(super) fn observe(pid: i32) -> Option<Observed> {
         let mut info: ProcBsdInfo = unsafe { std::mem::zeroed() };
         let size = std::mem::size_of::<ProcBsdInfo>() as libc::c_int;
@@ -240,12 +265,16 @@ mod platform {
         if filled != size {
             return None;
         }
+        let start_sec = i64::try_from(info.pbi_start_tvsec).ok()?;
+        let birth_token = compose_birth_token(info.pbi_start_tvsec, info.pbi_start_tvusec)?;
         Some(Observed {
             pid,
             ppid: info.pbi_ppid as i32,
             pgid: info.pbi_pgid as i32,
-            start_sec: info.pbi_start_tvsec as i64,
+            start_sec,
+            birth_token,
             stopped: info.pbi_status == SSTOP,
+            zombie: info.pbi_status == SZOMB,
         })
     }
 
@@ -292,13 +321,16 @@ mod platform {
         let ppid: i32 = fields.next()?.parse().ok()?; // field 4
         let pgid: i32 = fields.next()?.parse().ok()?; // field 5
         // starttime is field 22 overall; 17 more past pgrp.
-        let start: i64 = fields.nth(16)?.parse().ok()?;
+        let birth_token: u64 = fields.nth(16)?.parse().ok()?;
+        let start_sec = i64::try_from(birth_token).ok()?;
         Some(Observed {
             pid,
             ppid,
             pgid,
-            start_sec: start, // clock ticks, but only compared for identity
+            start_sec, // historical wire name; Linux has always used ticks
+            birth_token,
             stopped: state == "T" || state == "t",
+            zombie: state == "Z",
         })
     }
 
@@ -363,12 +395,37 @@ mod tests {
         std::thread::sleep(Duration::from_millis(100));
         for sample in &before {
             assert_ne!(
-                start_time(sample.pid),
-                Some(sample.start_sec),
+                birth_token(sample.pid),
+                sample.birth_token,
                 "pid {} survived kill_tree",
                 sample.pid
             );
         }
+    }
+
+    #[test]
+    fn an_unreaped_zombie_is_not_a_live_execution() {
+        let mut child = Command::new("true").spawn().expect("spawn");
+        let pid = child.id() as i32;
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let token = loop {
+            if let Some(token) = birth_token(pid) {
+                break token;
+            }
+            assert!(Instant::now() < deadline, "child was never observable");
+            std::thread::yield_now();
+        };
+        while matches_birth_token(pid, token) && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        // Linux reports the unreaped child as a same-token zombie. macOS may
+        // make a zombie unobservable to proc_pidinfo. Both outcomes must fail
+        // the live-execution predicate.
+        assert!(
+            !matches_birth_token(pid, token),
+            "an exited, unreaped child cannot establish execution liveness"
+        );
+        let _ = child.wait();
     }
 
     #[test]
@@ -377,5 +434,13 @@ mod tests {
         let pid = child.id() as i32;
         let _ = child.wait();
         assert_eq!(start_time(pid), None, "reaped children are gone");
+    }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_birth_tokens_distinguish_processes_started_in_the_same_second() {
+        assert_ne!(
+            platform::compose_birth_token(1_700_000_000, 1),
+            platform::compose_birth_token(1_700_000_000, 2)
+        );
     }
 }

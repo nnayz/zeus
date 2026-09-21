@@ -109,6 +109,61 @@ pub struct SessionView {
     pub exited: bool,
 }
 
+/// Exact identity of one live local Holder execution.
+///
+/// Session ids survive respawn and pids are recycled. Closed-lid eligibility
+/// therefore requires all four fields and refuses older Holders that cannot
+/// report them. This is an Engine observation, not persisted user consent.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LocalExecutionIdentity {
+    pub session_id: String,
+    pub holder_incarnation: String,
+    pub holder_pid: i32,
+    pub holder_birth_token: u64,
+    pub child_pid: i32,
+    pub child_birth_token: u64,
+}
+
+fn exact_local_identity(
+    expected_session_id: &str,
+    stat: &HolderStat,
+) -> Option<LocalExecutionIdentity> {
+    let session_id = stat.session_id.as_deref()?;
+    let holder_incarnation = stat.incarnation.as_ref()?;
+    let holder_pid = stat.holder_pid?;
+    let holder_birth_token = stat.holder_birth_token?;
+    let child_birth_token = stat.child_birth_token?;
+    if session_id != expected_session_id
+        || holder_pid <= 1
+        || stat.child_pid <= 1
+        || holder_birth_token == 0
+        || child_birth_token == 0
+        || holder_incarnation.len() != 32
+        || !holder_incarnation
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return None;
+    }
+    Some(LocalExecutionIdentity {
+        session_id: expected_session_id.to_string(),
+        holder_incarnation: holder_incarnation.clone(),
+        holder_pid,
+        holder_birth_token,
+        child_pid: stat.child_pid,
+        child_birth_token,
+    })
+}
+
+fn has_exact_identity_fields(stat: &HolderStat) -> bool {
+    // The immediately previous schema already carried incarnation and
+    // holder_pid. Only fields introduced by the exact-token schema may
+    // discriminate a partial current identity from a rolling-upgrade Holder.
+    stat.session_id.is_some()
+        || stat.holder_birth_token.is_some()
+        || stat.child_birth_token.is_some()
+}
+
 /// Small input-side composer mirror used only until the first real prompt is
 /// submitted. It avoids parsing an Agent's rendered screen or reading remote
 /// transcript files, and disappears from the hot path after the title exists.
@@ -194,6 +249,9 @@ struct Shared {
     queued_input: Mutex<Vec<u8>>,
     /// The child's pid, for tree enumeration by the resource governor.
     child_pid: std::sync::atomic::AtomicI32,
+    /// Exact local execution observed when this Session attached. Every later
+    /// power-identity read must match it; socket replacement never rebinds.
+    local_execution_identity: Mutex<Option<LocalExecutionIdentity>>,
     /// The remote Holder's grid is display-authoritative. Raw output still
     /// feeds `screen` for local status reduction and artifact detection.
     remote_grid: Mutex<Option<RemoteGridState>>,
@@ -795,7 +853,7 @@ impl Session {
         let client = HolderClient::new(paths.socket());
         let floor = wait_for_holder(&client, &spec.logs_dir, &spec.id, pre_spawn_tail)
             .map_err(holder_io_error)?;
-        Self::attach(spec, client, floor, engine)
+        Self::attach(spec, client, floor, engine, None)
     }
 
     /// Spawns through a holder, but not yet: the exec waits for the first
@@ -940,7 +998,7 @@ impl Session {
             spec.pty.cols = cols;
             spec.pty.rows = rows;
         }
-        let session = Self::attach(spec, client, floor, engine)?;
+        let session = Self::attach(spec, client, floor, engine, Some(stat))?;
         if let Some((status, needs_input)) = initial_status {
             *session.shared.status.lock().expect("status") = status;
             *session.shared.needs_input.lock().expect("needs input") = needs_input;
@@ -955,11 +1013,58 @@ impl Session {
         client: HolderClient,
         exit_marker_floor: u64,
         engine: Arc<ManifestEngine>,
+        expected_stat: Option<&HolderStat>,
     ) -> std::io::Result<Self> {
         let log = OutputLog::reader(&spec.logs_dir, &spec.id)?;
         let shared = new_shared(&spec, log);
         if let Ok(stat) = client.stat() {
+            let fresh_identity = exact_local_identity(&spec.id, &stat);
+            let pinned_identity = if let Some(expected) = expected_stat {
+                if !expected.alive || !stat.alive {
+                    return Err(std::io::Error::other(
+                        "local Holder child exited during adoption",
+                    ));
+                }
+                match exact_local_identity(&spec.id, expected) {
+                    Some(expected_identity) => {
+                        if fresh_identity.as_ref() != Some(&expected_identity) {
+                            return Err(std::io::Error::other(
+                                "local Holder execution changed during adoption",
+                            ));
+                        }
+                        Some(expected_identity)
+                    }
+                    None => {
+                        if has_exact_identity_fields(expected) {
+                            return Err(std::io::Error::other(
+                                "local Holder supplied incomplete exact identity",
+                            ));
+                        }
+                        if expected.child_pid != stat.child_pid
+                            || expected.epoch_offset != stat.epoch_offset
+                        {
+                            return Err(std::io::Error::other(
+                                "local Holder execution changed during legacy adoption",
+                            ));
+                        }
+                        // Ordinary adoption stays compatible, but an execution
+                        // discovered without exact fields never gains power
+                        // eligibility later in this Session lifetime.
+                        None
+                    }
+                }
+            } else {
+                fresh_identity
+            };
             shared.child_pid.store(stat.child_pid, Ordering::SeqCst);
+            *shared
+                .local_execution_identity
+                .lock()
+                .expect("local execution identity") = pinned_identity;
+        } else if expected_stat.is_some() {
+            return Err(std::io::Error::other(
+                "local Holder disappeared during adoption",
+            ));
         }
 
         let pump = {
@@ -1049,6 +1154,34 @@ impl Session {
     /// The child's pid (0 before it is known), for tree enumeration.
     pub fn child_pid(&self) -> i32 {
         self.shared.child_pid.load(Ordering::SeqCst)
+    }
+
+    /// Returns a fresh, exact identity only for a live local held execution.
+    ///
+    /// Direct, remote, deferred, exited, hibernated, pre-incarnation, and
+    /// internally inconsistent sessions fail closed with `None`.
+    pub fn local_execution_identity(&self) -> Option<LocalExecutionIdentity> {
+        if self.shared.exited.load(Ordering::SeqCst)
+            || self.shared.hibernated.load(Ordering::SeqCst)
+            || self.deferred.is_some()
+        {
+            return None;
+        }
+        let Transport::Held(client) = &self.transport else {
+            return None;
+        };
+        let stat = client.stat().ok()?;
+        if !stat.alive {
+            return None;
+        }
+        let fresh = exact_local_identity(&self.shared.id, &stat)?;
+        let pinned = self
+            .shared
+            .local_execution_identity
+            .lock()
+            .expect("local execution identity")
+            .clone()?;
+        (fresh == pinned).then_some(fresh)
     }
 
     pub fn screen_size(&self) -> (usize, usize) {
@@ -1755,6 +1888,7 @@ fn new_shared(spec: &SessionSpec, log: OutputLog) -> Arc<Shared> {
         hibernated: AtomicBool::new(false),
         queued_input: Mutex::new(Vec::new()),
         child_pid: std::sync::atomic::AtomicI32::new(0),
+        local_execution_identity: Mutex::new(None),
         remote_grid: Mutex::new(None),
         remote_output_offset: AtomicU64::new(0),
         grid_wake: GridWake::new(),

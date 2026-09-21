@@ -16,8 +16,11 @@ zeus/target/
 .serena
 .tokensave
 
-# mdBook output
-docs/book/
+# Fumadocs
+docs/node_modules/
+docs/.next/
+docs/.source/
+docs/out/
 
 # Product site
 site/node_modules/

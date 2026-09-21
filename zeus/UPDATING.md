@@ -1,7 +1,7 @@
 # zeus's auto-updater
 
 User-facing update behavior and trust model:
-**[Updates](../docs/src/updates.md)** in the docs book.
+**[Updates](../docs/content/docs/updates.mdx)** in the docs.
 
 This file is the release packaging and updater implementation reference.
 

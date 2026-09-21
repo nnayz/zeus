@@ -1,0 +1,29 @@
+{
+  "title": "Zeus",
+  "pages": [
+    "index",
+    "---Using Zeus---",
+    "getting-started",
+    "workbench",
+    "keyboard",
+    "agents",
+    "worktrees",
+    "orchestration",
+    "fleet",
+    "settings",
+    "cli",
+    "remote-hosts",
+    "remote-nodes",
+    "ios-companion",
+    "updates",
+    "---Safety & privacy---",
+    "security-model",
+    "security-policy",
+    "privacy",
+    "---Reference---",
+    "companion-architecture",
+    "support",
+    "screenshot-soak",
+    "roadmap"
+  ]
+}

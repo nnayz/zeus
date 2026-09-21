@@ -1,0 +1,47 @@
+---
+title: Zeus
+description: Native macOS control plane for coding agents. Run Claude Code, Codex, Cursor, and other CLIs in parallel, locally or over SSH.
+---
+
+<img src="/images/zeus-pixel-art.png" alt="Zeus" width={280} />
+
+Native macOS control plane for coding agents. Run Claude Code, Codex, Cursor,
+Grok, OpenCode, Gemini, and a catalog of other CLIs in parallel, locally or
+over SSH. Each session is a real PTY with a live status (working, needs you,
+done). Closing the window never kills an agent. A daemon restart brings the
+conversations back.
+
+Zeus is not an IDE and not a model. It is the place you watch a fleet, jump
+to the session that is stuck, and accept the work.
+
+## Install
+
+Zeus requires macOS 15 or newer. Download the current universal DMG from
+[Releases](https://github.com/nnayz/zeus/releases/latest), drag Zeus to
+Applications, then complete the one-time Gatekeeper exception. The current
+release is ad-hoc signed and is not available through Homebrew.
+
+See [Getting started](/docs/getting-started) or the
+[illustrated macOS install guide](https://nnayz.github.io/zeus/install/) for
+the complete installation flow.
+
+## In this book
+
+| Section | What it covers |
+|---------|----------------|
+| [Getting started](/docs/getting-started) | First project, first session, first quit |
+| [The workbench](/docs/workbench) | Sidebar, inspector, lineage tree, overview |
+| [Keyboard](/docs/keyboard) | Every shortcut that matters |
+| [Agents and status](/docs/agents) | Catalog, resume, what the colors mean |
+| [Worktrees](/docs/worktrees) | Isolated checkouts for parallel edits |
+| [Orchestration](/docs/orchestration) | MCP spawn, wait, prompt, read |
+| [Fleet patterns](/docs/fleet) | Ways to run more agents than you can watch |
+| [Settings](/docs/settings) | Defaults, layout, hibernate, hosts |
+| [Command line](/docs/cli) | `zeus session`, worktrees, doctor |
+| [Remote hosts](/docs/remote-hosts) | SSH machines in Settings → Remote |
+| [Remote nodes](/docs/remote-nodes) | First-party `zeus-node` on a VPS |
+| [Updates](/docs/updates) | How auto-update works |
+| [Security model](/docs/security-model) | Trust boundaries |
+| [Privacy](/docs/privacy) | Local data and network activity |
+| [Support](/docs/support) | Diagnostics and logs |
+| [Roadmap](/docs/roadmap) | Product direction |

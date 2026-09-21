@@ -563,7 +563,7 @@ These features are separate from Remote Holder transport:
 - the old iPhone companion path is not part of the Rust remote architecture and
   its obsolete UI entry points are removed;
 - the replacement Companion contract is defined in
-  [Companion architecture and trust model](../docs/src/companion-architecture.md)
+  [Companion architecture and trust model](../docs/content/docs/companion-architecture.mdx)
   for issue #76 under #72. It approves implementation spikes, not production
   availability, and does not reopen the completed remote transport refactor.
 

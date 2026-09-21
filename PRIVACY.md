@@ -1,3 +1,3 @@
 # Privacy
 
-See **[Privacy](docs/src/privacy.md)**.
+See **[Privacy](docs/content/docs/privacy.mdx)**.

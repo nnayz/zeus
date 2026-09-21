@@ -1,4 +1,4 @@
-<h1><img src="docs/src/images/zeus-pixel-art.png" alt="Zeus" width="300"></h1>
+<h1><img src="docs/public/images/zeus-pixel-art.png" alt="Zeus" width="300"></h1>
 
 [![CI](https://github.com/nnayz/zeus/actions/workflows/ci.yml/badge.svg)](https://github.com/nnayz/zeus/actions/workflows/ci.yml)
 [![GitHub release](https://img.shields.io/github/v/release/nnayz/zeus)](https://github.com/nnayz/zeus/releases/latest)
@@ -48,13 +48,13 @@ Developer ID signing and Apple notarization are in place.
 
 The complete guide is published at [docs.zeus.nasrul.info](https://docs.zeus.nasrul.info).
 It covers the workbench, shortcuts, agent setup, orchestration, fleet patterns,
-remote execution, and removal. To preview that book locally, run
-`mdbook serve docs`.
+remote execution, and removal. To preview the docs locally, run
+`npm run dev` in `docs/`.
 
 The monorepo also contains a native SwiftUI iOS Companion at
 [`ios/ZeusCompanion/`](ios/ZeusCompanion/). It connects to the private-network
 Companion HTTPS gateway and keeps its pairing token in the iOS Keychain. See
-the [iOS Companion guide](docs/src/ios-companion.md).
+the [iOS Companion guide](docs/content/docs/ios-companion.mdx).
 
 ## The operating model
 
@@ -132,6 +132,6 @@ For product help, bug reports, or general feedback, email
 **[hi@nasrul.info](mailto:hi@nasrul.info)**. Potential vulnerabilities should
 follow the private process in [SECURITY.md](SECURITY.md).
 
-Additional project information: [support](docs/src/support.md),
-[privacy](docs/src/privacy.md), [security model](docs/src/security-model.md),
-and [roadmap](docs/src/roadmap.md).
+Additional project information: [support](docs/content/docs/support.mdx),
+[privacy](docs/content/docs/privacy.mdx), [security model](docs/content/docs/security-model.mdx),
+and [roadmap](docs/content/docs/roadmap.mdx).

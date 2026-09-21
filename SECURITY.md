@@ -2,9 +2,9 @@
 
 Zeus's disclosure process is documented in two places:
 
-- [Reporting policy](docs/src/security-policy.md) explains supported releases,
+- [Reporting policy](docs/content/docs/security-policy.mdx) explains supported releases,
   what belongs in a report, and the expected response window.
-- [Threat model](docs/src/security-model.md) describes Zeus's trust assumptions
+- [Threat model](docs/content/docs/security-model.mdx) describes Zeus's trust assumptions
   and the boundaries between the app, its Engine, child tools, remote hosts,
   and the updater.
 

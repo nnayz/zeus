@@ -1,45 +1,24 @@
-# Documentation
+# Zeus docs
 
-User-facing documentation is built with [mdBook](https://rust-lang.github.io/mdBook/)
-and lives under `docs/`.
-
-```sh
-# from the repository root (/Users/nayz/Desktop/zeus)
-brew install mdbook             # or: cargo install mdbook --locked
-mdbook serve docs --open        # http://localhost:3000
-mdbook build docs               # output in docs/book/
-```
-
-If your shell is already in `docs/`, drop the extra path:
+User-facing documentation is a [Fumadocs](https://fumadocs.dev) app in `docs/`.
+It is a separate Next.js site so it does not share styles or deploys with the
+marketing site in `site/`.
 
 ```sh
 cd docs
-mdbook serve --open
+npm install
+npm run dev          # http://localhost:3000/docs
+npm run build        # production build
 ```
 
-Do not run `mdbook serve docs` from `docs/` or `docs/book/`. That looks for
-`docs/src/SUMMARY.md` under the current directory and fails.
+Pages live in `content/docs`. The folder structure defines the URLs. Every page
+needs a `title` in its frontmatter. `meta.json` controls sidebar order.
 
-| Book page | Source |
-|-----------|--------|
-| Introduction | [`src/introduction.md`](src/introduction.md) |
-| Getting started | [`src/getting-started.md`](src/getting-started.md) |
-| The workbench | [`src/workbench.md`](src/workbench.md) |
-| Keyboard | [`src/keyboard.md`](src/keyboard.md) |
-| Agents and status | [`src/agents.md`](src/agents.md) |
-| Worktrees | [`src/worktrees.md`](src/worktrees.md) |
-| Orchestration | [`src/orchestration.md`](src/orchestration.md) |
-| Fleet patterns | [`src/fleet.md`](src/fleet.md) |
-| Settings | [`src/settings.md`](src/settings.md) |
-| Command line | [`src/cli.md`](src/cli.md) |
-| Remote hosts | [`src/remote-hosts.md`](src/remote-hosts.md) |
-| Remote nodes | [`src/remote-nodes.md`](src/remote-nodes.md) |
-| Updates | [`src/updates.md`](src/updates.md) |
-| Security model | [`src/security-model.md`](src/security-model.md) |
-| Security policy | [`src/security-policy.md`](src/security-policy.md) |
-| Privacy | [`src/privacy.md`](src/privacy.md) |
-| Support | [`src/support.md`](src/support.md) |
-| Roadmap | [`src/roadmap.md`](src/roadmap.md) |
+Do not edit the `.source/` folder. Fumadocs MDX generates it.
 
-Engineering notes stay next to the code (`zeus/PACKAGING.md`, `zeus/PORT.md`,
-`zeus/REMOTE_PORT.md`, `zeus/PERF.md`).
+Site name and GitHub info are in `lib/shared.ts`. Layout options are in
+`lib/layout.shared.tsx`.
+
+Deploy this app as its own project (for example Vercel at
+[docs.zeus.nasrul.info](https://docs.zeus.nasrul.info)). Keep the default `/docs`
+route so a subdomain or a `/docs/*` proxy both work.

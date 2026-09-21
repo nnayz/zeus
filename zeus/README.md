@@ -2,7 +2,7 @@
 
 For first-party VPS execution, per-node Claude/Codex accounts, fleet usage,
 and transactional local↔cloud handoff, see
-[Remote nodes](../docs/src/remote-nodes.md).
+[Remote nodes](../docs/content/docs/remote-nodes.mdx).
 
 `zeus` is the Rust + GPUI desktop app, shipped self-contained: the app bundle
 carries the Engine (`zeusd-rs`), the session holders that keep agents alive
@@ -37,7 +37,7 @@ explicit tap URL above is required because it is not a separate GitHub
 repository. It declares `auto_updates true`, so Homebrew installs zeus once and
 then leaves it alone — zeus updates itself after that, and `brew upgrade` will
 not clobber a build the app moved itself to. See [UPDATING.md](UPDATING.md) and
-the user-facing [Updates](../docs/src/updates.md) page.
+the user-facing [Updates](../docs/content/docs/updates.mdx) page.
 
 ## Toolchain and GPUI pin
 

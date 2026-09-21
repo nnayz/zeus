@@ -8,7 +8,8 @@ use std::{
     io,
     os::fd::AsRawFd,
     path::PathBuf,
-    time::{SystemTime, UNIX_EPOCH},
+    thread,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use subtle::ConstantTimeEq;
 use zeus_companion_api::{Device, PairResponse, Scope};
@@ -77,9 +78,20 @@ impl AuthStore {
     fn lock(&self) -> io::Result<Lock> {
         let directory = SecureDir::open(&self.directory)?;
         let file = directory.open_file(OsStr::new("auth.lock"), libc::O_RDWR | libc::O_CREAT)?;
-        // Never wait behind a stuck administrator or another gateway.
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            return Err(invalid("auth state busy"));
+        // Briefly absorb contention from this gateway's concurrent HTTP and
+        // WebSocket authentication. Keep the wait bounded so another process
+        // cannot stall requests by holding the lock.
+        let deadline = Instant::now() + Duration::from_millis(50);
+        loop {
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                break;
+            }
+            if io::Error::last_os_error().kind() != io::ErrorKind::WouldBlock
+                || Instant::now() >= deadline
+            {
+                return Err(invalid("auth state busy"));
+            }
+            thread::sleep(Duration::from_millis(1));
         }
         Ok(Lock { file, directory })
     }
@@ -282,5 +294,21 @@ mod tests {
                 .enrollments
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn concurrent_auth_access_retries_short_lived_lock_contention() {
+        let temp = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
+        let directory = temp.path().join("auth");
+        create_secure_dir(&directory).unwrap();
+        let auth = AuthStore { directory };
+        auth.initialize().unwrap();
+        let expected = auth.server_id().unwrap();
+        let lock = auth.lock().unwrap();
+        let concurrent = auth.clone();
+        let reader = std::thread::spawn(move || concurrent.server_id());
+        std::thread::sleep(Duration::from_millis(5));
+        drop(lock);
+        assert_eq!(reader.join().unwrap().unwrap(), expected);
     }
 }

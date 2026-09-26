@@ -11,7 +11,7 @@
   <meta name="description" content={release.summary.join(' ')} />
 </svelte:head>
 
-<article class="markdown-content space-y-4">
+<article class="editorial markdown-content space-y-4">
   <header>
     <p class="text-[22px] leading-[30px] font-semibold">v{release.version}</p>
     <p class="mt-1 text-[13px] leading-5 text-muted">

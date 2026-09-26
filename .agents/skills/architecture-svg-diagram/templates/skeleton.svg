@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2320 1050">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8.5" refY="5"
+            markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0.6L9 5L0 9.4z" fill="#FFFFFF"/>
+    </marker>
+    <style>
+      .panel { fill:#1A1A1D; stroke:#FFF; stroke-width:2.5; }
+      .chip { fill:#0E0E10; stroke:#3F3F46; stroke-width:2; }
+      .title { fill:#FFF; font:600 30px Inter,system-ui,sans-serif; }
+      .label { fill:#FFF; font:500 20px Inter,system-ui,sans-serif; }
+      .muted { fill:#A1A1AA; font:400 17px Inter,system-ui,sans-serif; }
+      .flow { fill:none; stroke:#FFF; stroke-width:2.5; }
+    </style>
+  </defs>
+
+  <rect id="background" width="2320" height="1050" fill="#0E0E10"/>
+
+  <g id="title">
+    <text class="title" x="1160" y="100" text-anchor="middle">System Architecture</text>
+  </g>
+
+  <g id="architecture">
+    <!-- main cards -->
+  </g>
+
+  <g id="connectors">
+    <!-- semantic data / request / event flows -->
+  </g>
+</svg>

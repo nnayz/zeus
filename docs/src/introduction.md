@@ -1,6 +1,6 @@
 # Zeus
 
-<img src="images/zeus-pixel-art.png" alt="Zeus" width="280">
+<img src="images/zeus-logo.svg" alt="Zeus" width="160">
 
 Native macOS control plane for coding agents. Run Claude Code, Codex, Cursor,
 Grok, OpenCode, Gemini, and a catalog of other CLIs in parallel, locally or

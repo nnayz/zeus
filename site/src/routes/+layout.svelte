@@ -7,8 +7,10 @@
   let { children, data }: LayoutProps = $props();
 </script>
 
-<main class="max-w-[680px] mx-auto px-5 sm:px-8 md:px-12 py-14 md:py-32">
+<div class="page">
   <Header githubStars={data.githubStars} />
-  {@render children()}
+  <div class="page-body">
+    {@render children()}
+  </div>
   <Footer />
-</main>
+</div>

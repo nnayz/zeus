@@ -33,7 +33,7 @@ scripts/install-local.sh
 
 With no signing environment, `package.sh` applies an ad-hoc hardened-runtime signature and verifies it. Set `ZEUS_CREATE_DMG=1` to also create `dist/zeus-<version>-universal.dmg`. `ZEUS_DIST_DIR` changes the output directory, and `ZEUS_VERSION` changes the DMG filename.
 
-The committed `assets/icon.icns` is deterministic and can be regenerated on macOS with:
+The committed `assets/icon.icns` is rasterized from `docs/src/images/zeus-logo.svg` and can be regenerated on macOS with:
 
 ```sh
 scripts/make-icon.sh

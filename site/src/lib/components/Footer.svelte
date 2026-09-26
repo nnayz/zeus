@@ -2,7 +2,7 @@
   import { GITHUB, SECURITY_EMAIL } from '$lib/releases';
 </script>
 
-<footer class="mt-16 pt-8 border-t border-border text-muted">
+<footer class="site-footer">
   <p>
     Apache-2.0. <a href="{GITHUB}/blob/main/LICENSE">License</a>.
   </p>

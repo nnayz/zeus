@@ -1,0 +1,313 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 2320 1020" role="img" aria-label="Zeus architecture: desktop, CLI, and iOS clients talk to the local Engine; the Engine attaches local and remote PTY holders that run coding agents">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8.5" refY="5"
+            markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0.6L9 5L0 9.4z" fill="#FFFFFF"/>
+    </marker>
+    <style>
+      .panel { fill:#1A1A1D; stroke:#FFF; stroke-width:2.5; }
+      .chip { fill:#0E0E10; stroke:#3F3F46; stroke-width:2; }
+      .tile { stroke:#3F3F46; stroke-width:1.6; }
+      .group { fill:none; stroke:#FFF; stroke-width:2.5; stroke-dasharray:10 9; }
+      .title { fill:#FFF; font:600 32px Inter,ui-sans-serif,system-ui,sans-serif; }
+      .card-title { fill:#FFF; font:600 26px Inter,ui-sans-serif,system-ui,sans-serif; }
+      .label { fill:#FFF; font:500 20px Inter,ui-sans-serif,system-ui,sans-serif; }
+      .muted { fill:#A1A1AA; font:400 17px Inter,ui-sans-serif,system-ui,sans-serif; }
+      .edge { fill:#A1A1AA; font:500 16px Inter,ui-sans-serif,system-ui,sans-serif; }
+      .flow { fill:none; stroke:#FFF; stroke-width:2.5; }
+      .flow-dashed { fill:none; stroke:#FFF; stroke-width:2.5; stroke-dasharray:8 7; }
+      .icon { fill:none; stroke:#FFF; stroke-width:2; stroke-linecap:round; stroke-linejoin:round; }
+    </style>
+    <!-- Lucide v1.45.0, ISC. https://lucide.dev -->
+    <symbol id="lucide-monitor" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <rect width="20" height="14" x="2" y="3" rx="2"/>
+      <line x1="8" x2="16" y1="21" y2="21"/>
+      <line x1="12" x2="12" y1="17" y2="21"/>
+    </symbol>
+    <symbol id="lucide-terminal" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 19h8"/>
+      <path d="m4 17 6-6-6-6"/>
+    </symbol>
+    <symbol id="lucide-smartphone" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <rect width="14" height="20" x="5" y="2" rx="2" ry="2"/>
+      <path d="M12 18h.01"/>
+    </symbol>
+    <symbol id="lucide-cpu" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 20v2"/>
+      <path d="M12 2v2"/>
+      <path d="M17 20v2"/>
+      <path d="M17 2v2"/>
+      <path d="M2 12h2"/>
+      <path d="M2 17h2"/>
+      <path d="M2 7h2"/>
+      <path d="M20 12h2"/>
+      <path d="M20 17h2"/>
+      <path d="M20 7h2"/>
+      <path d="M7 20v2"/>
+      <path d="M7 2v2"/>
+      <rect x="4" y="4" width="16" height="16" rx="2"/>
+      <rect x="8" y="8" width="8" height="8" rx="1"/>
+    </symbol>
+    <symbol id="lucide-lock" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <rect width="18" height="11" x="3" y="11" rx="2" ry="2"/>
+      <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+    </symbol>
+    <symbol id="lucide-lock-keyhole" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="16" r="1"/>
+      <rect x="3" y="10" width="18" height="12" rx="2"/>
+      <path d="M7 10V7a5 5 0 0 1 10 0v3"/>
+    </symbol>
+    <symbol id="lucide-box" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/>
+      <path d="m3.3 7 8.7 5 8.7-5"/>
+      <path d="M12 22V12"/>
+    </symbol>
+    <symbol id="lucide-key-round" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M2.586 17.414A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172a2 2 0 0 0 1.414-.586l.814-.814a6.5 6.5 0 1 0-4-4z"/>
+      <circle cx="16.5" cy="7.5" r=".5" fill="#FFFFFF"/>
+    </symbol>
+    <symbol id="lucide-shield-check" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/>
+      <path d="m9 12 2 2 4-4"/>
+    </symbol>
+    <symbol id="lucide-bot" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 8V4H8"/>
+      <rect width="16" height="12" x="4" y="8" rx="2"/>
+      <path d="M2 14h2"/>
+      <path d="M20 14h2"/>
+      <path d="M15 13v2"/>
+      <path d="M9 13v2"/>
+    </symbol>
+    <symbol id="lucide-server" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <rect width="20" height="8" x="2" y="2" rx="2" ry="2"/>
+      <rect width="20" height="8" x="2" y="14" rx="2" ry="2"/>
+      <line x1="6" x2="6.01" y1="6" y2="6"/>
+      <line x1="6" x2="6.01" y1="18" y2="18"/>
+    </symbol>
+    <!-- Simple Icons brand marks. https://simpleicons.org -->
+    <symbol id="logo-claude-code" viewBox="0 0 24 24">
+      <path fill="#FFFFFF" d="m4.7144 15.9555 4.7174-2.6471.079-.2307-.079-.1275h-.2307l-.7893-.0486-2.6956-.0729-2.3375-.0971-2.2646-.1214-.5707-.1215-.5343-.7042.0546-.3522.4797-.3218.686.0608 1.5179.1032 2.2767.1578 1.6514.0972 2.4468.255h.3886l.0546-.1579-.1336-.0971-.1032-.0972L6.973 9.8356l-2.55-1.6879-1.3356-.9714-.7225-.4918-.3643-.4614-.1578-1.0078.6557-.7225.8803.0607.2246.0607.8925.686 1.9064 1.4754 2.4893 1.8336.3643.3035.1457-.1032.0182-.0728-.164-.2733-1.3539-2.4467-1.445-2.4893-.6435-1.032-.17-.6194c-.0607-.255-.1032-.4674-.1032-.7285L6.287.1335 6.6997 0l.9957.1336.419.3642.6192 1.4147 1.0018 2.2282 1.5543 3.0296.4553.8985.2429.8318.091.255h.1579v-.1457l.1275-1.706.2368-2.0947.2307-2.6957.0789-.7589.3764-.9107.7468-.4918.5828.2793.4797.686-.0668.4433-.2853 1.8517-.5586 2.9021-.3643 1.9429h.2125l.2429-.2429.9835-1.3053 1.6514-2.0643.7286-.8196.85-.9046.5464-.4311h1.0321l.759 1.1293-.34 1.1657-1.0625 1.3478-.8804 1.1414-1.2628 1.7-.7893 1.36.0729.1093.1882-.0183 2.8535-.607 1.5421-.2794 1.8396-.3157.8318.3886.091.3946-.3278.8075-1.967.4857-2.3072.4614-3.4364.8136-.0425.0304.0486.0607 1.5482.1457.6618.0364h1.621l3.0175.2247.7892.522.4736.6376-.079.4857-1.2142.6193-1.6393-.3886-3.825-.9107-1.3113-.3279h-.1822v.1093l1.0929 1.0686 2.0035 1.8092 2.5075 2.3314.1275.5768-.3218.4554-.34-.0486-2.2039-1.6575-.85-.7468-1.9246-1.621h-.1275v.17l.4432.6496 2.3436 3.5214.1214 1.0807-.17.3521-.6071.2125-.6679-.1214-1.3721-1.9246L14.38 17.959l-1.1414-1.9428-.1397.079-.674 7.2552-.3156.3703-.7286.2793-.6071-.4614-.3218-.7468.3218-1.4753.3886-1.9246.3157-1.53.2853-1.9004.17-.6314-.0121-.0425-.1397.0182-1.4328 1.9672-2.1796 2.9446-1.7243 1.8456-.4128.164-.7164-.3704.0667-.6618.4008-.5889 2.386-3.0357 1.4389-1.882.929-1.0868-.0062-.1579h-.0546l-6.3385 4.1164-1.1293.1457-.4857-.4554.0608-.7467.2307-.2429 1.9064-1.3114Z"/>
+    </symbol>
+    <symbol id="logo-codex" viewBox="0 0 24 24" fill="none">
+      <path stroke="#FFFFFF" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.25" d="M4.97254 4.98262s0.13697 -0.38723 0.21046 -0.57921c0.22106 -0.57763 0.52216 -1.07085 0.9074 -1.55207C8.0185 0.442894 11.6137 0.0539409 14.0325 1.94825c0.1294 0.10139 0.5584 0.46562 0.5584 0.46562s0.3528 -0.08354 0.4903 -0.1037c0.8264 -0.12112 1.7067 -0.10392 2.5123 0.12735 0.2268 0.06692 0.7493 0.26297 0.9655 0.3677 1.1193 0.55385 2.0306 1.45349 2.5995 2.56592 0.1599 0.30795 0.4306 1.0133 0.4964 1.35149 0.1643 0.84457 0.1396 1.88805 -0.0479 2.72458 0 0 0.4887 0.57599 0.729 0.94359 0.6097 0.9501 0.9275 2.0584 0.9138 3.1877 -0.0051 0.243 -0.0381 0.4758 -0.0692 0.7163 -0.2898 2.2464 -1.9453 4.124 -4.1424 4.7047 0 0 -0.3242 0.8383 -0.5088 1.2156 -0.092 0.1879 -0.5129 0.8685 -0.6678 0.9913 -0.7315 0.9251 -1.8596 1.597 -2.9907 1.8856 -0.2991 0.0763 -0.5767 0.101 -0.8816 0.1305 -1.5179 0.1471 -2.9895 -0.298 -4.158 -1.2841 -0.1194 -0.1007 -0.42291 -0.3466 -0.42291 -0.3466 -0.29534 0.0679 -0.63109 0.1368 -0.93342 0.1652 -1.20465 0.108 -2.41274 -0.166 -3.45315 -0.7833 -1.29852 -0.7749 -2.23851 -2.0319 -2.6152 -3.4974 -0.2276 -0.8787 -0.22988 -1.775 -0.03371 -2.6534 0.01674 -0.0749 0.04627 -0.2423 0.04627 -0.2423 -0.25249 -0.2852 -0.48116 -0.513 -0.69599 -0.838C1.04615 12.719 0.6967 11.5072 0.756608 10.2791 0.84324 8.12066 2.17458 6.16949 4.14096 5.28826c0.25822 -0.11572 0.56192 -0.19674 0.83158 -0.30564"/>
+      <path stroke="#FFFFFF" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.25" d="m6.54102 8.71973 1.92934 3.34157 -1.92934 3.3417"/>
+      <path stroke="#FFFFFF" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.25" d="M17.6997 15.4033h-5"/>
+    </symbol>
+    <symbol id="logo-cursor" viewBox="0 0 24 24">
+      <path fill="#FFFFFF" d="M11.503.131 1.891 5.678a.84.84 0 0 0-.42.726v11.188c0 .3.162.575.42.724l9.609 5.55a1 1 0 0 0 .998 0l9.61-5.55a.84.84 0 0 0 .42-.724V6.404a.84.84 0 0 0-.42-.726L12.497.131a1.01 1.01 0 0 0-.996 0M2.657 6.338h18.55c.263 0 .43.287.297.515L12.23 22.918c-.062.107-.229.064-.229-.06V12.335a.59.59 0 0 0-.295-.51l-9.11-5.257c-.109-.063-.064-.23.061-.23"/>
+    </symbol>
+    <symbol id="logo-xai" viewBox="0 0 24 24">
+      <path fill="#FFFFFF" fill-rule="evenodd" d="M6.469 8.776 16.512 23h-4.464L2.005 8.776H6.47zm-.004 7.9 2.233 3.164L6.467 23H2l4.465-6.324zM22 2.582V23h-3.659V7.764L22 2.582zM22 1l-9.952 14.095-2.233-3.163L17.533 1H22z"/>
+    </symbol>
+    <symbol id="logo-opencode" viewBox="0 0 24 24">
+      <path fill="#FFFFFF" fill-rule="evenodd" d="M22 24H2V0h20zM17 4.8H7v14.4h10z"/>
+    </symbol>
+    <linearGradient id="gemini-gradient" x1="3" y1="21" x2="21" y2="3" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1CBA66"/>
+      <stop offset="0.28" stop-color="#F6BD18"/>
+      <stop offset="0.62" stop-color="#F64B41"/>
+      <stop offset="1" stop-color="#3285FB"/>
+    </linearGradient>
+    <symbol id="logo-swift" viewBox="0 0 24 24">
+      <path fill="#FFFFFF" d="M7.508 0c-.287 0-.573 0-.86.002-.241.002-.483.003-.724.01-.132.003-.263.009-.395.015A9.154 9.154 0 0 0 4.348.15 5.492 5.492 0 0 0 2.85.645 5.04 5.04 0 0 0 .645 2.848c-.245.48-.4.972-.495 1.5-.093.52-.122 1.05-.136 1.576a35.2 35.2 0 0 0-.012.724C0 6.935 0 7.221 0 7.508v8.984c0 .287 0 .575.002.862.002.24.005.481.012.722.014.526.043 1.057.136 1.576.095.528.25 1.02.495 1.5a5.03 5.03 0 0 0 2.205 2.203c.48.244.97.4 1.498.495.52.093 1.05.124 1.576.138.241.007.483.009.724.01.287.002.573.002.86.002h8.984c.287 0 .573 0 .86-.002.241-.001.483-.003.724-.01a10.523 10.523 0 0 0 1.578-.138 5.322 5.322 0 0 0 1.498-.495 5.035 5.035 0 0 0 2.203-2.203c.245-.48.4-.972.495-1.5.093-.52.124-1.05.138-1.576.007-.241.009-.481.01-.722.002-.287.002-.575.002-.862V7.508c0-.287 0-.573-.002-.86a33.662 33.662 0 0 0-.01-.724 10.5 10.5 0 0 0-.138-1.576 5.328 5.328 0 0 0-.495-1.5A5.039 5.039 0 0 0 21.152.645 5.32 5.32 0 0 0 19.654.15a10.493 10.493 0 0 0-1.578-.138 34.98 34.98 0 0 0-.722-.01C17.067 0 16.779 0 16.492 0H7.508zm6.035 3.41c4.114 2.47 6.545 7.162 5.549 11.131-.024.093-.05.181-.076.272l.002.001c2.062 2.538 1.5 5.258 1.236 4.745-1.072-2.086-3.066-1.568-4.088-1.043a6.803 6.803 0 0 1-.281.158l-.02.012-.002.002c-2.115 1.123-4.957 1.205-7.812-.022a12.568 12.568 0 0 1-5.64-4.838c.649.48 1.35.902 2.097 1.252 3.019 1.414 6.051 1.311 8.197-.002C9.651 12.73 7.101 9.67 5.146 7.191a10.628 10.628 0 0 1-1.005-1.384c2.34 2.142 6.038 4.83 7.365 5.576C8.69 8.408 6.208 4.743 6.324 4.86c4.436 4.47 8.528 6.996 8.528 6.996.154.085.27.154.36.213.085-.215.16-.437.224-.668.708-2.588-.09-5.548-1.893-7.992z"/>
+    </symbol>
+  </defs>
+
+  <rect id="background" width="2320" height="1020" fill="#0E0E10"/>
+
+  <g id="title">
+    <text class="title" x="1160" y="64" text-anchor="middle">Zeus Architecture</text>
+    <text class="muted" x="1160" y="98" text-anchor="middle">macOS command center for coding agents</text>
+  </g>
+
+  <g id="clients">
+    <g id="desktop">
+      <rect class="panel" x="60" y="140" width="700" height="150" rx="14"/>
+      <use href="#lucide-monitor" xlink:href="#lucide-monitor" x="84" y="162" width="32" height="32"/>
+      <text class="card-title" x="128" y="186">Desktop</text>
+      <rect class="chip" x="84" y="228" width="96" height="44" rx="10"/>
+      <text class="label" x="132" y="250" text-anchor="middle" dominant-baseline="middle">GPUI</text>
+      <rect class="chip" x="192" y="228" width="140" height="44" rx="10"/>
+      <text class="label" x="262" y="250" text-anchor="middle" dominant-baseline="middle">zeus-term</text>
+      <rect class="chip" x="344" y="228" width="156" height="44" rx="10"/>
+      <text class="label" x="422" y="250" text-anchor="middle" dominant-baseline="middle">zeus-client</text>
+      <rect class="chip" x="512" y="228" width="112" height="44" rx="10"/>
+      <text class="label" x="568" y="250" text-anchor="middle" dominant-baseline="middle">zeus-ui</text>
+    </g>
+
+    <g id="cli">
+      <rect class="panel" x="784" y="140" width="580" height="150" rx="14"/>
+      <use href="#lucide-terminal" xlink:href="#lucide-terminal" x="808" y="162" width="32" height="32"/>
+      <text class="card-title" x="852" y="186">CLI</text>
+      <rect class="chip" x="808" y="228" width="90" height="44" rx="10"/>
+      <text class="label" x="853" y="250" text-anchor="middle" dominant-baseline="middle">MCP</text>
+      <rect class="chip" x="910" y="228" width="100" height="44" rx="10"/>
+      <text class="label" x="960" y="250" text-anchor="middle" dominant-baseline="middle">hooks</text>
+      <rect class="chip" x="1022" y="228" width="120" height="44" rx="10"/>
+      <text class="label" x="1082" y="250" text-anchor="middle" dominant-baseline="middle">session</text>
+    </g>
+
+    <g id="ios">
+      <rect class="panel" x="1420" y="140" width="840" height="150" rx="14"/>
+      <use href="#lucide-smartphone" xlink:href="#lucide-smartphone" x="1444" y="162" width="32" height="32"/>
+      <text class="card-title" x="1488" y="186">iOS Companion</text>
+      <rect class="tile" x="1444" y="228" width="44" height="44" rx="10" fill="#F05138"/>
+      <use href="#logo-swift" xlink:href="#logo-swift" x="1452" y="236" width="28" height="28"/>
+      <text class="label" x="1498" y="250" dominant-baseline="middle">SwiftUI</text>
+      <rect class="chip" x="1590" y="228" width="152" height="44" rx="10"/>
+      <use href="#lucide-lock-keyhole" xlink:href="#lucide-lock-keyhole" x="1602" y="238" width="24" height="24"/>
+      <text class="label" x="1672" y="250" dominant-baseline="middle">Keychain</text>
+      <rect class="chip" x="1754" y="228" width="132" height="44" rx="10"/>
+      <use href="#lucide-shield-check" xlink:href="#lucide-shield-check" x="1766" y="238" width="24" height="24"/>
+      <text class="label" x="1828" y="250" dominant-baseline="middle">HTTPS</text>
+    </g>
+  </g>
+
+  <g id="core-runtime">
+    <g id="engine">
+      <rect class="panel" x="60" y="350" width="1304" height="150" rx="14"/>
+      <use href="#lucide-cpu" xlink:href="#lucide-cpu" x="84" y="372" width="32" height="32"/>
+      <text class="card-title" x="128" y="396">Engine</text>
+      <text class="muted" x="236" y="396">zeusd-rs · daemon</text>
+      <rect class="chip" x="84" y="438" width="188" height="44" rx="10"/>
+      <text class="label" x="178" y="460" text-anchor="middle" dominant-baseline="middle">SessionRecord</text>
+      <rect class="chip" x="284" y="438" width="140" height="44" rx="10"/>
+      <text class="label" x="354" y="460" text-anchor="middle" dominant-baseline="middle">Manifests</text>
+      <rect class="chip" x="436" y="438" width="104" height="44" rx="10"/>
+      <text class="label" x="488" y="460" text-anchor="middle" dominant-baseline="middle">Status</text>
+      <rect class="chip" x="552" y="438" width="140" height="44" rx="10"/>
+      <text class="label" x="622" y="460" text-anchor="middle" dominant-baseline="middle">Worktrees</text>
+      <rect class="chip" x="704" y="438" width="140" height="44" rx="10"/>
+      <text class="label" x="774" y="460" text-anchor="middle" dominant-baseline="middle">Bootstrap</text>
+      <rect class="chip" x="856" y="438" width="168" height="44" rx="10"/>
+      <text class="label" x="940" y="460" text-anchor="middle" dominant-baseline="middle">Orchestration</text>
+    </g>
+
+    <g id="companion">
+      <rect class="panel" x="1420" y="350" width="840" height="150" rx="14"/>
+      <use href="#lucide-lock" xlink:href="#lucide-lock" x="1444" y="372" width="32" height="32"/>
+      <text class="card-title" x="1488" y="396">Companion Gateway</text>
+      <rect class="chip" x="1444" y="438" width="100" height="44" rx="10"/>
+      <text class="label" x="1494" y="460" text-anchor="middle" dominant-baseline="middle">HTTPS</text>
+      <rect class="chip" x="1556" y="438" width="116" height="44" rx="10"/>
+      <text class="label" x="1614" y="460" text-anchor="middle" dominant-baseline="middle">Pairing</text>
+      <rect class="chip" x="1684" y="438" width="108" height="44" rx="10"/>
+      <text class="label" x="1738" y="460" text-anchor="middle" dominant-baseline="middle">Screen</text>
+      <rect class="chip" x="1804" y="438" width="168" height="44" rx="10"/>
+      <text class="label" x="1888" y="460" text-anchor="middle" dominant-baseline="middle">Control lease</text>
+    </g>
+  </g>
+
+  <g id="execution">
+    <g id="local-holder">
+      <rect class="panel" x="60" y="560" width="660" height="150" rx="14"/>
+      <use href="#lucide-box" xlink:href="#lucide-box" x="84" y="582" width="32" height="32"/>
+      <text class="card-title" x="128" y="606">Local Holder</text>
+      <rect class="chip" x="84" y="648" width="88" height="44" rx="10"/>
+      <text class="label" x="128" y="670" text-anchor="middle" dominant-baseline="middle">PTY</text>
+      <rect class="chip" x="184" y="648" width="148" height="44" rx="10"/>
+      <text class="label" x="258" y="670" text-anchor="middle" dominant-baseline="middle">Unix socket</text>
+      <rect class="chip" x="344" y="648" width="176" height="44" rx="10"/>
+      <text class="label" x="432" y="670" text-anchor="middle" dominant-baseline="middle">terminal-state</text>
+    </g>
+
+    <g id="remote">
+      <rect class="group" x="800" y="536" width="1460" height="190" rx="18"/>
+      <text class="muted" x="1720" y="528">Remote host</text>
+
+      <g id="ssh">
+        <rect class="panel" x="820" y="560" width="340" height="150" rx="14"/>
+        <use href="#lucide-key-round" xlink:href="#lucide-key-round" x="844" y="582" width="32" height="32"/>
+        <text class="card-title" x="888" y="606">SSH</text>
+        <rect class="chip" x="844" y="648" width="108" height="44" rx="10"/>
+        <text class="label" x="898" y="670" text-anchor="middle" dominant-baseline="middle">ssh -T</text>
+        <rect class="chip" x="964" y="648" width="164" height="44" rx="10"/>
+        <text class="label" x="1046" y="670" text-anchor="middle" dominant-baseline="middle">byte transport</text>
+      </g>
+
+      <g id="remote-holder">
+        <rect class="panel" x="1200" y="560" width="1040" height="150" rx="14"/>
+        <use href="#lucide-server" xlink:href="#lucide-server" x="1224" y="582" width="32" height="32"/>
+        <text class="card-title" x="1268" y="606">Remote Holder</text>
+        <rect class="chip" x="1224" y="648" width="88" height="44" rx="10"/>
+        <text class="label" x="1268" y="670" text-anchor="middle" dominant-baseline="middle">PTY</text>
+        <rect class="chip" x="1324" y="648" width="90" height="44" rx="10"/>
+        <text class="label" x="1369" y="670" text-anchor="middle" dominant-baseline="middle">Grid</text>
+        <rect class="chip" x="1426" y="648" width="100" height="44" rx="10"/>
+        <text class="label" x="1476" y="670" text-anchor="middle" dominant-baseline="middle">Lease</text>
+        <rect class="chip" x="1538" y="648" width="88" height="44" rx="10"/>
+        <text class="label" x="1582" y="670" text-anchor="middle" dominant-baseline="middle">UDS</text>
+        <rect class="chip" x="1638" y="648" width="176" height="44" rx="10"/>
+        <text class="label" x="1726" y="670" text-anchor="middle" dominant-baseline="middle">terminal-state</text>
+        <rect class="chip" x="1826" y="648" width="128" height="44" rx="10"/>
+        <text class="label" x="1890" y="670" text-anchor="middle" dominant-baseline="middle">Snapshot</text>
+      </g>
+    </g>
+  </g>
+
+  <g id="agents">
+    <rect class="panel" x="60" y="780" width="2200" height="150" rx="14"/>
+    <use href="#lucide-bot" xlink:href="#lucide-bot" x="84" y="802" width="32" height="32"/>
+    <text class="card-title" x="128" y="826">Agents</text>
+    <g id="provider-claude-code">
+      <rect class="tile" x="400" y="868" width="44" height="44" rx="10" fill="#D97757"/>
+      <use href="#logo-claude-code" xlink:href="#logo-claude-code" x="408" y="876" width="28" height="28"/>
+      <text class="label" x="454" y="890" dominant-baseline="middle">Claude Code</text>
+    </g>
+    <g id="provider-codex">
+      <rect class="tile" x="660" y="868" width="44" height="44" rx="10" fill="#000"/>
+      <use href="#logo-codex" xlink:href="#logo-codex" x="668" y="876" width="28" height="28"/>
+      <text class="label" x="714" y="890" dominant-baseline="middle">Codex</text>
+    </g>
+    <g id="provider-cursor">
+      <rect class="tile" x="850" y="868" width="44" height="44" rx="10" fill="#000"/>
+      <use href="#logo-cursor" xlink:href="#logo-cursor" x="858" y="876" width="28" height="28"/>
+      <text class="label" x="904" y="890" dominant-baseline="middle">Cursor</text>
+    </g>
+    <g id="provider-grok">
+      <rect class="tile" x="1050" y="868" width="44" height="44" rx="10" fill="#000"/>
+      <use href="#logo-xai" xlink:href="#logo-xai" x="1058" y="876" width="28" height="28"/>
+      <text class="label" x="1104" y="890" dominant-baseline="middle">Grok</text>
+    </g>
+    <g id="provider-opencode">
+      <rect class="tile" x="1230" y="868" width="44" height="44" rx="10" fill="#000"/>
+      <use href="#logo-opencode" xlink:href="#logo-opencode" x="1238" y="876" width="28" height="28"/>
+      <text class="label" x="1284" y="890" dominant-baseline="middle">OpenCode</text>
+    </g>
+    <g id="provider-gemini">
+      <rect class="tile" x="1470" y="868" width="44" height="44" rx="10" fill="#000"/>
+      <g transform="translate(1478 876) scale(1.16667)">
+        <path fill="url(#gemini-gradient)" d="M11.04 19.32Q12 21.51 12 24q0-2.49.93-4.68.96-2.19 2.58-3.81t3.81-2.55Q21.51 12 24 12q-2.49 0-4.68-.93a12.3 12.3 0 0 1-3.81-2.58 12.3 12.3 0 0 1-2.58-3.81Q12 2.49 12 0q0 2.49-.96 4.68-.93 2.19-2.55 3.81a12.3 12.3 0 0 1-3.81 2.58Q2.49 12 0 12q2.49 0 4.68.96 2.19.93 3.81 2.55t2.55 3.81"/>
+      </g>
+      <text class="label" x="1524" y="890" dominant-baseline="middle">Gemini</text>
+    </g>
+    <g id="provider-shell">
+      <rect class="tile" x="1670" y="868" width="44" height="44" rx="10" fill="#0E0E10"/>
+      <use href="#lucide-terminal" xlink:href="#lucide-terminal" x="1678" y="876" width="28" height="28"/>
+      <text class="label" x="1724" y="890" dominant-baseline="middle">Shell</text>
+    </g>
+  </g>
+
+  <g id="connectors">
+    <path class="flow" d="M390 290 V350" marker-end="url(#arrow)"/>
+    <path class="flow" d="M1074 290 V350" marker-end="url(#arrow)"/>
+    <path class="flow" d="M1840 290 V350" marker-end="url(#arrow)"/>
+    <path class="flow" d="M1420 425 H1364" marker-end="url(#arrow)"/>
+    <path class="flow" d="M390 500 V560" marker-end="url(#arrow)"/>
+    <path class="flow" d="M990 500 V560" marker-end="url(#arrow)"/>
+    <path class="flow" d="M1160 635 H1200" marker-end="url(#arrow)"/>
+    <path class="flow" d="M390 710 V780" marker-end="url(#arrow)"/>
+    <path class="flow" d="M1720 710 V780" marker-end="url(#arrow)"/>
+    <path class="flow-dashed" d="M760 780 V500" marker-end="url(#arrow)"/>
+
+    <text class="edge" x="1868" y="324">HTTPS</text>
+    <text class="edge" x="1288" y="418">zeus-client</text>
+    <text class="edge" x="1004" y="518">ssh -T</text>
+    <text class="edge" x="1164" y="622">Helper</text>
+    <text class="edge" x="408" y="752">PTY</text>
+    <text class="edge" x="1738" y="752">PTY</text>
+    <text class="edge" x="772" y="746">MCP</text>
+  </g>
+
+  <text class="muted" x="1160" y="992" text-anchor="middle">Holders own each PTY · Engine owns SessionRecord · SSH never owns the Agent PTY</text>
+</svg>

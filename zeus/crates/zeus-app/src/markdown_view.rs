@@ -10,29 +10,84 @@ use zeus_ui::{Ink, Radius, SemanticColors};
 
 use crate::markdown::{InlineText, MarkdownBlock, MarkdownDocument};
 
+/// Inspector notes stay on the compact secondary measure.
+const INSPECTOR: MarkdownStyle = MarkdownStyle {
+    max_width: 760.0,
+    body: 11.5,
+    body_line: 18.0,
+    code: 10.5,
+    code_line: 17.0,
+    primary_body: false,
+};
+
+/// Zeron's transcript: 14/22 primary ink inside the conversation column.
+const CHAT: MarkdownStyle = MarkdownStyle {
+    max_width: 736.0,
+    body: 14.0,
+    body_line: 22.0,
+    code: 13.0,
+    code_line: 20.0,
+    primary_body: true,
+};
+
+#[derive(Clone, Copy)]
+struct MarkdownStyle {
+    max_width: f32,
+    body: f32,
+    body_line: f32,
+    code: f32,
+    code_line: f32,
+    primary_body: bool,
+}
+
 pub fn render_markdown(document: &MarkdownDocument, colors: SemanticColors) -> AnyElement {
+    render_markdown_with(document, colors, INSPECTOR)
+}
+
+pub fn render_chat_markdown(document: &MarkdownDocument, colors: SemanticColors) -> AnyElement {
+    render_markdown_with(document, colors, CHAT)
+}
+
+fn render_markdown_with(
+    document: &MarkdownDocument,
+    colors: SemanticColors,
+    style: MarkdownStyle,
+) -> AnyElement {
     let mut content = div()
         .w_full()
-        .max_w(px(760.0))
+        .max_w(px(style.max_width))
         .flex()
         .flex_col()
-        .gap(px(10.0));
+        .gap(px(if style.primary_body { 12.0 } else { 10.0 }));
 
     for block in &document.blocks {
-        content = content.child(render_block(block, colors));
+        content = content.child(render_block(block, colors, style));
     }
 
     content.into_any_element()
 }
 
-fn render_block(block: &MarkdownBlock, colors: SemanticColors) -> AnyElement {
+fn render_block(block: &MarkdownBlock, colors: SemanticColors, style: MarkdownStyle) -> AnyElement {
+    let body_color = if style.primary_body {
+        colors.primary
+    } else {
+        colors.secondary
+    };
     match block {
         MarkdownBlock::Heading { level, content } => {
-            let (size, line_height, top) = match *level {
-                1 => (18.0, 23.0, 5.0),
-                2 => (15.0, 20.0, 4.0),
-                3 => (13.0, 18.0, 3.0),
-                _ => (12.0, 17.0, 2.0),
+            let (size, line_height, top) = if style.primary_body {
+                match *level {
+                    1 => (20.0, 26.0, 6.0),
+                    2 => (16.0, 22.0, 4.0),
+                    _ => (15.0, 22.0, 2.0),
+                }
+            } else {
+                match *level {
+                    1 => (18.0, 23.0, 5.0),
+                    2 => (15.0, 20.0, 4.0),
+                    3 => (13.0, 18.0, 3.0),
+                    _ => (12.0, 17.0, 2.0),
+                }
             };
             div()
                 .mt(px(top))
@@ -40,14 +95,14 @@ fn render_block(block: &MarkdownBlock, colors: SemanticColors) -> AnyElement {
                 .text_size(px(size))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(colors.primary)
-                .child(render_inline(content, colors, true))
+                .child(render_inline(content, colors, style, true))
                 .into_any_element()
         }
         MarkdownBlock::Paragraph(content) => div()
-            .line_height(px(18.0))
-            .text_size(px(11.5))
-            .text_color(colors.secondary)
-            .child(render_inline(content, colors, false))
+            .line_height(px(style.body_line))
+            .text_size(px(style.body))
+            .text_color(body_color)
+            .child(render_inline(content, colors, style, false))
             .into_any_element(),
         MarkdownBlock::List {
             ordered,
@@ -72,9 +127,9 @@ fn render_block(block: &MarkdownBlock, colors: SemanticColors) -> AnyElement {
                         .flex()
                         .items_start()
                         .gap(px(8.0))
-                        .line_height(px(18.0))
-                        .text_size(px(11.5))
-                        .text_color(colors.secondary)
+                        .line_height(px(style.body_line))
+                        .text_size(px(style.body))
+                        .text_color(body_color)
                         .child(
                             div()
                                 .w(px(18.0))
@@ -87,6 +142,7 @@ fn render_block(block: &MarkdownBlock, colors: SemanticColors) -> AnyElement {
                         .child(div().min_w(px(0.0)).flex_1().child(render_inline(
                             &item.content,
                             colors,
+                            style,
                             false,
                         ))),
                 );
@@ -104,7 +160,7 @@ fn render_block(block: &MarkdownBlock, colors: SemanticColors) -> AnyElement {
                 .border_color(rgba(0xd9775788))
                 .text_color(colors.secondary);
             for block in blocks {
-                quote = quote.child(render_block(block, colors));
+                quote = quote.child(render_block(block, colors, style));
             }
             quote.into_any_element()
         }
@@ -115,8 +171,8 @@ fn render_block(block: &MarkdownBlock, colors: SemanticColors) -> AnyElement {
                 .flex()
                 .flex_col()
                 .font_family(crate::fonts::mono_family())
-                .line_height(px(17.0))
-                .text_size(px(10.5))
+                .line_height(px(style.code_line))
+                .text_size(px(style.code))
                 .text_color(rgba(0xd8dee9ff));
             for line in code.lines() {
                 code_lines = code_lines.child(
@@ -164,29 +220,38 @@ fn render_block(block: &MarkdownBlock, colors: SemanticColors) -> AnyElement {
     }
 }
 
-fn render_inline(content: &InlineText, colors: SemanticColors, heading: bool) -> AnyElement {
+fn render_inline(
+    content: &InlineText,
+    colors: SemanticColors,
+    style: MarkdownStyle,
+    heading: bool,
+) -> AnyElement {
     let mut line = div().min_w(px(0.0)).flex().flex_wrap().items_baseline();
     for span in &content.spans {
         if span.text.is_empty() {
             continue;
         }
-        let style = span.style;
+        let marks = span.style;
         let link = span.link.clone();
         let text = SharedString::from(span.text.clone());
         line = line.child(
             div()
                 .id(SharedString::from(format!("markdown-inline-{span:p}")))
-                .when(style.bold, |piece| piece.font_weight(FontWeight::SEMIBOLD))
-                .when(style.italic, |piece| piece.italic())
-                .when(style.strikethrough, |piece| piece.line_through())
-                .when(style.code, |piece| {
+                .when(marks.bold, |piece| piece.font_weight(FontWeight::SEMIBOLD))
+                .when(marks.italic, |piece| piece.italic())
+                .when(marks.strikethrough, |piece| piece.line_through())
+                .when(marks.code, |piece| {
                     piece
                         .mx(px(1.0))
                         .px(px(4.0))
                         .rounded(px(4.0))
                         .bg(colors.primary.alpha(0.065))
                         .font_family(crate::fonts::mono_family())
-                        .text_size(px(if heading { 0.92 * 13.0 } else { 10.5 }))
+                        .text_size(px(if heading {
+                            0.92 * style.body
+                        } else {
+                            style.code
+                        }))
                         .text_color(rgba(0xe7b49fff))
                 })
                 .when(link.is_some(), |piece| {
@@ -212,7 +277,7 @@ mod tests {
     #[test]
     fn renderer_source_keeps_a_readable_measure_and_native_block_treatment() {
         let source = include_str!("markdown_view.rs");
-        assert!(source.contains("max_w(px(760.0))"));
+        assert!(source.contains("max_width: 760.0"));
         assert!(source.contains("MarkdownBlock::CodeBlock"));
         assert!(source.contains("MarkdownBlock::List"));
         assert!(source.contains("MarkdownBlock::Quote"));

@@ -54,7 +54,7 @@ use crate::image_attachment::{
 };
 use crate::macos::sf_symbols::{SymbolWeight, sf_symbol, sf_symbol_weighted};
 use crate::markdown::MarkdownDocument;
-use crate::markdown_view::render_markdown;
+use crate::markdown_view::render_chat_markdown;
 use crate::navigation::{NavigationOverlay, ToggleCommandPalette, ToggleQuickOpen, query_label};
 use crate::preview_terminal::{preview_session_grid, preview_session_grid_sized};
 use crate::query_editor::{self, ClipboardEdit, Edit, QueryEditor};
@@ -64,7 +64,15 @@ use crate::surface_shell::UtilitySurfaces;
 use crate::switcher::display_title;
 
 const GRID_HORIZONTAL_PADDING: f32 = 24.0;
-const CHAT_COMPOSER_LINE_HEIGHT: f32 = 20.0;
+/// Zeron's conversation column, composer pill, and user bubble.
+const CHAT_COLUMN_WIDTH: f32 = 736.0;
+const CHAT_COMPOSER_WIDTH: f32 = 768.0;
+const CHAT_GUTTER: f32 = 48.0;
+const CHAT_BUBBLE_RADIUS: f32 = 16.0;
+const CHAT_COMPOSER_RADIUS: f32 = 26.0;
+const CHAT_COMPOSER_COMPACT: f32 = 49.0;
+const CHAT_COMPOSER_LINE_HEIGHT: f32 = 22.0;
+const CHAT_TEXT_SIZE: f32 = 14.0;
 const GRID_VERTICAL_PADDING: f32 = 12.0;
 // The outer terminal card has a one-pixel border on both sides and the pane
 // adds its own left divider. These pixels are outside TerminalElement's actual
@@ -3028,100 +3036,65 @@ impl TerminalPane {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let mut transcript = div()
-            .id("session-chat-transcript")
-            .min_h(px(0.0))
-            .flex_1()
+        let lines = self.chat_composer.line_count();
+        let compact = lines <= 1;
+        let composer_height = if compact {
+            CHAT_COMPOSER_COMPACT
+        } else {
+            (16.0 + lines as f32 * CHAT_COMPOSER_LINE_HEIGHT + 44.0).min(240.0)
+        };
+        let mut column = div()
             .w_full()
-            .px(px(28.0))
-            .py(px(24.0))
+            .max_w(px(CHAT_COLUMN_WIDTH))
             .flex()
             .flex_col()
-            .gap(px(22.0))
-            .overflow_y_scroll()
-            .track_scroll(&self.chat_scroll);
+            .gap(px(16.0))
+            .pt(px(12.0));
         if self.chat_messages.is_empty() {
-            let (title, detail) = if session.host.is_some() {
-                (
-                    "Chat transcript unavailable",
-                    "This remote session does not expose a local transcript. Use Terminal for the live session.",
-                )
+            let detail = if session.host.is_some() {
+                "This remote session does not expose a local transcript. Use Terminal for the live session."
             } else if session.transcript_path.is_none() {
-                (
-                    "Waiting for the conversation",
-                    "Messages will appear here when this agent publishes its transcript.",
-                )
+                "Messages appear here once the agent publishes its transcript."
             } else {
-                (
-                    "No messages yet",
-                    "Send a prompt below, or switch to Terminal for raw control.",
-                )
+                "Send a prompt to start the conversation."
             };
-            transcript = transcript.child(
+            column = column.child(
                 div()
-                    .size_full()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .justify_center()
-                    .gap(px(7.0))
-                    .child(sf_symbol("bubble.left", 22.0, colors.tertiary))
-                    .child(
-                        div()
-                            .text_size(px(13.0))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(colors.secondary)
-                            .child(title),
-                    )
-                    .child(
-                        div()
-                            .max_w(px(440.0))
-                            .text_center()
-                            .line_height(px(18.0))
-                            .text_size(px(11.0))
-                            .text_color(colors.tertiary)
-                            .child(detail),
-                    ),
+                    .pt(px(28.0))
+                    .text_size(px(CHAT_TEXT_SIZE))
+                    .line_height(px(CHAT_COMPOSER_LINE_HEIGHT))
+                    .text_color(colors.tertiary)
+                    .child(detail),
             );
         } else {
             for (index, message) in self.chat_messages.iter().enumerate() {
                 let document = MarkdownDocument::parse(&message.text);
-                let assistant = message.role == ChatRole::Assistant;
-                let content = div()
-                    .max_w(px(if assistant { 760.0 } else { 680.0 }))
-                    .when(!assistant, |bubble| {
-                        bubble
-                            .px(px(14.0))
-                            .py(px(10.0))
-                            .rounded(px(14.0))
-                            .bg(colors.primary.alpha(0.075))
-                            .border_1()
-                            .border_color(colors.primary.alpha(0.06))
-                    })
-                    .child(render_markdown(&document, colors));
-                transcript = transcript.child(
+                let body = render_chat_markdown(&document, colors);
+                let row = if message.role == ChatRole::Assistant {
+                    div().w_full().min_w(px(0.0)).child(body).into_any_element()
+                } else {
+                    // Right-aligned wash, capped at 80% of the column. No plate border.
+                    div()
+                        .w_full()
+                        .flex()
+                        .justify_end()
+                        .child(
+                            div()
+                                .min_w(px(0.0))
+                                .max_w(px(CHAT_COLUMN_WIDTH * 0.8))
+                                .rounded(px(CHAT_BUBBLE_RADIUS))
+                                .px(px(16.0))
+                                .py(px(10.0))
+                                .bg(colors.primary.alpha(0.08))
+                                .child(body),
+                        )
+                        .into_any_element()
+                };
+                column = column.child(
                     div()
                         .id(SharedString::from(format!("chat-message-{index}")))
                         .w_full()
-                        .flex()
-                        .items_start()
-                        .gap(px(10.0))
-                        .when(!assistant, |row| row.justify_end())
-                        .when(assistant, |row| {
-                            row.child(
-                                div()
-                                    .mt(px(1.0))
-                                    .size(px(24.0))
-                                    .flex_none()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded(px(8.0))
-                                    .bg(colors.accent.alpha(0.13))
-                                    .child(sf_symbol("sparkles", 11.0, colors.accent)),
-                            )
-                        })
-                        .child(content),
+                        .child(row),
                 );
             }
         }
@@ -3132,93 +3105,142 @@ impl TerminalPane {
                 .h(px(CHAT_COMPOSER_LINE_HEIGHT))
                 .flex()
                 .items_center()
-                .text_size(px(12.5))
+                .text_size(px(CHAT_TEXT_SIZE))
                 .text_color(colors.tertiary)
-                .child("Message the agent…  Shift-Return for a new line")
+                .child("Do anything…")
                 .into_any_element()
         } else {
             div()
                 .id("chat-composer-lines")
-                .max_h(px(140.0))
+                .when(compact, |lines| lines.h(px(CHAT_COMPOSER_LINE_HEIGHT)))
+                .when(!compact, |lines| lines.max_h(px(180.0)).overflow_y_scroll())
                 .flex()
                 .flex_col()
-                .overflow_y_scroll()
                 .track_scroll(self.chat_composer.scroll_handle())
                 .children(self.chat_composer.render_lines(
                     px(CHAT_COMPOSER_LINE_HEIGHT),
                     focused.then_some("│"),
                     HighlightStyle {
-                        background_color: Some(colors.accent.alpha(0.28).into()),
+                        background_color: Some(colors.primary.alpha(0.16).into()),
                         ..HighlightStyle::default()
                     },
                 ))
                 .into_any_element()
         };
         let can_submit = !self.chat_composer.is_empty();
+        let send_glyph = match colors.appearance {
+            zeus_ui::Appearance::Dark => rgba(0x141414ff),
+            zeus_ui::Appearance::Light => rgba(0xffffffff),
+        };
+        let send = div()
+            .id("chat-submit")
+            .size(px(28.0))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_full()
+            .bg(colors.primary)
+            .opacity(if can_submit { 1.0 } else { 0.35 })
+            .when(can_submit, |button| {
+                button
+                    .cursor_pointer()
+                    .hover(|button| button.opacity(0.85))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.submit_chat_prompt(cx);
+                        cx.stop_propagation();
+                    }))
+            })
+            .child(sf_symbol("arrow.up", 13.0, send_glyph));
+        let pill = div()
+            .id("chat-composer")
+            .w_full()
+            .h(px(composer_height))
+            .rounded(px(CHAT_COMPOSER_RADIUS))
+            .border_1()
+            .border_color(colors.primary.alpha(0.09))
+            .bg(colors.floating_surface())
+            .cursor_text()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    window.focus(&this.focus, cx);
+                    cx.stop_propagation();
+                }),
+            );
+        let pill = if compact {
+            pill.flex()
+                .flex_row()
+                .items_center()
+                .child(
+                    div()
+                        .min_w(px(0.0))
+                        .flex_1()
+                        .pl(px(16.0))
+                        .pr(px(8.0))
+                        .font_family(crate::fonts::ui_family())
+                        .text_size(px(CHAT_TEXT_SIZE))
+                        .text_color(colors.primary)
+                        .child(prompt),
+                )
+                .child(div().pr(px(10.0)).child(send))
+        } else {
+            pill.relative()
+                .overflow_hidden()
+                .child(
+                    div()
+                        .absolute()
+                        .top(px(16.0))
+                        .left(px(16.0))
+                        .right(px(16.0))
+                        .bottom(px(40.0))
+                        .font_family(crate::fonts::ui_family())
+                        .text_size(px(CHAT_TEXT_SIZE))
+                        .text_color(colors.primary)
+                        .child(prompt),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .bottom(px(10.0))
+                        .right(px(10.0))
+                        .child(send),
+                )
+        };
+
         div()
             .relative()
             .min_h(px(0.0))
             .flex_1()
-            .flex()
-            .flex_col()
             .bg(colors.background)
-            .child(transcript)
             .child(
-                div().px(px(24.0)).pb(px(20.0)).child(Frosted::new(
-                    14.0,
-                    MENU_BLUR,
-                    div()
-                        .id("chat-composer")
-                        .min_h(px(54.0))
-                        .px(px(14.0))
-                        .py(px(10.0))
-                        .flex()
-                        .items_end()
-                        .gap(px(10.0))
-                        .rounded(px(14.0))
-                        .bg(colors.floating_surface())
-                        .border_1()
-                        .border_color(colors.primary.alpha(if focused { 0.16 } else { 0.08 }))
-                        .shadow_sm()
-                        .cursor_text()
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, _, window, cx| {
-                                window.focus(&this.focus, cx);
-                                cx.stop_propagation();
-                            }),
-                        )
-                        .child(
-                            div()
-                                .min_w(px(0.0))
-                                .flex_1()
-                                .font_family(crate::fonts::ui_family())
-                                .text_color(colors.primary)
-                                .child(prompt),
-                        )
-                        .child(
-                            div()
-                                .id("chat-submit")
-                                .size(px(30.0))
-                                .flex_none()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded(px(9.0))
-                                .bg(colors.accent.alpha(if can_submit { 0.92 } else { 0.18 }))
-                                .text_color(colors.primary)
-                                .when(can_submit, |button| {
-                                    button
-                                        .cursor_pointer()
-                                        .hover(move |button| button.bg(colors.accent))
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.submit_chat_prompt(cx);
-                                            cx.stop_propagation();
-                                        }))
-                                })
-                                .child(sf_symbol("arrow.up", 11.0, colors.primary)),
-                        ),
-                )),
+                div()
+                    .id("session-chat-transcript")
+                    .absolute()
+                    .inset_0()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.chat_scroll)
+                    .px(px(CHAT_GUTTER))
+                    .pb(px(composer_height + 28.0))
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .child(column),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .bottom(px(12.0))
+                    .left(px(16.0))
+                    .right(px(16.0))
+                    .flex()
+                    .justify_center()
+                    .child(
+                        div()
+                            .w_full()
+                            .max_w(px(CHAT_COMPOSER_WIDTH))
+                            .child(Frosted::new(CHAT_COMPOSER_RADIUS, MENU_BLUR, pill)),
+                    ),
             )
             .into_any_element()
     }
@@ -4735,11 +4757,16 @@ impl Render for TerminalPane {
         if let Some(session) = selected.as_deref() {
             self.refresh_chat_transcript(session);
             if self.surface == SessionSurface::Chat {
-                let width = self.viewport.map_or(620.0, |viewport| viewport.width) - 84.0;
+                let pane = self
+                    .viewport
+                    .map_or(CHAT_COMPOSER_WIDTH, |viewport| viewport.width);
+                let outer = (pane - 32.0).clamp(280.0, CHAT_COMPOSER_WIDTH);
+                // Compact row: left inset, the send circle, and the right inset.
+                let text_width = (outer - 16.0 - 28.0 - 20.0).max(160.0);
                 self.chat_composer.layout(
-                    px(width.max(240.0)),
+                    px(text_width),
                     font(crate::fonts::ui_family()),
-                    px(12.5),
+                    px(CHAT_TEXT_SIZE),
                     window,
                 );
             }

@@ -29,9 +29,9 @@ const fn hex_with_alpha(value: u32, alpha: f32) -> Rgba {
 pub struct Radius;
 
 impl Radius {
-    pub const CHIP: f32 = 4.0;
-    pub const BADGE: f32 = 5.0;
-    pub const ROW: f32 = 5.0;
+    pub const CHIP: f32 = 6.0;
+    pub const BADGE: f32 = 6.0;
+    pub const ROW: f32 = 6.0;
     pub const CARD: f32 = 8.0;
     pub const PANEL: f32 = 10.0;
 }
@@ -115,7 +115,9 @@ pub struct SemanticColors {
     pub primary: Rgba,
     pub secondary: Rgba,
     pub tertiary: Rgba,
+    pub accent: Rgba,
     pub background: Rgba,
+    window_surface: Rgba,
     sidebar_surface: Rgba,
     floating_surface: Rgba,
 }
@@ -128,7 +130,9 @@ impl SemanticColors {
             primary: foreground,
             secondary: rgba_f32(0.0, 0.0, 0.0, 0.60),
             tertiary: rgba_f32(0.0, 0.0, 0.0, 0.30),
+            accent: rgba_f32(0.357, 0.290, 0.796, 1.0),
             background: rgba_f32(1.0, 1.0, 1.0, 1.0),
+            window_surface: rgba_f32(0.949, 0.953, 0.941, 0.80),
             sidebar_surface: rgba_f32(0.949, 0.953, 0.941, 0.89),
             floating_surface: rgba_f32(0.949, 0.953, 0.941, 1.0),
         }
@@ -141,9 +145,13 @@ impl SemanticColors {
             primary: foreground,
             secondary: hex_with_alpha(0xcccccc, 0.60),
             tertiary: hex_with_alpha(0xcccccc, 0.30),
-            background: hex(0x1f1f1f),
-            sidebar_surface: hex_with_alpha(0x181818, 0.94),
-            floating_surface: hex(0x222222),
+            accent: Palette::ZEUS_VIOLET,
+            // Clear content plane. The window frost is the glass; an opaque
+            // slab here hides both the desktop blur and scene backdrop blur.
+            background: hex_with_alpha(0x060606, 0.0),
+            window_surface: hex_with_alpha(0x0d0d0d, 0.64),
+            sidebar_surface: hex_with_alpha(0x0d0d0d, 0.08),
+            floating_surface: hex_with_alpha(0x1c1c1e, 0.22),
         }
     }
 
@@ -181,10 +189,11 @@ impl SemanticColors {
         appearance: Appearance,
         background: Rgba,
         foreground: Rgba,
-        sidebar_surface: Rgba,
-        floating_surface: Rgba,
+        accent: Rgba,
+        surfaces: (Rgba, Rgba, Rgba),
         sidebar_tones: bool,
     ) -> Self {
+        let (window_surface, sidebar_surface, floating_surface) = surfaces;
         let secondary_alpha = if sidebar_tones { 0.70 } else { 0.60 };
         let tertiary_alpha = if sidebar_tones { 0.44 } else { 0.30 };
         Self {
@@ -192,7 +201,9 @@ impl SemanticColors {
             primary: foreground,
             secondary: rgba_f32(foreground.r, foreground.g, foreground.b, secondary_alpha),
             tertiary: rgba_f32(foreground.r, foreground.g, foreground.b, tertiary_alpha),
+            accent,
             background,
+            window_surface,
             sidebar_surface,
             floating_surface,
         }
@@ -222,6 +233,13 @@ impl SemanticColors {
         self.floating_surface
     }
 
+    /// Window-wide frost painted over the platform blur. Keeping this layer
+    /// distinct from content panels preserves the depth of the desktop while
+    /// preventing it from competing with text.
+    pub const fn window_surface(self) -> Rgba {
+        self.window_surface
+    }
+
     /// Shared translucent material for the leading and trailing sidebars.
     pub const fn sidebar_surface(self) -> Rgba {
         self.sidebar_surface
@@ -231,6 +249,9 @@ impl SemanticColors {
 pub struct Palette;
 
 impl Palette {
+    /// Restrained violet used for focus and selection in the default Zeus
+    /// glass palette. Semantic status colors remain unchanged.
+    pub const ZEUS_VIOLET: Rgba = rgba_f32(0.545, 0.486, 0.965, 1.0);
     pub const CLAY: Rgba = rgba_f32(0.851, 0.467, 0.341, 1.0);
     pub const GEMINI_BLUE: Rgba = rgba_f32(0.306, 0.510, 0.933, 1.0);
 }
@@ -409,11 +430,12 @@ mod tests {
 
     #[test]
     fn floating_material_is_denser_than_sidebar_material() {
-        for appearance in [Appearance::Light, Appearance::Dark] {
-            let colors = SemanticColors::new(appearance);
-            assert!(colors.floating_surface().a > colors.sidebar_surface().a);
-            assert_eq!(colors.floating_surface().a, 1.0);
-        }
+        let dark = SemanticColors::dark();
+        assert!(dark.floating_surface().a > dark.sidebar_surface().a);
+        assert!(dark.floating_surface().a < 1.0);
+        let light = SemanticColors::light();
+        assert!(light.floating_surface().a > light.sidebar_surface().a);
+        assert_eq!(light.floating_surface().a, 1.0);
     }
 
     #[test]

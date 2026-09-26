@@ -1996,9 +1996,8 @@ impl Render for LauncherOverlay {
             window,
         );
 
-        // The session workbench is intentionally always dark, independent of
-        // macOS appearance. This is a destination in that workbench—not a
-        // translucent window overlay—so paint the same fully opaque surface.
+        // Same dark glass as the workbench. A solid fill here would cover the
+        // window frost and hide the desktop blur behind the launcher.
         let colors = SemanticColors::dark();
         let focused = self.focus.is_focused(window);
         root.size_full()

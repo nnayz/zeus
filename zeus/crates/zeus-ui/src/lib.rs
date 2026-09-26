@@ -8,6 +8,7 @@
 
 mod brand;
 mod components;
+mod frost;
 mod icon;
 mod status;
 mod svg;
@@ -20,6 +21,7 @@ pub use brand::{
 pub use components::{
     FloatingSurface, HairlineDivider, HoverMarquee, LoadingIndicator, RowFill, WorkingOrbit,
 };
+pub use frost::{Frosted, MENU_BLUR};
 pub use icon::{Icon, IconAssets, IconName, IconSize, icon_from_system_name};
 pub use status::{
     AnimationPhase, AttentionDot, AttentionLevel, StatusGlyph, StatusState, wall_clock_seconds,

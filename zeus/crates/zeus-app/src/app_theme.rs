@@ -19,14 +19,28 @@ pub(crate) fn sidebar_colors(id: &str) -> SemanticColors {
 }
 
 fn semantic_colors(theme: TermTheme, sidebar_tones: bool) -> SemanticColors {
-    // The Zeus themes use deliberate neutral surface steps: ChatGPT-like
-    // charcoal for the default and a near-black hierarchy for high contrast.
-    // Other catalog themes retain derived surfaces so their tint carries
-    // through the application.
-    let (sidebar_surface, floating_surface) = match theme.id {
-        id if id == TermTheme::ZEUS_DARK.id => (hex(0x171717), hex(0x2f2f2f)),
-        id if id == TermTheme::ZEUS_DARK_HIGH_CONTRAST.id => (hex(0x0a0a0a), hex(0x1a1a1a)),
+    // Zeus Dark keeps a 64% window scrim over a short native blur, a hairline
+    // sidebar wash, and a light floating tint so the desktop still reads
+    // through. The content background stays clear; the terminal keeps an
+    // opaque cell color separately for inverse video.
+    // Other catalog themes keep derived surfaces so their authored tint
+    // carries through the application.
+    let content_background = if theme.id == TermTheme::ZEUS_DARK.id {
+        hex_with_alpha(0x060606, 0.0)
+    } else {
+        theme.background
+    };
+    let (window_surface, sidebar_surface, floating_surface) = match theme.id {
+        id if id == TermTheme::ZEUS_DARK.id => (
+            hex_with_alpha(0x0d0d0d, 0.64),
+            hex_with_alpha(0x0d0d0d, 0.08),
+            hex_with_alpha(0x1c1c1e, 0.22),
+        ),
+        id if id == TermTheme::ZEUS_DARK_HIGH_CONTRAST.id => {
+            (hex(0x000000), hex(0x0a0a0a), hex(0x1a1a1a))
+        }
         _ => (
+            mix(theme.background, theme.foreground, 0.03, 0.86),
             mix(theme.background, theme.foreground, 0.08, 0.92),
             mix(theme.background, theme.foreground, 0.13, 1.0),
         ),
@@ -36,10 +50,10 @@ fn semantic_colors(theme: TermTheme, sidebar_tones: bool) -> SemanticColors {
             ThemeAppearance::Dark => Appearance::Dark,
             ThemeAppearance::Light => Appearance::Light,
         },
-        theme.background,
+        content_background,
         theme.foreground,
-        sidebar_surface,
-        floating_surface,
+        theme.cursor,
+        (window_surface, sidebar_surface, floating_surface),
         sidebar_tones,
     );
     if theme.id == TermTheme::ZEUS_DARK.id {
@@ -58,6 +72,13 @@ const fn hex(value: u32) -> Rgba {
         g: ((value >> 8) & 0xff) as f32 / 255.0,
         b: (value & 0xff) as f32 / 255.0,
         a: 1.0,
+    }
+}
+
+const fn hex_with_alpha(value: u32, alpha: f32) -> Rgba {
+    Rgba {
+        a: alpha,
+        ..hex(value)
     }
 }
 
@@ -103,15 +124,16 @@ mod tests {
     }
 
     #[test]
-    fn zeus_dark_uses_neutral_chatgpt_style_surfaces_and_text() {
+    fn zeus_dark_uses_near_black_frosted_surfaces_and_text() {
         let app = colors(TermTheme::ZEUS_DARK.id);
 
-        assert_eq!(app.background, hex(0x212121));
-        assert_eq!(app.primary, hex(0xececec));
+        assert_eq!(app.background, hex_with_alpha(0x060606, 0.0));
+        assert_eq!(app.primary, hex(0xebebeb));
         assert_eq!(app.secondary, hex(0xb4b4b4));
         assert_eq!(app.tertiary, hex(0x8e8e8e));
-        assert_eq!(app.sidebar_surface(), hex(0x171717));
-        assert_eq!(app.floating_surface(), hex(0x2f2f2f));
+        assert_eq!(app.window_surface(), hex_with_alpha(0x0d0d0d, 0.64));
+        assert_eq!(app.sidebar_surface(), hex_with_alpha(0x0d0d0d, 0.08));
+        assert_eq!(app.floating_surface(), hex_with_alpha(0x1c1c1e, 0.22));
     }
 
     #[test]

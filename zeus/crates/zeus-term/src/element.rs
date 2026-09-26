@@ -864,7 +864,7 @@ impl Element for TerminalElement {
         // it: every party that touches these mutexes runs on the main thread,
         // and the clone copied the entire fetched-history cell cache per frame.
         let viewport = mutex_lock(&self.shared.viewport);
-        let mut background_quads = vec![fill(bounds, self.theme.background)];
+        let mut background_quads = vec![fill(bounds, self.theme.surface_fill())];
         let mut decoration_quads = Vec::new();
         let mut overlay_quads = Vec::new();
         let mut lines = Vec::with_capacity(visible_rows);

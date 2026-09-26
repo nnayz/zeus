@@ -2106,10 +2106,10 @@ impl Render for RootView {
             // surface; the terminal grid sets its own mono font.
             .font_family(crate::fonts::ui_family())
             .flex()
-            // Match the opaque platform window so content behind zeus never
-            // participates in compositing. The sidebar keeps its own surface
-            // treatment above this base.
-            .bg(colors.background)
+            // Zeron's material stack starts with a window-wide 80% frost over
+            // the native blur. Sidebars and content are lighter overlays on
+            // this stable base, rather than independently tinting the desktop.
+            .bg(colors.window_surface())
             .track_focus(&self.focus)
             .capture_key_down(cx.listener(Self::on_key_down))
             .capture_key_up(cx.listener(Self::on_key_up))

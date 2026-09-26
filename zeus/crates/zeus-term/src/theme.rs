@@ -70,16 +70,17 @@ impl TermTheme {
         id: "zeus-dark",
         name: "Zeus Dark",
         appearance: ThemeAppearance::Dark,
-        // ChatGPT-style neutral charcoal canvas and cool-white text. Color is
-        // reserved for terminal semantics instead of tinting the workbench.
-        // Keep the Zeus id stable so existing installations update in place.
-        background: hex(0x212121),
-        foreground: hex(0xececec),
-        cursor: hex(0xececec),
-        cursor_text: hex(0x212121),
-        selection: with_alpha(hex(0xffffff), 0.16),
-        find_match: with_alpha(hex(0xb4b4b4), 0.30),
-        find_match_current: with_alpha(hex(0xffffff), 0.38),
+        // Cell color for inverse video and cursor contrast. The grid's own
+        // viewport fill is clear (`surface_fill`) so the window frost — and
+        // the desktop blur under it — stays visible. Keep the stable id so
+        // existing installations receive the treatment in place.
+        background: hex(0x060606),
+        foreground: hex(0xebebeb),
+        cursor: hex(0xa99af5),
+        cursor_text: hex(0x060606),
+        selection: with_alpha(hex(0x8b7cf6), 0.24),
+        find_match: with_alpha(hex(0x8b7cf6), 0.32),
+        find_match_current: with_alpha(hex(0xb9adff), 0.50),
         ansi: [
             hex(0x111111),
             hex(0xcd3131),
@@ -368,6 +369,20 @@ impl TermTheme {
         Self::CATPPUCCIN_LATTE,
     ];
 
+    /// Fill behind the grid. Zeus Dark stays clear so the shell frost is the
+    /// only scrim; other themes paint their authored background.
+    #[must_use]
+    pub fn surface_fill(self) -> Rgba {
+        if self.id == Self::ZEUS_DARK.id {
+            Rgba {
+                a: 0.0,
+                ..self.background
+            }
+        } else {
+            self.background
+        }
+    }
+
     #[must_use]
     pub fn resolve_color(&self, color: TermColor, is_background: bool) -> Rgba {
         match color {
@@ -597,11 +612,12 @@ mod tests {
             .map(|theme| theme.id)
             .collect::<std::collections::HashSet<_>>();
         assert_eq!(unique_ids.len(), TermTheme::CATALOG.len());
-        assert_rgba(TermTheme::ZEUS_DARK.background, hex(0x212121));
-        assert_rgba(TermTheme::ZEUS_DARK.foreground, hex(0xececec));
+        assert_rgba(TermTheme::ZEUS_DARK.background, hex(0x060606));
+        assert_eq!(TermTheme::ZEUS_DARK.surface_fill().a, 0.0);
+        assert_rgba(TermTheme::ZEUS_DARK.foreground, hex(0xebebeb));
         assert_rgba(
             TermTheme::ZEUS_DARK.selection,
-            with_alpha(hex(0xffffff), 0.16),
+            with_alpha(hex(0x8b7cf6), 0.24),
         );
         assert_rgba(TermTheme::ZEUS_DARK.ansi[1], hex(0xcd3131));
         assert_rgba(TermTheme::ZEUS_DARK.ansi[2], hex(0x0dbc79));

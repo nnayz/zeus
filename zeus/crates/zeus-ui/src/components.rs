@@ -6,7 +6,7 @@ use gpui::{
     prelude::*, px, svg,
 };
 
-use crate::{Fill, IconName, Radius, SemanticColors, rgba_f32};
+use crate::{Fill, Frosted, IconName, MENU_BLUR, Radius, SemanticColors, rgba_f32};
 
 /// Shared, platform-independent activity mark for bounded asynchronous work.
 /// Repeating GPUI animations automatically become static when Reduce Motion
@@ -228,7 +228,7 @@ impl FloatingSurface {
 impl RenderOnce for FloatingSurface {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
         let colors = self.colors;
-        div()
+        let surface = div()
             .relative()
             .rounded(px(Radius::PANEL))
             // Floating chrome keeps the sidebar hue but uses a denser material
@@ -257,7 +257,12 @@ impl RenderOnce for FloatingSurface {
                 "floating-surface-entry",
                 Animation::new(Duration::from_millis(160)).with_easing(ease_out_quint()),
                 |surface, delta| surface.opacity(0.76 + 0.24 * delta),
-            )
+            );
+        if colors.floating_surface().a < 1.0 {
+            Frosted::new(Radius::PANEL, MENU_BLUR, surface).into_any_element()
+        } else {
+            surface.into_any_element()
+        }
     }
 }
 

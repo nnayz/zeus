@@ -104,7 +104,7 @@ impl InspectorTab {
     const fn label(self) -> &'static str {
         match self {
             Self::Info => "Info",
-            Self::Changes => "Review",
+            Self::Changes => "Changes",
             Self::Code => "Code",
             Self::Artifacts => "Artifacts",
         }
@@ -1859,8 +1859,8 @@ impl WorkbenchInspector {
                 div()
                     .id(SharedString::from(format!("inspector-tab-{}", tab.label())))
                     .debug_selector(move || tab.debug_selector().to_owned())
-                    .h(px(28.0))
-                    .px(px(6.0))
+                    .h(px(24.0))
+                    .px(px(7.0))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -1868,12 +1868,16 @@ impl WorkbenchInspector {
                     .rounded(px(Radius::BADGE))
                     .cursor_pointer()
                     .bg(if active {
-                        colors.primary.alpha(0.09)
+                        colors.accent.alpha(0.16)
                     } else {
                         colors.primary.alpha(0.0)
                     })
                     .hover(move |button| {
-                        button.bg(colors.primary.alpha(if active { 0.11 } else { 0.055 }))
+                        button.bg(if active {
+                            colors.accent.alpha(0.21)
+                        } else {
+                            colors.primary.alpha(0.055)
+                        })
                     })
                     .text_size(px(12.0))
                     .font_weight(if active {
@@ -1926,6 +1930,9 @@ impl WorkbenchInspector {
             .flex()
             .items_center()
             .gap(px(Metrics::TOOLBAR_COMPACT_GAP))
+            .border_b_1()
+            .border_color(colors.primary.alpha(0.07))
+            .bg(colors.background.alpha(0.24))
             // Optical safe area for the macOS window buttons, which land on
             // this toolbar whenever the panel owns the window's leading edge.
             .when(self.mirrored(), |bar| {

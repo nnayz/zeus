@@ -38,8 +38,8 @@ use crate::code_intelligence::SourceTarget;
 
 const SOURCE_ROW_HEIGHT: f32 = 20.0;
 const SOURCE_GUTTER_WIDTH: f32 = 52.0;
-const FILE_TREE_HEIGHT: f32 = 226.0;
-const FILE_TREE_ROW_HEIGHT: f32 = 23.0;
+const FILE_TREE_WIDTH: f32 = 236.0;
+const FILE_TREE_ROW_HEIGHT: f32 = 27.0;
 const MAX_DIRECTORY_LOADS: usize = 2;
 
 enum ViewerState {
@@ -1510,11 +1510,12 @@ impl CodeViewer {
         let focused = self.tree_focused && self.focus.is_focused(window);
 
         div()
-            .h(px(FILE_TREE_HEIGHT))
+            .w(px(FILE_TREE_WIDTH))
+            .h_full()
             .flex_none()
             .flex()
             .flex_col()
-            .border_b_1()
+            .border_r_1()
             .border_color(colors.primary.alpha(0.09))
             .bg(colors.background)
             .child(
@@ -1612,8 +1613,8 @@ impl CodeViewer {
         let can_back = !self.history.is_empty() && self.history_index > 0;
         let can_forward = self.history_index + 1 < self.history.len();
         let picker_open = self.picker_open;
-        let (path, location) = document.map_or_else(
-            || ("No file open".to_owned(), None),
+        let (path, location, language) = document.map_or_else(
+            || ("No file open".to_owned(), None, None),
             |document| {
                 (
                     document
@@ -1628,6 +1629,7 @@ impl CodeViewer {
                             target.line.to_string()
                         }
                     }),
+                    Some(document.snapshot.language.label()),
                 )
             },
         );
@@ -1771,6 +1773,21 @@ impl CodeViewer {
                         .text_size(px(9.5))
                         .text_color(colors.tertiary)
                         .child(location),
+                )
+            })
+            .when_some(language, |bar, language| {
+                bar.child(
+                    div()
+                        .px(px(7.0))
+                        .h(px(20.0))
+                        .flex()
+                        .items_center()
+                        .rounded(px(Radius::CHIP))
+                        .bg(colors.accent.alpha(0.10))
+                        .text_size(px(9.5))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(colors.accent.alpha(0.92))
+                        .child(language),
                 )
             })
             .when_some(save_status, |bar, (message, color)| {
@@ -2296,7 +2313,7 @@ impl Render for CodeViewer {
             .relative()
             .size_full()
             .flex()
-            .flex_col()
+            .flex_row()
             .overflow_hidden()
             .bg(colors.background)
             .track_focus(&self.focus)
@@ -2310,8 +2327,16 @@ impl Render for CodeViewer {
                 cx.listener(|this, _, _, _| this.selection_dragging = false),
             )
             .child(self.render_file_tree(colors, window, cx))
-            .child(self.render_toolbar(document, colors, cx))
-            .child(div().min_h(px(0.0)).flex_1().overflow_hidden().child(body))
+            .child(
+                div()
+                    .min_w(px(0.0))
+                    .h_full()
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .child(self.render_toolbar(document, colors, cx))
+                    .child(div().min_h(px(0.0)).flex_1().overflow_hidden().child(body)),
+            )
             .when_some(picker, |viewer, picker| viewer.child(picker))
     }
 }
@@ -2666,6 +2691,14 @@ fn lexical_highlights(source: &str, extension: &str) -> Vec<(Range<usize>, Highl
         "swift" => SWIFT_KEYWORDS,
         "py" => PYTHON_KEYWORDS,
         "js" | "jsx" | "ts" | "tsx" => JS_KEYWORDS,
+        "go" => GO_KEYWORDS,
+        "java" | "kt" | "kts" => JVM_KEYWORDS,
+        "c" | "h" | "cc" | "cpp" | "cxx" | "hh" | "hpp" | "hxx" | "cs" => C_FAMILY_KEYWORDS,
+        "rb" => RUBY_KEYWORDS,
+        "sh" | "bash" | "zsh" | "fish" => SHELL_KEYWORDS,
+        "sql" => SQL_KEYWORDS,
+        "html" | "htm" | "css" | "scss" | "sass" | "less" => WEB_KEYWORDS,
+        "json" | "jsonc" | "toml" | "yaml" | "yml" => DATA_KEYWORDS,
         _ => COMMON_KEYWORDS,
     };
     for keyword in keywords {
@@ -2779,6 +2812,228 @@ const JS_KEYWORDS: &[&str] = &[
     "while",
     "yield",
 ];
+const GO_KEYWORDS: &[&str] = &[
+    "break",
+    "case",
+    "chan",
+    "const",
+    "continue",
+    "default",
+    "defer",
+    "else",
+    "fallthrough",
+    "for",
+    "func",
+    "go",
+    "goto",
+    "if",
+    "import",
+    "interface",
+    "map",
+    "package",
+    "range",
+    "return",
+    "select",
+    "struct",
+    "switch",
+    "type",
+    "var",
+];
+const JVM_KEYWORDS: &[&str] = &[
+    "abstract",
+    "as",
+    "break",
+    "case",
+    "catch",
+    "class",
+    "companion",
+    "const",
+    "continue",
+    "data",
+    "default",
+    "do",
+    "else",
+    "enum",
+    "extends",
+    "false",
+    "final",
+    "finally",
+    "for",
+    "fun",
+    "if",
+    "implements",
+    "import",
+    "in",
+    "instanceof",
+    "interface",
+    "internal",
+    "is",
+    "new",
+    "null",
+    "object",
+    "open",
+    "override",
+    "package",
+    "private",
+    "protected",
+    "public",
+    "return",
+    "sealed",
+    "static",
+    "super",
+    "switch",
+    "this",
+    "throw",
+    "throws",
+    "true",
+    "try",
+    "typealias",
+    "val",
+    "var",
+    "void",
+    "when",
+    "while",
+];
+const C_FAMILY_KEYWORDS: &[&str] = &[
+    "abstract",
+    "auto",
+    "bool",
+    "break",
+    "case",
+    "catch",
+    "char",
+    "class",
+    "const",
+    "constexpr",
+    "continue",
+    "default",
+    "delegate",
+    "delete",
+    "do",
+    "double",
+    "else",
+    "enum",
+    "event",
+    "explicit",
+    "extern",
+    "false",
+    "float",
+    "for",
+    "friend",
+    "if",
+    "implicit",
+    "in",
+    "int",
+    "interface",
+    "internal",
+    "long",
+    "namespace",
+    "new",
+    "nullptr",
+    "operator",
+    "out",
+    "override",
+    "private",
+    "protected",
+    "public",
+    "readonly",
+    "ref",
+    "return",
+    "short",
+    "signed",
+    "sizeof",
+    "static",
+    "string",
+    "struct",
+    "switch",
+    "template",
+    "this",
+    "throw",
+    "true",
+    "try",
+    "typedef",
+    "typename",
+    "uint",
+    "ulong",
+    "union",
+    "unsafe",
+    "unsigned",
+    "using",
+    "virtual",
+    "void",
+    "volatile",
+    "while",
+];
+const RUBY_KEYWORDS: &[&str] = &[
+    "alias", "and", "begin", "break", "case", "class", "def", "defined", "do", "else", "elsif",
+    "end", "ensure", "false", "for", "if", "in", "module", "next", "nil", "not", "or", "redo",
+    "rescue", "retry", "return", "self", "super", "then", "true", "undef", "unless", "until",
+    "when", "while", "yield",
+];
+const SHELL_KEYWORDS: &[&str] = &[
+    "case", "coproc", "do", "done", "elif", "else", "esac", "export", "fi", "for", "function",
+    "if", "in", "local", "readonly", "return", "select", "then", "time", "until", "while",
+];
+const SQL_KEYWORDS: &[&str] = &[
+    "ADD",
+    "ALTER",
+    "AND",
+    "AS",
+    "ASC",
+    "BEGIN",
+    "BETWEEN",
+    "BY",
+    "CASE",
+    "CREATE",
+    "DELETE",
+    "DESC",
+    "DISTINCT",
+    "DROP",
+    "ELSE",
+    "END",
+    "EXISTS",
+    "FROM",
+    "FULL",
+    "GROUP",
+    "HAVING",
+    "IN",
+    "INDEX",
+    "INNER",
+    "INSERT",
+    "INTO",
+    "IS",
+    "JOIN",
+    "LEFT",
+    "LIKE",
+    "LIMIT",
+    "NOT",
+    "NULL",
+    "ON",
+    "OR",
+    "ORDER",
+    "OUTER",
+    "PRIMARY",
+    "REFERENCES",
+    "RETURNING",
+    "RIGHT",
+    "SELECT",
+    "SET",
+    "TABLE",
+    "THEN",
+    "UNION",
+    "UNIQUE",
+    "UPDATE",
+    "VALUES",
+    "WHEN",
+    "WHERE",
+    "WITH",
+];
+const WEB_KEYWORDS: &[&str] = &[
+    "article", "aside", "body", "button", "class", "display", "div", "footer", "form", "grid",
+    "head", "header", "height", "html", "input", "main", "margin", "meta", "nav", "padding",
+    "position", "script", "section", "span", "style", "title", "var", "width",
+];
+const DATA_KEYWORDS: &[&str] = &["false", "null", "true"];
 const COMMON_KEYWORDS: &[&str] = &[
     "class", "const", "else", "enum", "false", "for", "function", "if", "import", "let", "null",
     "return", "static", "struct", "true", "type", "var", "while",

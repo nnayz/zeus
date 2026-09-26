@@ -1,5 +1,6 @@
 mod agent_catalog;
 mod app_theme;
+mod chat;
 mod code_intelligence;
 mod code_viewer;
 mod composer;
@@ -396,28 +397,42 @@ fn open_main_window(
         .dev_build
         .as_ref()
         .map(|build| build.window_title().into());
-    cx.open_window(
-        WindowOptions {
-            window_bounds: Some(window_bounds),
-            display_id,
-            window_min_size: Some(size(px(MIN_WINDOW_WIDTH), px(MIN_WINDOW_HEIGHT))),
-            // The terminal is an opaque work surface. Marking the whole window
-            // blurred forces WindowServer/Metal to retain full-size backdrop
-            // surfaces even though only the sidebar used that material.
-            window_background: WindowBackgroundAppearance::Opaque,
-            app_id: Some(app_id),
-            titlebar: Some(TitlebarOptions {
-                title,
-                appears_transparent: true,
-                // GPUI uses top/left insets here: AppKit's native 8 pt origin plus the
-                // spec's +12 x / -6 frame-origin nudge maps to 20 pt left and 14 pt top.
-                traffic_light_position: Some(point(px(20.0), px(14.0))),
-            }),
-            ..Default::default()
-        },
-        move |window, cx| cx.new(|cx| RootView::new(services, preview, scenario, window, cx)),
-    )
-    .expect("failed to open the zeus window");
+    #[cfg(target_os = "macos")]
+    crate::macos::install_softer_window_blur();
+    let window = cx
+        .open_window(
+            WindowOptions {
+                window_bounds: Some(window_bounds),
+                display_id,
+                window_min_size: Some(size(px(MIN_WINDOW_WIDTH), px(MIN_WINDOW_HEIGHT))),
+                // On macOS the default Zeus palette paints a dense translucent
+                // workbench over this native blur. Other platforms stay opaque:
+                // transparency without a compositor blur exposes a noisy desktop.
+                window_background: if cfg!(target_os = "macos") {
+                    WindowBackgroundAppearance::Blurred
+                } else {
+                    WindowBackgroundAppearance::Opaque
+                },
+                app_id: Some(app_id),
+                titlebar: Some(TitlebarOptions {
+                    title,
+                    appears_transparent: true,
+                    // GPUI uses top/left insets here: AppKit's native 8 pt origin plus the
+                    // spec's +12 x / -6 frame-origin nudge maps to 20 pt left and 14 pt top.
+                    traffic_light_position: Some(point(px(20.0), px(14.0))),
+                }),
+                ..Default::default()
+            },
+            move |window, cx| cx.new(|cx| RootView::new(services, preview, scenario, window, cx)),
+        )
+        .expect("failed to open the zeus window");
+    // Re-push after the window exists. The option is applied during creation;
+    // asserting it here keeps the behind-window effect attached.
+    if cfg!(target_os = "macos") {
+        let _ = window.update(cx, |_, window, _| {
+            window.set_background_appearance(WindowBackgroundAppearance::Blurred);
+        });
+    }
 }
 
 /// Convert GPUI's runtime window state into the JSON-friendly preference

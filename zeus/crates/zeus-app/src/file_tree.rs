@@ -35,8 +35,8 @@ const MAX_GIT_STDERR_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum FileTreeMode {
-    #[default]
     Changed,
+    #[default]
     All,
 }
 
@@ -1129,7 +1129,7 @@ mod tests {
         };
         let mut model = FileTreeModel::default();
         model.set_changed(ChangedSnapshot::from(&status));
-        assert_eq!(model.mode(), FileTreeMode::Changed);
+        assert_eq!(model.mode(), FileTreeMode::All);
         assert_eq!(
             model.changed_reference(" --> src/lib.rs:12:3"),
             Some(PathBuf::from("src/lib.rs"))

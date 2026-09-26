@@ -550,6 +550,34 @@ pub enum SourceLanguage {
 }
 
 impl SourceLanguage {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Rust => "Rust",
+            Self::Swift => "Swift",
+            Self::TypeScript => "TypeScript",
+            Self::Tsx => "TSX",
+            Self::JavaScript => "JavaScript",
+            Self::Jsx => "JSX",
+            Self::Python => "Python",
+            Self::Go => "Go",
+            Self::Java => "Java",
+            Self::Kotlin => "Kotlin",
+            Self::C => "C",
+            Self::Cpp => "C++",
+            Self::CSharp => "C#",
+            Self::Ruby => "Ruby",
+            Self::Shell => "Shell",
+            Self::Markdown => "Markdown",
+            Self::Json => "JSON",
+            Self::Toml => "TOML",
+            Self::Yaml => "YAML",
+            Self::Html => "HTML",
+            Self::Css => "CSS",
+            Self::Sql => "SQL",
+            Self::PlainText => "Plain Text",
+        }
+    }
+
     pub fn from_path(path: &Path) -> Self {
         let file_name = path
             .file_name()

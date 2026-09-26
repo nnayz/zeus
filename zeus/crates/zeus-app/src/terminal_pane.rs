@@ -5,11 +5,11 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use gpui::{
     AnyElement, App, ClickEvent, ClipboardEntry, ClipboardItem, Context, DragMoveEvent, Entity,
-    EventEmitter, ExternalPaths, FocusHandle, KeyBinding, KeyDownEvent, KeyUpEvent,
+    EventEmitter, ExternalPaths, FocusHandle, HighlightStyle, KeyBinding, KeyDownEvent, KeyUpEvent,
     ModifiersChangedEvent, MouseButton, PathBuilder, Render, Rgba, ScrollDelta, ScrollHandle,
     ScrollWheelEvent, SharedString, StatefulInteractiveElement, Subscription, Task, Window,
     actions, canvas, div, font, point, prelude::*, px, rgba,
@@ -42,15 +42,19 @@ use zeus_term::repaint::{RepaintAction, RepaintPacer};
 use zeus_term::scrollback::{WheelDelta, WheelEvent, WheelRoute};
 use zeus_term::theme::TermTheme;
 use zeus_ui::{
-    AgentKind as UiAgentKind, AgentLogo, Fill, FloatingSurface, Ink, Metrics, Radius,
-    SemanticColors, StatusGlyph, StatusState, Typo, WorkingOrbit,
+    AgentKind as UiAgentKind, AgentLogo, Fill, FloatingSurface, Frosted, Ink, MENU_BLUR, Metrics,
+    Radius, SemanticColors, StatusGlyph, StatusState, Typo, WorkingOrbit,
 };
 
+use crate::chat::{ChatMessage, ChatRole};
+use crate::composer::PromptComposer;
 use crate::image_attachment::{
     AttachmentDecision, ImageStore, StagedImage, capability_from_descriptor, decide_drop,
     keep_staged, paste_paths, stage_bytes, stage_drop, unsupported_message,
 };
 use crate::macos::sf_symbols::{SymbolWeight, sf_symbol, sf_symbol_weighted};
+use crate::markdown::MarkdownDocument;
+use crate::markdown_view::render_markdown;
 use crate::navigation::{NavigationOverlay, ToggleCommandPalette, ToggleQuickOpen, query_label};
 use crate::preview_terminal::{preview_session_grid, preview_session_grid_sized};
 use crate::query_editor::{self, ClipboardEdit, Edit, QueryEditor};
@@ -60,6 +64,7 @@ use crate::surface_shell::UtilitySurfaces;
 use crate::switcher::display_title;
 
 const GRID_HORIZONTAL_PADDING: f32 = 24.0;
+const CHAT_COMPOSER_LINE_HEIGHT: f32 = 20.0;
 const GRID_VERTICAL_PADDING: f32 = 12.0;
 // The outer terminal card has a one-pixel border on both sides and the pane
 // adds its own left divider. These pixels are outside TerminalElement's actual
@@ -631,6 +636,13 @@ enum SessionSource {
     Fixed(SessionId),
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum SessionSurface {
+    #[default]
+    Chat,
+    Terminal,
+}
+
 /// Grid frames parked while a column change round-trips through the daemon,
 /// so the re-wrap and the program's repaint reach the screen as one paint
 /// rather than as a jump and a correction. See [`REFLOW_HOLD`].
@@ -702,6 +714,11 @@ pub struct TerminalPane {
     parked_grids: Vec<(SessionId, SharedGridBuffer)>,
     pane_tx: mpsc::UnboundedSender<PaneEvent>,
     focus: FocusHandle,
+    surface: SessionSurface,
+    chat_composer: PromptComposer,
+    chat_messages: Vec<ChatMessage>,
+    chat_scroll: ScrollHandle,
+    chat_transcript_stamp: Option<(String, SystemTime, u64)>,
     glyphs: HashMap<SessionId, Entity<StatusGlyph>>,
     open_checks_for: Option<String>,
     overflow_open: bool,
@@ -873,6 +890,11 @@ impl TerminalPane {
             parked_grids: Vec::new(),
             pane_tx,
             focus,
+            surface: SessionSurface::default(),
+            chat_composer: PromptComposer::default(),
+            chat_messages: Vec::new(),
+            chat_scroll: ScrollHandle::new(),
+            chat_transcript_stamp: None,
             glyphs: HashMap::new(),
             open_checks_for: None,
             overflow_open: false,
@@ -1040,6 +1062,14 @@ impl TerminalPane {
             .flatten();
         let previous_id = self.observed_selected_id.clone();
         let selection_changed = selected_id != previous_id;
+        if selection_changed {
+            // A draft belongs to the session it was written for. Never carry
+            // it across a sidebar selection where Return would target a
+            // different attached process.
+            self.chat_composer.clear();
+            self.chat_messages.clear();
+            self.chat_transcript_stamp = None;
+        }
         let was_focused = self.focus.is_focused(window);
         if selection_changed
             && was_focused
@@ -1180,6 +1210,99 @@ impl TerminalPane {
             .read()
             .expect("session store lock poisoned");
         crate::app_theme::colors(&store.preferences().terminal_theme)
+    }
+
+    fn refresh_chat_transcript(&mut self, session: &SessionRecord) {
+        if self.preview {
+            if self.chat_messages.is_empty() {
+                self.chat_messages = crate::chat::preview_messages();
+                self.chat_scroll
+                    .scroll_to_item(self.chat_messages.len().saturating_sub(1));
+            }
+            return;
+        }
+        let Some(path) = session
+            .transcript_path
+            .as_deref()
+            .filter(|path| !path.is_empty())
+        else {
+            self.chat_messages.clear();
+            self.chat_transcript_stamp = None;
+            return;
+        };
+        let metadata = std::fs::metadata(path);
+        let (modified, length) = metadata
+            .as_ref()
+            .map(|metadata| {
+                (
+                    metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+                    metadata.len(),
+                )
+            })
+            .unwrap_or((SystemTime::UNIX_EPOCH, 0));
+        let stamp = (path.to_owned(), modified, length);
+        if self.chat_transcript_stamp.as_ref() == Some(&stamp) {
+            return;
+        }
+        self.chat_transcript_stamp = Some(stamp);
+        self.chat_messages =
+            crate::chat::read_transcript(std::path::Path::new(path)).unwrap_or_default();
+        self.chat_scroll
+            .scroll_to_item(self.chat_messages.len().saturating_sub(1));
+    }
+
+    fn submit_chat_prompt(&mut self, cx: &mut Context<Self>) {
+        let prompt = self.chat_composer.text().trim().to_owned();
+        if prompt.is_empty() {
+            return;
+        }
+        let Some(id) = self.selected_id() else { return };
+        if let Some(resident) = self.residents.get(&id) {
+            let mut bytes = paste(&prompt, resident.input_modes.bracketed_paste);
+            bytes.push(b'\r');
+            resident.attachment.input(bytes);
+            self.chat_messages.push(ChatMessage {
+                role: ChatRole::User,
+                text: prompt,
+            });
+            self.chat_scroll
+                .scroll_to_item(self.chat_messages.len().saturating_sub(1));
+            self.chat_composer.clear();
+            cx.notify();
+        }
+    }
+
+    fn handle_chat_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        match event.keystroke.key.as_str() {
+            "enter" if !event.keystroke.modifiers.shift => self.submit_chat_prompt(cx),
+            "enter" => self.chat_composer.insert_multiline("\n"),
+            "up" => self.chat_composer.move_up(event.keystroke.modifiers.shift),
+            "down" => self
+                .chat_composer
+                .move_down(event.keystroke.modifiers.shift),
+            _ => {
+                let Some(edit) = query_editor::edit_for(&event.keystroke) else {
+                    cx.propagate();
+                    return;
+                };
+                match edit {
+                    Edit::Local(local) => self.chat_composer.apply(local),
+                    Edit::Clipboard(ClipboardEdit::Copy) => {
+                        query_editor::copy_selection(self.chat_composer.editor(), cx)
+                    }
+                    Edit::Clipboard(ClipboardEdit::Cut) => {
+                        query_editor::cut_selection(self.chat_composer.editor_mut(), cx);
+                    }
+                    Edit::Clipboard(ClipboardEdit::Paste) => {
+                        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                            self.chat_composer.insert_multiline(&text);
+                        }
+                    }
+                }
+            }
+        }
+        cx.stop_propagation();
+        cx.notify();
     }
 
     fn handle_pane_event(&mut self, event: PaneEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -1715,6 +1838,10 @@ impl TerminalPane {
     }
 
     fn copy_selection(&mut self, _: &CopySelection, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.surface == SessionSurface::Chat {
+            query_editor::copy_selection(self.chat_composer.editor(), cx);
+            return;
+        }
         let Some(id) = self.selected_id() else {
             return;
         };
@@ -1731,6 +1858,14 @@ impl TerminalPane {
         let Some(item) = cx.read_from_clipboard() else {
             return;
         };
+        if self.surface == SessionSurface::Chat
+            && let Some(text) = item.text()
+        {
+            self.chat_composer.insert_multiline(&text);
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
         let Some(id) = self.selected_id() else {
             return;
         };
@@ -2102,6 +2237,11 @@ impl TerminalPane {
         if self.lineage_tree_open() {
             self.handle_lineage_tree_key(event, window, cx);
             cx.stop_propagation();
+            return;
+        }
+
+        if self.surface == SessionSurface::Chat {
+            self.handle_chat_key(event, cx);
             return;
         }
 
@@ -2792,6 +2932,7 @@ impl TerminalPane {
                     .flex()
                     .items_center()
                     .gap(px(Metrics::TOOLBAR_ITEM_GAP))
+                    .child(self.render_surface_switcher(colors, cx))
                     .child(
                         div()
                             .flex()
@@ -2809,6 +2950,275 @@ impl TerminalPane {
                         trailing.child(control)
                     })
                     .when_some(trailing_reveal, |trailing, control| trailing.child(control)),
+            )
+            .into_any_element()
+    }
+
+    fn render_surface_switcher(
+        &self,
+        colors: SemanticColors,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let option = |id: &'static str,
+                      label: &'static str,
+                      icon: &'static str,
+                      mode: SessionSurface,
+                      cx: &mut Context<Self>| {
+            let selected = self.surface == mode;
+            div()
+                .id(id)
+                .h(px(24.0))
+                .px(px(7.0))
+                .flex()
+                .items_center()
+                .gap(px(5.0))
+                .rounded(px(Radius::CHIP))
+                .bg(colors.primary.alpha(if selected { 0.10 } else { 0.0 }))
+                .text_size(px(10.0))
+                .font_weight(if selected {
+                    gpui::FontWeight::SEMIBOLD
+                } else {
+                    gpui::FontWeight::MEDIUM
+                })
+                .text_color(if selected {
+                    colors.primary
+                } else {
+                    colors.tertiary
+                })
+                .cursor_pointer()
+                .hover(move |item| item.bg(colors.primary.alpha(0.08)))
+                .child(sf_symbol(icon, 10.0, colors.secondary))
+                .child(label)
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.surface = mode;
+                    this.overflow_open = false;
+                    window.focus(&this.focus, cx);
+                    cx.notify();
+                    cx.stop_propagation();
+                }))
+        };
+        div()
+            .p(px(2.0))
+            .flex()
+            .items_center()
+            .gap(px(1.0))
+            .rounded(px(8.0))
+            .bg(colors.primary.alpha(0.045))
+            .child(option(
+                "session-surface-chat",
+                "Chat",
+                "bubble.left.and.bubble.right",
+                SessionSurface::Chat,
+                cx,
+            ))
+            .child(option(
+                "session-surface-terminal",
+                "Terminal",
+                "terminal",
+                SessionSurface::Terminal,
+                cx,
+            ))
+            .into_any_element()
+    }
+
+    fn render_chat_surface(
+        &self,
+        session: &SessionRecord,
+        colors: SemanticColors,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let mut transcript = div()
+            .id("session-chat-transcript")
+            .min_h(px(0.0))
+            .flex_1()
+            .w_full()
+            .px(px(28.0))
+            .py(px(24.0))
+            .flex()
+            .flex_col()
+            .gap(px(22.0))
+            .overflow_y_scroll()
+            .track_scroll(&self.chat_scroll);
+        if self.chat_messages.is_empty() {
+            let (title, detail) = if session.host.is_some() {
+                (
+                    "Chat transcript unavailable",
+                    "This remote session does not expose a local transcript. Use Terminal for the live session.",
+                )
+            } else if session.transcript_path.is_none() {
+                (
+                    "Waiting for the conversation",
+                    "Messages will appear here when this agent publishes its transcript.",
+                )
+            } else {
+                (
+                    "No messages yet",
+                    "Send a prompt below, or switch to Terminal for raw control.",
+                )
+            };
+            transcript = transcript.child(
+                div()
+                    .size_full()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(7.0))
+                    .child(sf_symbol("bubble.left", 22.0, colors.tertiary))
+                    .child(
+                        div()
+                            .text_size(px(13.0))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(colors.secondary)
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .max_w(px(440.0))
+                            .text_center()
+                            .line_height(px(18.0))
+                            .text_size(px(11.0))
+                            .text_color(colors.tertiary)
+                            .child(detail),
+                    ),
+            );
+        } else {
+            for (index, message) in self.chat_messages.iter().enumerate() {
+                let document = MarkdownDocument::parse(&message.text);
+                let assistant = message.role == ChatRole::Assistant;
+                let content = div()
+                    .max_w(px(if assistant { 760.0 } else { 680.0 }))
+                    .when(!assistant, |bubble| {
+                        bubble
+                            .px(px(14.0))
+                            .py(px(10.0))
+                            .rounded(px(14.0))
+                            .bg(colors.primary.alpha(0.075))
+                            .border_1()
+                            .border_color(colors.primary.alpha(0.06))
+                    })
+                    .child(render_markdown(&document, colors));
+                transcript = transcript.child(
+                    div()
+                        .id(SharedString::from(format!("chat-message-{index}")))
+                        .w_full()
+                        .flex()
+                        .items_start()
+                        .gap(px(10.0))
+                        .when(!assistant, |row| row.justify_end())
+                        .when(assistant, |row| {
+                            row.child(
+                                div()
+                                    .mt(px(1.0))
+                                    .size(px(24.0))
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded(px(8.0))
+                                    .bg(colors.accent.alpha(0.13))
+                                    .child(sf_symbol("sparkles", 11.0, colors.accent)),
+                            )
+                        })
+                        .child(content),
+                );
+            }
+        }
+
+        let focused = self.focus.is_focused(window);
+        let prompt = if self.chat_composer.is_empty() {
+            div()
+                .h(px(CHAT_COMPOSER_LINE_HEIGHT))
+                .flex()
+                .items_center()
+                .text_size(px(12.5))
+                .text_color(colors.tertiary)
+                .child("Message the agent…  Shift-Return for a new line")
+                .into_any_element()
+        } else {
+            div()
+                .id("chat-composer-lines")
+                .max_h(px(140.0))
+                .flex()
+                .flex_col()
+                .overflow_y_scroll()
+                .track_scroll(self.chat_composer.scroll_handle())
+                .children(self.chat_composer.render_lines(
+                    px(CHAT_COMPOSER_LINE_HEIGHT),
+                    focused.then_some("│"),
+                    HighlightStyle {
+                        background_color: Some(colors.accent.alpha(0.28).into()),
+                        ..HighlightStyle::default()
+                    },
+                ))
+                .into_any_element()
+        };
+        let can_submit = !self.chat_composer.is_empty();
+        div()
+            .relative()
+            .min_h(px(0.0))
+            .flex_1()
+            .flex()
+            .flex_col()
+            .bg(colors.background)
+            .child(transcript)
+            .child(
+                div().px(px(24.0)).pb(px(20.0)).child(Frosted::new(
+                    14.0,
+                    MENU_BLUR,
+                    div()
+                        .id("chat-composer")
+                        .min_h(px(54.0))
+                        .px(px(14.0))
+                        .py(px(10.0))
+                        .flex()
+                        .items_end()
+                        .gap(px(10.0))
+                        .rounded(px(14.0))
+                        .bg(colors.floating_surface())
+                        .border_1()
+                        .border_color(colors.primary.alpha(if focused { 0.16 } else { 0.08 }))
+                        .shadow_sm()
+                        .cursor_text()
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, window, cx| {
+                                window.focus(&this.focus, cx);
+                                cx.stop_propagation();
+                            }),
+                        )
+                        .child(
+                            div()
+                                .min_w(px(0.0))
+                                .flex_1()
+                                .font_family(crate::fonts::ui_family())
+                                .text_color(colors.primary)
+                                .child(prompt),
+                        )
+                        .child(
+                            div()
+                                .id("chat-submit")
+                                .size(px(30.0))
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(9.0))
+                                .bg(colors.accent.alpha(if can_submit { 0.92 } else { 0.18 }))
+                                .text_color(colors.primary)
+                                .when(can_submit, |button| {
+                                    button
+                                        .cursor_pointer()
+                                        .hover(move |button| button.bg(colors.accent))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.submit_chat_prompt(cx);
+                                            cx.stop_propagation();
+                                        }))
+                                })
+                                .child(sf_symbol("arrow.up", 11.0, colors.primary)),
+                        ),
+                )),
             )
             .into_any_element()
     }
@@ -3417,7 +3827,7 @@ impl TerminalPane {
             .pt(px(2.0))
             .pb(px(10.0))
             .px(px(12.0))
-            .bg(theme.background)
+            .bg(theme.surface_fill())
             .track_focus(&self.focus)
             .can_drop(|value, _, _| value.downcast_ref::<ExternalPaths>().is_some())
             .drag_over::<ExternalPaths>(|style, _, _, _| {
@@ -4322,6 +4732,18 @@ impl Render for TerminalPane {
         self.update_selected_geometry(window, cx);
 
         let selected = self.selected_session();
+        if let Some(session) = selected.as_deref() {
+            self.refresh_chat_transcript(session);
+            if self.surface == SessionSurface::Chat {
+                let width = self.viewport.map_or(620.0, |viewport| viewport.width) - 84.0;
+                self.chat_composer.layout(
+                    px(width.max(240.0)),
+                    font(crate::fonts::ui_family()),
+                    px(12.5),
+                    window,
+                );
+            }
+        }
 
         let content = if let Some(session) = selected {
             let chips = PaneChip::for_session(&session);
@@ -4365,6 +4787,8 @@ impl Render for TerminalPane {
                 && let Some(strip) = strip
             {
                 pane = pane.child(self.render_lineage_tree(&session, strip, sidebar_colors, cx));
+            } else if self.surface == SessionSurface::Chat {
+                pane = pane.child(self.render_chat_surface(&session, colors, window, cx));
             } else {
                 let terminal_surface = div()
                     .relative()
@@ -4375,7 +4799,7 @@ impl Render for TerminalPane {
                     .rounded_tl(px(Radius::CARD))
                     .rounded_tr(px(Radius::CARD))
                     .overflow_hidden()
-                    .bg(theme.background)
+                    .bg(theme.surface_fill())
                     .child(self.render_grid_and_overlays(&session, theme, font_size, window, cx));
                 pane = pane.child(terminal_surface);
                 if let Some(find) = self.render_find_bar(&session, colors, cx) {
@@ -4421,7 +4845,7 @@ impl Render for TerminalPane {
                 .h_full()
                 .flex()
                 .flex_col()
-                .bg(theme.background)
+                .bg(theme.surface_fill())
                 .when_some(empty_bar, |pane, (reveal, lane, mirrored)| {
                     pane.child(
                         div()

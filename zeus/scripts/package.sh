@@ -64,23 +64,34 @@ cargo build --release --package zeus-app --bin zeus --package zeus-cli --bin zeu
 
 echo "==> Creating universal executable"
 mkdir -p "${universal_dir}" "${dist_dir}"
+verify_universal_binary() {
+    local binary="$1"
+    # Newer Apple lipo releases reject multiple architectures passed to one
+    # -verify_arch command even though the help text still advertises it.
+    lipo "${binary}" -verify_arch arm64
+    lipo "${binary}" -verify_arch x86_64
+}
+
 lipo -create \
     "${target_dir}/aarch64-apple-darwin/release/zeus" \
     "${target_dir}/x86_64-apple-darwin/release/zeus" \
     -output "${universal_binary}"
-lipo "${universal_binary}" -verify_arch arm64 x86_64
+verify_universal_binary "${universal_binary}"
 lipo -create \
     "${target_dir}/aarch64-apple-darwin/release/zeus-cli" \
     "${target_dir}/x86_64-apple-darwin/release/zeus-cli" \
     -output "${universal_cli_binary}"
-lipo "${universal_cli_binary}" -verify_arch arm64 x86_64
+verify_universal_binary "${universal_cli_binary}"
 lipo -create \
     "${target_dir}/aarch64-apple-darwin/release/zeus-mcp" \
     "${target_dir}/x86_64-apple-darwin/release/zeus-mcp" \
     -output "${universal_mcp_binary}"
-lipo "${universal_mcp_binary}" -verify_arch arm64 x86_64
+verify_universal_binary "${universal_mcp_binary}"
 
 echo "==> Assembling ${app_path} with cargo-packager"
+# cargo-packager may reuse an existing output bundle. Remove it first so stale
+# resources, especially the previous app icon, can never survive a rebuild.
+rm -rf "${app_path}"
 cargo packager \
     --release \
     --packages zeus-app \
@@ -88,6 +99,14 @@ cargo packager \
     --target universal-apple-darwin \
     --binaries-dir "${universal_dir}" \
     --out-dir "${dist_dir}"
+
+source_icon="${workspace_dir}/assets/icon.icns"
+bundled_icon="${app_path}/Contents/Resources/icon.icns"
+if [[ ! -f "${bundled_icon}" ]] || ! cmp -s "${source_icon}" "${bundled_icon}"; then
+    echo "error: packaged app icon is missing or does not match ${source_icon}" >&2
+    exit 1
+fi
+echo "==> Verified packaged lightning icon"
 
 app_bin_dir="${app_path}/Contents/Resources/bin"
 echo "==> Bundling CLI and lightweight MCP proxy into Resources/bin"
@@ -116,9 +135,9 @@ lipo -create \
     "${target_dir}/aarch64-apple-darwin/release/zeus-ssh-askpass" \
     "${target_dir}/x86_64-apple-darwin/release/zeus-ssh-askpass" \
     -output "${universal_askpass_binary}"
-lipo "${universal_engine_binary}" -verify_arch arm64 x86_64
-lipo "${universal_holder_binary}" -verify_arch arm64 x86_64
-lipo "${universal_askpass_binary}" -verify_arch arm64 x86_64
+verify_universal_binary "${universal_engine_binary}"
+verify_universal_binary "${universal_holder_binary}"
+verify_universal_binary "${universal_askpass_binary}"
 cp "${universal_engine_binary}" "${app_bin_dir}/zeusd-rs"
 cp "${universal_holder_binary}" "${app_bin_dir}/zeus-holder"
 cp "${universal_askpass_binary}" "${app_bin_dir}/zeus-ssh-askpass"

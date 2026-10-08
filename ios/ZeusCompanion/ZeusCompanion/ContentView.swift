@@ -273,9 +273,12 @@ struct EmptyWorkspaceView: View {
 
             // Subtle Branding Mark
             VStack(spacing: Theme.Spacing.md) {
-                Image(systemName: "bolt.fill")
-                    .font(.system(size: 28, weight: .regular))
-                    .foregroundStyle(Theme.Colors.primaryText.opacity(0.8))
+                Image("ZeusLogo")
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 44, height: 44)
+                    .opacity(0.8)
+                    .accessibilityHidden(true)
 
                 Text("How can I help?")
                     .font(Theme.Typography.heading)
@@ -764,9 +767,11 @@ struct EditorialPairingView: View {
 
                 // Minimal Brand Header
                 VStack(spacing: Theme.Spacing.md) {
-                    Image(systemName: "bolt.fill")
-                        .font(.system(size: 32, weight: .regular))
-                        .foregroundStyle(Theme.Colors.primaryText)
+                    Image("ZeusLogo")
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: 52, height: 52)
+                        .accessibilityHidden(true)
 
                     Text("Zeus Companion")
                         .font(Theme.Typography.heading)

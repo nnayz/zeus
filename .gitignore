@@ -10,8 +10,11 @@ sidecar/node_modules/
 # Rust build output
 zeus/target/
 
-# Agent worktrees created by Claude Code (EnterWorktree) — never committed.
-.claude/worktrees/
+# Local agent skills and tool-specific links — never committed.
+.agents/
+.claude/
+.cursor/
+.grok/
 
 .serena
 .tokensave

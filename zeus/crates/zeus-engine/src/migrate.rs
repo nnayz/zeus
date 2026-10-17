@@ -507,20 +507,25 @@ mod tests {
         let origin = temp.path().join("origin.git");
         std::fs::create_dir_all(&origin).unwrap();
         git(&origin, &["init", "-q", "--bare", "-b", "main"]);
-        let source = temp.path().join("source");
-        git(
-            temp.path(),
-            &["clone", "-q", origin.to_str().unwrap(), "source"],
-        );
+        let clone = |name: &str| {
+            git(
+                temp.path(),
+                &["clone", "-q", origin.to_str().unwrap(), name],
+            );
+            let dir = temp.path().join(name);
+            // `prepare` runs its own `git commit` for the WIP handoff, so give
+            // each clone a local identity: the test must not depend on the
+            // machine having a global git user configured.
+            git(&dir, &["config", "user.name", "zeus test"]);
+            git(&dir, &["config", "user.email", "zeus-test@example.invalid"]);
+            dir
+        };
+        let source = clone("source");
         std::fs::write(source.join("file.txt"), "v1\n").unwrap();
         git(&source, &["add", "."]);
         git(&source, &["commit", "-q", "-m", "root"]);
         git(&source, &["push", "-q", "-u", "origin", "main"]);
-        let target = temp.path().join("target");
-        git(
-            temp.path(),
-            &["clone", "-q", origin.to_str().unwrap(), "target"],
-        );
+        let target = clone("target");
 
         // Dirty the source; prepare must WIP-commit, push, and sync target.
         std::fs::write(source.join("file.txt"), "wip changes\n").unwrap();

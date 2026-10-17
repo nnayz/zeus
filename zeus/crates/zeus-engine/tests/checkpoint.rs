@@ -112,6 +112,13 @@ fn log_tail(logs: &Path, id: &str) -> u64 {
     log.tail_offset()
 }
 
+fn log_contains(logs: &Path, id: &str, needle: &[u8]) -> bool {
+    let mut log = OutputLog::reader(logs, id).expect("log");
+    log.refresh_from_disk();
+    let (_, bytes) = log.read(0, 1024 * 1024);
+    bytes.windows(needle.len()).any(|window| window == needle)
+}
+
 /// A full-snapshot 80×24 grid whose first row spells `text` — content that
 /// exists nowhere in any log, so seeing it on screen proves the checkpoint
 /// (not a raw-tail replay) painted the emulator.
@@ -209,13 +216,20 @@ fn adoption_seeds_from_the_checkpoint_not_the_raw_tail() {
     let logs = root.join("logs");
     let holder = holder_config(&root);
     let state_file = root.join("state.json");
+    let checkpoint = checkpoint_path(&logs, "s_ad");
 
-    // Life #1: a held cat says something, then the daemon "crashes".
+    // Life #1: a held shell writes an ordered sentinel after the old output,
+    // then waits in cat while the daemon "crashes".
     {
         let mut registry = Registry::new(engine(), &state_file);
         registry
             .spawn(
-                shell_spec("s_ad", "cat", &logs, Some(holder.clone())),
+                shell_spec(
+                    "s_ad",
+                    "read line; printf '%s\\n' \"$line\"; printf 'ZEUS-LOG-SETTLED\\n'; cat",
+                    &logs,
+                    Some(holder.clone()),
+                ),
                 record("s_ad"),
             )
             .expect("spawn");
@@ -224,8 +238,11 @@ fn adoption_seeds_from_the_checkpoint_not_the_raw_tail() {
             .expect("session")
             .write_input(b"hello-from-the-log\n")
             .expect("write");
-        wait_until("the echo to land", Duration::from_secs(5), || {
-            log_tail(&logs, "s_ad") > 0
+        // A PTY may deliver its echo and process output in separate chunks.
+        // The sentinel is emitted after every old `hello` byte, so once it is
+        // present no later replay can legitimately contain that old content.
+        wait_until("the ordered log sentinel", Duration::from_secs(10), || {
+            log_contains(&logs, "s_ad", b"ZEUS-LOG-SETTLED")
         });
         registry.persist().expect("persist");
     }
@@ -244,7 +261,7 @@ fn adoption_seeds_from_the_checkpoint_not_the_raw_tail() {
         alternate_scroll: false,
         focus_reporting: false,
     }
-    .write_atomically(&checkpoint_path(&logs, "s_ad"))
+    .write_atomically(&checkpoint)
     .expect("plant checkpoint");
 
     // Life #2 adopts; the screen must be the checkpoint's, not the log's.

@@ -382,12 +382,24 @@ mod tests {
 
     #[test]
     fn local_origin_lookup_finds_a_real_repo() {
-        // This crate's own checkout has an origin remote.
-        let cwd = env!("CARGO_MANIFEST_DIR");
-        let origin = origin_of_cwd(cwd, None);
-        assert!(origin.is_some(), "the dev checkout has an origin");
+        // Use a fixture rather than the development checkout: source archives
+        // and container-mounted worktrees need not expose usable Git metadata.
+        let repo = tempfile::tempdir().expect("temp repo");
+        for args in [
+            &["init", "-q"][..],
+            &["remote", "add", "origin", "git@github.com:org/project.git"][..],
+        ] {
+            let status = std::process::Command::new("/usr/bin/git")
+                .args(args)
+                .current_dir(repo.path())
+                .status()
+                .expect("git fixture");
+            assert!(status.success(), "git fixture command failed: {args:?}");
+        }
+        let cwd = repo.path().to_str().expect("utf-8 fixture path");
+        let origin = origin_of_cwd(cwd, None).expect("fixture has an origin");
         let root = crate::git::repository_root(Path::new(cwd)).expect("in a repo");
-        let located = locate(&origin.unwrap(), None, std::slice::from_ref(&root));
+        let located = locate(&origin, None, std::slice::from_ref(&root));
         assert_eq!(located, Some(root));
     }
 

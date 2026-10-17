@@ -10,6 +10,30 @@ use std::time::{Duration, Instant};
 
 use zeus_engine::{Exit, Pty, PtySpec};
 
+fn process_is_running(pid: i32) -> bool {
+    // SAFETY: signal zero performs an existence/permission check only.
+    if unsafe { libc::kill(pid, 0) } != 0 {
+        return false;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // A zombie still answers signal zero. Container PID 1 processes do
+        // not necessarily reap adopted grandchildren, but an exited zombie
+        // is not a live execution and cannot outlive the PTY semantically.
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            return false;
+        };
+        let Some(after_comm) = stat.rfind(')').map(|end| &stat[end + 2..]) else {
+            return true;
+        };
+        after_comm.split_whitespace().next() != Some("Z")
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        true
+    }
+}
+
 fn read_until(stream: &mut impl Read, needle: &str, within: Duration) -> String {
     let deadline = Instant::now() + within;
     let mut seen = String::new();
@@ -158,8 +182,7 @@ fn terminate_kills_backgrounded_grandchildren_too() {
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut alive = true;
     while Instant::now() < deadline {
-        // SAFETY: signal 0 only probes for existence.
-        if unsafe { libc::kill(grandchild, 0) } != 0 {
+        if !process_is_running(grandchild) {
             alive = false;
             break;
         }

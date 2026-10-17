@@ -53,6 +53,26 @@ fn sample_matches(sample: &HolderProcessSample) -> bool {
     })
 }
 
+/// Whether any live (non-zombie) process remains in `process_group`.
+///
+/// A zombie still answers `kill(-pgid, 0)`, so a group left holding only
+/// zombies looks alive to the cheap probe forever on a host whose PID 1 does
+/// not reap — a container running the Engine as its entrypoint, for example.
+/// Liveness is decided from the process listing, where a zombie is explicitly
+/// not a live execution.
+pub(crate) fn group_has_live_member(process_group: i32) -> bool {
+    let processes = platform::snapshot();
+    // An Engine always observes itself in a healthy process listing. Treat an
+    // empty snapshot as an observation failure and fail closed: shutdown will
+    // escalate rather than incorrectly declaring a live sidecar gone.
+    if processes.is_empty() {
+        return true;
+    }
+    processes
+        .iter()
+        .any(|process| process.pgid == process_group && !process.zombie)
+}
+
 /// Walks the tree under `root`: children transitively, plus every member of
 /// any process group a tree member belongs to. The holder itself is excluded.
 pub fn enumerate(root: i32) -> Vec<HolderProcessSample> {
@@ -394,13 +414,51 @@ mod tests {
 
         std::thread::sleep(Duration::from_millis(100));
         for sample in &before {
-            assert_ne!(
-                birth_token(sample.pid),
-                sample.birth_token,
+            // `sample_matches` is the production liveness predicate: it asks
+            // whether this exact execution is still running, and an unreaped
+            // zombie (a container's non-reaping PID 1 keeps one around) is
+            // not.
+            assert!(
+                !sample_matches(sample),
                 "pid {} survived kill_tree",
                 sample.pid
             );
         }
+    }
+
+    #[test]
+    fn a_zombie_only_group_has_no_live_member() {
+        use std::os::unix::process::CommandExt;
+        let mut child = Command::new("true")
+            .process_group(0)
+            .spawn()
+            .expect("spawn");
+        let group = child.id() as i32;
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let token = loop {
+            if let Some(token) = birth_token(group) {
+                break token;
+            }
+            assert!(Instant::now() < deadline, "child was never observable");
+            std::thread::yield_now();
+        };
+        while matches_birth_token(group, token) && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert!(
+            !group_has_live_member(group),
+            "an exited, unreaped child leaves no live group member"
+        );
+        #[cfg(target_os = "linux")]
+        {
+            // Linux keeps the zombie observable, so the cheap kill probe still
+            // reports the group — exactly the disagreement this refinement
+            // exists to resolve.
+            // SAFETY: signal zero performs an existence/permission check only.
+            let result = unsafe { libc::kill(-group, 0) };
+            assert_eq!(result, 0, "kill(0) still sees the zombie-only group");
+        }
+        let _ = child.wait();
     }
 
     #[test]

@@ -314,11 +314,20 @@ fn terminate_child_group(child: &mut Child) {
     let _ = child.wait();
 }
 
+/// Whether any live process remains in the private sidecar group.
+///
+/// `kill(-pgid, 0)` is the cheap first probe, but it also reports a group
+/// whose only members are zombies, so liveness is confirmed against the
+/// process listing: a zombie is not a running process, and a host whose PID 1
+/// does not reap (the Engine inside a container) would otherwise wait out the
+/// whole escalation deadline on every shutdown.
 #[cfg(unix)]
 fn process_group_exists(process_group: i32) -> bool {
     // SAFETY: signal zero performs an existence/permission check only.
     let result = unsafe { libc::kill(-process_group, 0) };
-    result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    let signalled =
+        result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
+    signalled && crate::holder::process_tree::group_has_live_member(process_group)
 }
 
 fn inject_artifact_dir(params: &mut Value, artifact_dir: &Path) {

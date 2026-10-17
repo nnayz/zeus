@@ -499,9 +499,13 @@ mod tests {
         assert!(!should_scan_ports(false, true, 8));
     }
 
+    /// A units sanity check, not a machine-size assumption: containers and
+    /// small VPS hosts are supported Linux targets, so the floor only has to
+    /// catch a value that is orders of magnitude wrong. A missing or
+    /// mis-scaled kibibyte-to-byte conversion lands far below it.
     #[test]
     fn physical_memory_is_plausible() {
         let memory = physical_memory();
-        assert!(memory >= 4 << 30, "at least 4 GiB: {memory}");
+        assert!(memory >= 64 << 20, "at least 64 MiB: {memory}");
     }
 }

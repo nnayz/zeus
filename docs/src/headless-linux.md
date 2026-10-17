@@ -38,6 +38,10 @@ The binaries matter as a set:
 Engine's MCP injection only when `zeus-mcp` sits beside the CLI; without it the
 agent falls back to the CLI itself.
 
+A loose build names the CLI `zeus-cli`; the packaged macOS app ships the same
+binary as `zeus`. The commands below use `zeus` — substitute `zeus-cli` (or
+rename the binary) on a loose Linux build.
+
 The agent catalog (`manifests/`) is a build-time resource: a loose Cargo build
 resolves it from the source tree, and a copied deployment should carry a
 `manifests` directory beside the Engine (`ZEUS_MANIFESTS_DIR` overrides the

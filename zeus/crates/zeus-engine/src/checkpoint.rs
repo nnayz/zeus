@@ -217,18 +217,27 @@ mod tests {
         );
         // Apple's own parser must accept what we write — that is the
         // rollback direction (a Swift daemon adopting Rust-written state).
-        let lint = std::process::Command::new("plutil")
-            .arg("-lint")
-            .arg(&path)
-            .output()
-            .expect("plutil");
-        assert!(
-            lint.status.success(),
-            "plutil rejected our plist: {}",
-            String::from_utf8_lossy(&lint.stdout)
-        );
+        // `plutil` ships only with macOS; the format assertion above is the
+        // part every platform can check.
+        #[cfg(target_os = "macos")]
+        {
+            let lint = std::process::Command::new("plutil")
+                .arg("-lint")
+                .arg(&path)
+                .output()
+                .expect("plutil");
+            assert!(
+                lint.status.success(),
+                "plutil rejected our plist: {}",
+                String::from_utf8_lossy(&lint.stdout)
+            );
+        }
     }
 
+    /// Builds the fixture with Apple's `plutil`, which exists only on macOS.
+    /// The reverse direction — a plist we wrote being read back — is covered
+    /// by the test above and `round_trip_preserves_every_field`.
+    #[cfg(target_os = "macos")]
     #[test]
     fn a_swift_shaped_plist_written_by_apples_tools_loads() {
         // The forward direction of the mixed-fleet upgrade: a checkpoint

@@ -2,7 +2,7 @@
 
 [Introduction](introduction.md)
 
-# Using Zeus
+# Using Taskmaster
 
 - [Getting started](getting-started.md)
 - [The workbench](workbench.md)
@@ -20,12 +20,13 @@
 
 # Playbooks
 
-- [Running parallel agents in separate worktrees](playbooks/parallel-agents-worktrees.md)
-- [Delegating a task and following parent/child sessions](playbooks/delegate-a-task.md)
-- [Reviewing an agent's changes and opening a pull request](playbooks/review-and-pull-request.md)
-- [Choosing local or remote execution](playbooks/local-or-remote.md)
-- [Diagnosing a session that is waiting](playbooks/session-waiting-for-input.md)
-- [Managing idle sessions and resource limits](playbooks/idle-sessions-and-resources.md)
+- [Playbooks](playbooks/index.md)
+- [Parallel agents in worktrees](playbooks/parallel-worktrees.md)
+- [Delegate and follow child sessions](playbooks/delegate.md)
+- [Review changes and open a pull request](playbooks/review-pull-request.md)
+- [Local or remote, and reconnect](playbooks/local-or-remote.md)
+- [A session is waiting](playbooks/needs-input.md)
+- [Idle sessions and resource limits](playbooks/idle-and-limits.md)
 
 # Safety & privacy
 

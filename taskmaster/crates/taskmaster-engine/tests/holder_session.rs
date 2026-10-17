@@ -1,0 +1,444 @@
+//! Holder-backed sessions: the engine-level guarantee that a session
+//! survives its daemon.
+//!
+//! These tests play the daemon's role twice: spawn a held session, throw the
+//! session object away (a daemon crash in miniature), then adopt what the
+//! holder kept alive from a brand-new registry — the exact move a Rust
+//! daemon makes when it replaces a dead one, Swift or Rust.
+
+#![cfg(unix)]
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use taskmaster_engine::holder::{HolderClient, HolderPaths};
+use taskmaster_engine::session::{HolderConfig, Session, SessionSpec};
+use taskmaster_engine::{Authority, ManifestEngine, OutputLog, PtySpec, Registry};
+use taskmaster_proto::SessionStatus;
+
+fn engine() -> Arc<ManifestEngine> {
+    let dir = taskmaster_engine::detect::bundled_manifest_dir()
+        .canonicalize()
+        .expect("manifests");
+    let (engine, _) = ManifestEngine::load_dir(&dir).expect("load");
+    Arc::new(engine)
+}
+
+fn holders_dir(tag: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("taskmaster-hsess-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create dir");
+    dir
+}
+
+fn holder_config(root: &Path) -> HolderConfig {
+    HolderConfig {
+        holders_dir: root.join("holders"),
+        executable: PathBuf::from(env!("CARGO_BIN_EXE_taskmaster-holder")),
+    }
+}
+
+fn shell_spec(id: &str, script: &str, logs: &Path, holder: Option<HolderConfig>) -> SessionSpec {
+    SessionSpec {
+        id: id.into(),
+        pty: PtySpec::new(vec!["/bin/sh".into(), "-c".into(), script.into()], "/tmp")
+            .env("PATH", "/usr/bin:/bin")
+            .env("TERM", "xterm-256color")
+            .size(80, 24),
+        manifest_id: "shell".into(),
+        authority: Authority::ProcessOnly,
+        logs_dir: logs.to_path_buf(),
+        holder,
+        remote: None,
+        defer_launch: false,
+    }
+}
+
+fn wait_until(what: &str, timeout: Duration, mut check: impl FnMut() -> bool) {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if check() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    panic!("timed out waiting for {what}");
+}
+
+fn log_contains(logs: &Path, id: &str, needle: &[u8]) -> bool {
+    let Ok(mut log) = OutputLog::reader(logs, id) else {
+        return false;
+    };
+    log.refresh_from_disk();
+    let tail = log.tail_offset();
+    let (_, bytes) = log.read(0, tail as usize);
+    bytes.windows(needle.len()).any(|window| window == needle)
+}
+
+#[test]
+fn a_held_session_survives_its_session_object_and_is_adoptable() {
+    let root = holders_dir("survive");
+    let logs = root.join("logs");
+    let holder = holder_config(&root);
+    let engine = engine();
+
+    // Daemon #1 spawns the session and immediately "crashes" (drop).
+    let session = Session::spawn(
+        shell_spec("s_sur", "cat", &logs, Some(holder.clone())),
+        Arc::clone(&engine),
+    )
+    .expect("spawn held");
+    session.write_input(b"before the crash\n").expect("write");
+    wait_until("first write in log", Duration::from_secs(5), || {
+        log_contains(&logs, "s_sur", b"before the crash")
+    });
+    let before = session.terminal_control_state();
+    let lease = session
+        .acquire_terminal_control(
+            &before.epoch,
+            taskmaster_proto::terminal::Controller {
+                id: "phone".into(),
+                label: "Phone".into(),
+                role: taskmaster_proto::ClientRole::Mobile,
+            },
+            false,
+        )
+        .unwrap();
+    let child_pid = session.child_pid();
+    let execution = session
+        .local_execution_identity()
+        .expect("new Holder reports an exact execution identity");
+    assert_eq!(execution.session_id, "s_sur");
+    assert_eq!(execution.child_pid, child_pid);
+    drop(session);
+
+    // The holder — a separate process — still owns a live child.
+    let paths = HolderPaths::new(&holder.holders_dir, "s_sur");
+    let client = HolderClient::new(paths.socket());
+    let stat = client.stat().expect("holder survives the session object");
+    assert!(stat.alive, "the child survived the daemon");
+
+    // Daemon #2 adopts and carries on.
+    let mut adopted = Session::adopt(
+        shell_spec("s_sur", "", &logs, Some(holder.clone())),
+        &holder,
+        &stat,
+        engine,
+    )
+    .expect("adopt");
+    assert_eq!(adopted.child_pid(), child_pid);
+    assert_eq!(
+        adopted.local_execution_identity().as_ref(),
+        Some(&execution),
+        "Engine adoption preserves the exact Holder/child execution"
+    );
+    assert_ne!(
+        adopted.terminal_control_state().epoch.incarnation,
+        lease.epoch.incarnation
+    );
+    assert!(adopted.terminal_control_state().owner.is_none());
+    assert_eq!(
+        adopted
+            .validate_terminal_control(&lease.epoch, "phone")
+            .unwrap_err()
+            .code,
+        "stale_controller_epoch"
+    );
+    adopted.write_input(b"after the restart\n").expect("write");
+    wait_until("second write in log", Duration::from_secs(5), || {
+        log_contains(&logs, "s_sur", b"after the restart")
+    });
+
+    let exit = adopted
+        .terminate(Duration::from_secs(2))
+        .expect("terminate");
+    assert!(
+        matches!(exit, taskmaster_engine::Exit::Signal(_)),
+        "kill-tree death is a signal: {exit:?}"
+    );
+    assert!(!client.is_alive(), "terminate really ends the child");
+}
+
+#[test]
+fn adoption_rejects_replaced_or_incomplete_exact_holder_identity() {
+    let root = holders_dir("identity");
+    let logs = root.join("logs");
+    let holder = holder_config(&root);
+    let engine = engine();
+
+    let session = Session::spawn(
+        shell_spec("s_identity", "cat", &logs, Some(holder.clone())),
+        Arc::clone(&engine),
+    )
+    .expect("spawn held");
+    let paths = HolderPaths::new(&holder.holders_dir, "s_identity");
+    let client = HolderClient::new(paths.socket());
+    let stat = client.stat().expect("current stat");
+    drop(session);
+
+    let mut replaced = stat.clone();
+    replaced.incarnation = Some("ffeeddccbbaa99887766554433221100".into());
+    let error = Session::adopt(
+        shell_spec("s_identity", "", &logs, Some(holder.clone())),
+        &holder,
+        &replaced,
+        Arc::clone(&engine),
+    )
+    .err()
+    .expect("changed Holder identity must fail adoption");
+    assert!(error.to_string().contains("changed during adoption"));
+
+    let mut incomplete = stat.clone();
+    incomplete.child_birth_token = None;
+    let error = Session::adopt(
+        shell_spec("s_identity", "", &logs, Some(holder.clone())),
+        &holder,
+        &incomplete,
+        Arc::clone(&engine),
+    )
+    .err()
+    .expect("partial exact identity must fail adoption");
+    assert!(error.to_string().contains("incomplete exact identity"));
+
+    // The immediately previous Holder schema already carried incarnation,
+    // holder PID and second-resolution start fields. It remains adoptable for
+    // ordinary sessions, but can never expose a power-eligible identity.
+    let mut legacy = stat;
+    legacy.session_id = None;
+    legacy.child_birth_token = None;
+    legacy.holder_birth_token = None;
+    assert!(legacy.incarnation.is_some());
+    assert!(legacy.holder_pid.is_some());
+    assert!(legacy.child_start_sec.is_some());
+    assert!(legacy.holder_start_sec.is_some());
+    let mut adopted = Session::adopt(
+        shell_spec("s_identity", "", &logs, Some(holder)),
+        &holder_config(&root),
+        &legacy,
+        engine,
+    )
+    .expect("legacy adoption stays compatible");
+    assert!(adopted.local_execution_identity().is_none());
+    adopted
+        .terminate(Duration::from_secs(2))
+        .expect("terminate adopted child");
+}
+
+#[test]
+fn adoption_rejects_a_child_that_exits_after_discovery() {
+    let root = holders_dir("adoption_exit_race");
+    let logs = root.join("logs");
+    let holder = holder_config(&root);
+    let engine = engine();
+
+    let mut session = Session::spawn(
+        shell_spec("s_exit_race", "cat", &logs, Some(holder.clone())),
+        Arc::clone(&engine),
+    )
+    .expect("spawn held");
+    let client = HolderClient::new(HolderPaths::new(&holder.holders_dir, "s_exit_race").socket());
+    let discovered = client.stat().expect("live discovery stat");
+    assert!(discovered.alive);
+    session
+        .terminate(Duration::from_secs(2))
+        .expect("terminate after discovery");
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while client.stat().is_ok_and(|stat| stat.alive) && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    let error = Session::adopt(
+        shell_spec("s_exit_race", "", &logs, Some(holder.clone())),
+        &holder,
+        &discovered,
+        engine,
+    )
+    .err()
+    .expect("fresh non-live stat must fail adoption");
+    assert!(
+        error.to_string().contains("exited during adoption")
+            || error.to_string().contains("disappeared during adoption"),
+        "unexpected adoption error: {error}"
+    );
+}
+
+#[test]
+fn a_registry_restore_adopts_live_holders_from_a_previous_life() {
+    let root = holders_dir("registry");
+    let logs = root.join("logs");
+    let holder = holder_config(&root);
+    let state_file = root.join("state.json");
+
+    // Life #1: spawn one held session and one that exits immediately, then
+    // drop the whole registry mid-flight.
+    {
+        let mut registry = Registry::new(engine(), &state_file);
+        registry
+            .spawn(
+                shell_spec("s_live", "cat", &logs, Some(holder.clone())),
+                record("s_live"),
+            )
+            .expect("spawn live");
+        registry
+            .spawn(
+                shell_spec("s_done", "exit 0", &logs, Some(holder.clone())),
+                record("s_done"),
+            )
+            .expect("spawn done");
+        wait_until("short-lived session exits", Duration::from_secs(5), || {
+            registry
+                .views()
+                .iter()
+                .any(|view| view.id == "s_done" && view.exited)
+        });
+        registry.persist().expect("persist");
+        // Dropping held sessions detaches; nothing is killed.
+    }
+
+    // Life #2: a fresh registry finds the records and adopts what is still
+    // alive — and only that.
+    let mut registry = Registry::new(engine(), &state_file);
+    registry.load().expect("load state");
+    let adopted = registry.restore(&holder, &logs);
+    assert_eq!(adopted, vec!["s_live".to_string()], "only the live one");
+
+    let session = registry.get("s_live").expect("adopted session");
+    session.write_input(b"hello second life\n").expect("write");
+    wait_until("write lands", Duration::from_secs(5), || {
+        log_contains(&logs, "s_live", b"hello second life")
+    });
+
+    registry
+        .terminate("s_live", Duration::from_secs(2))
+        .expect("terminate");
+}
+
+#[test]
+fn a_held_child_exit_is_observed_from_the_marker() {
+    let root = holders_dir("exit");
+    let logs = root.join("logs");
+    let holder = holder_config(&root);
+
+    let session = Session::spawn(
+        shell_spec("s_exit", "exit 7", &logs, Some(holder)),
+        engine(),
+    )
+    .expect("spawn");
+    wait_until("exit observed", Duration::from_secs(5), || {
+        session.view().exited
+    });
+    assert!(
+        matches!(session.status(), SessionStatus::Exited(_)),
+        "status: {:?}",
+        session.status()
+    );
+}
+
+fn record(id: &str) -> taskmaster_proto::SessionRecord {
+    use taskmaster_proto::*;
+    SessionRecord {
+        id: SessionId(id.into()),
+        kind: AgentKind::SHELL,
+        cwd: "/tmp".into(),
+        project_id: ProjectId("p".into()),
+        worktree_path: None,
+        git_branch: None,
+        title: "test".into(),
+        title_source: TitleSource::Placeholder,
+        agent_session_id: None,
+        transcript_path: None,
+        status: SessionStatus::Starting,
+        needs_input: None,
+        resumability: Resumability::NotResumable,
+        parent: None,
+        created_at: DateMillis(0.0),
+        updated_at: DateMillis(0.0),
+        last_turn_completed_at: None,
+        last_seen_at: None,
+        pinned: false,
+        archived_at: None,
+        host: None,
+        remote_persistence: None,
+        hibernation: None,
+        memory_bytes: None,
+        artifacts: None,
+        pull_requests: None,
+        listening_ports: None,
+        foreground_agent: None,
+        workbench: None,
+    }
+}
+
+/// The wake-on-input contract: typing into a SIGSTOPped session queues the
+/// bytes (never wedging the PTY), and waking flushes them in order — no
+/// keystroke lost, the reply arrives after SIGCONT.
+#[test]
+fn input_to_a_hibernated_session_queues_and_flushes_on_wake() {
+    let root = holders_dir("hib");
+    let logs = root.join("logs");
+    let holder = holder_config(&root);
+    let state_file = root.join("state.json");
+
+    let mut registry = Registry::new(engine(), &state_file);
+    registry
+        .spawn(
+            shell_spec("s_hib", "cat", &logs, Some(holder.clone())),
+            record("s_hib"),
+        )
+        .expect("spawn");
+    wait_until("cat is up", Duration::from_secs(5), || {
+        registry.get("s_hib").is_some_and(|s| s.child_pid() > 1)
+    });
+
+    registry
+        .hibernate("s_hib", taskmaster_proto::HibernationReason::Manual)
+        .expect("hibernate");
+    assert!(
+        registry
+            .get("s_hib")
+            .expect("hibernated session")
+            .local_execution_identity()
+            .is_none(),
+        "hibernation immediately revokes execution eligibility"
+    );
+
+    // Typed while frozen: queued, not written — cat can't echo while stopped.
+    registry
+        .get("s_hib")
+        .expect("session")
+        .write_input(b"typed-while-frozen\n")
+        .expect("queued write");
+    std::thread::sleep(Duration::from_millis(600));
+    assert!(
+        !log_contains(&logs, "s_hib", b"typed-while-frozen"),
+        "a stopped tree must not echo"
+    );
+
+    // Wake: SIGCONT + flush; the echo lands and the record clears.
+    registry.wake_session("s_hib").expect("wake");
+    assert!(
+        registry
+            .get("s_hib")
+            .expect("woken session")
+            .local_execution_identity()
+            .is_some(),
+        "wake restores observable identity but does not itself restore consent"
+    );
+    wait_until("queued input flushed", Duration::from_secs(5), || {
+        log_contains(&logs, "s_hib", b"typed-while-frozen")
+    });
+    assert!(
+        registry
+            .records()
+            .iter()
+            .find(|r| r.id.0 == "s_hib")
+            .expect("record")
+            .hibernation
+            .is_none()
+    );
+
+    registry
+        .terminate("s_hib", Duration::from_secs(2))
+        .expect("terminate");
+}

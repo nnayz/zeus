@@ -24,7 +24,7 @@ rtk proxy env COMPANION_BROWSER=/absolute/path/to/chromium \
 ```
 
 Set `COMPANION_SCREENSHOT_DIR` to save synthetic pairing/session/privacy PNGs.
-The Zeus browser MCP was unavailable in this environment (`test sidecar not
+The Taskmaster browser MCP was unavailable in this environment (`test sidecar not
 found`), so the recorded browser checks used installed HeadlessChrome
 151.0.7922.34 directly. This is Chromium mobile emulation, **not Safari/iOS**.
 
@@ -66,21 +66,21 @@ overwrite newer projections.
 ## Actual Rust gateway smoke
 
 On 2026-09-08, `test/rust-smoke.mjs` passed with exit status 0 against #73's
-compiled `zeus-companion` fixture example: a real local Rust Engine, real echo
+compiled `taskmaster-companion` fixture example: a real local Rust Engine, real echo
 PTY, auth enrollment store, and gateway. The committed JavaScript adapter was
 used without compatibility changes. This closes the previously pending actual
 gateway adapter smoke; it does not replace real iPhone/SSH/TLS validation.
 
-Build the example from `zeus/` after integrating #73:
+Build the example from `taskmaster/` after integrating #73:
 
 ```sh
-rtk cargo build --offline -p zeus-companion --example fixture
+rtk cargo build --offline -p taskmaster-companion --example fixture
 ```
 
 Run from the repository root with the absolute path to that example binary:
 
 ```sh
-rtk proxy env COMPANION_RUST_FIXTURE=/absolute/path/to/zeus/target/debug/examples/fixture \
+rtk proxy env COMPANION_RUST_FIXTURE=/absolute/path/to/taskmaster/target/debug/examples/fixture \
   node prototypes/companion-web/test/rust-smoke.mjs
 ```
 
@@ -107,7 +107,7 @@ The smoke makes bounded screen reads to observe PTY echo. It does not separately
 prove that delayed terminal output alone (without a session/status mutation)
 produces a new invalidation. #73 independently covers that path in
 `delayed_prompt_output_invalidates_without_metadata_or_control_change`
-(`zeus/crates/zeus-companion/tests/integration.rs`): FIFO-gated output released
+(`taskmaster/crates/taskmaster-companion/tests/integration.rs`): FIFO-gated output released
 after command events settle produces an Engine `session.output` event, external
 `changed` invalidation, and updated screen while metadata/control stay unchanged.
 The #73 owner reported the gateway suite passing 17/17; this closes the separate

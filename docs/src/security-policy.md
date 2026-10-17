@@ -2,17 +2,17 @@
 
 ## Supported versions
 
-Security fixes target the latest Zeus release. Keep Zeus and the coding-agent
+Security fixes target the latest Taskmaster release. Keep Taskmaster and the coding-agent
 CLIs it launches current.
 
 ## Report a vulnerability
 
 Email **[hi@nasrul.info](mailto:hi@nasrul.info)** with the subject line
-`Zeus security`.
+`Taskmaster security`.
 
 Include:
 
-- affected Zeus version and macOS version
+- affected Taskmaster version and macOS version
 - minimal reproduction
 - expected impact
 - any suggested mitigation
@@ -25,9 +25,9 @@ depend on severity and complexity.
 
 ## Scope
 
-Zeus intentionally runs local shells, coding agents, MCP tools, and optional
+Taskmaster intentionally runs local shells, coding agents, MCP tools, and optional
 remote commands. A tool doing something the operator explicitly authorized is
-not itself a Zeus vulnerability.
+not itself a Taskmaster vulnerability.
 
 In scope:
 

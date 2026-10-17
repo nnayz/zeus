@@ -19,9 +19,9 @@ export async function createFixture({ port = 0 } = {}) {
   const enrollments = new Map(), devices = new Map(), sockets = new Set(), mutations = new Map();
   const stats = { prompts: 0, actions: 0, acquisitions: 0, requests: 0, subscriptions: 0, pairings: 0, replayCursors: [] };
   const now = Date.now();
-  const projects = [{ id: 'project_local', name: 'Zeus', root: '/work/zeus', host: null }, { id: 'project_remote', name: 'API service', root: '/srv/api', host: 'build-box · SSH' }];
+  const projects = [{ id: 'project_local', name: 'Taskmaster', root: '/work/taskmaster', host: null }, { id: 'project_remote', name: 'API service', root: '/srv/api', host: 'build-box · SSH' }];
   const sessions = projects.map((project, index) => ({ id: index ? 'session_remote' : 'session_local', project_id: project.id, kind: index ? 'claude' : 'codex', title: index ? 'Review the API migration' : 'Ship the Companion prototype', cwd: project.root, host: project.host, status: index ? 'question' : 'working', created_at_ms: now - 3600000, updated_at_ms: now, archived: false, hibernated: false, revision: `revision_${index}_1` }));
-  const screens = new Map(sessions.map((session, index) => [session.id, { session_id: session.id, incarnation: `incarnation_${index}_1`, screen_sequence: 1, text: index ? 'Migration ready for review.\nShould I apply the compatibility fix?' : 'Companion prototype\nChecking the mobile workflow…\nReady for your next prompt.', cols: 80, rows: 24, cursor_row: 2, cursor_col: 0, control: { epoch: { incarnation: `incarnation_${index}_1`, generation: 1 }, owner: { id: 'desktop_fixture', label: 'Zeus desktop', role: 'desktop' }, command_seq: 0 }, exited: false, truncated: false }]));
+  const screens = new Map(sessions.map((session, index) => [session.id, { session_id: session.id, incarnation: `incarnation_${index}_1`, screen_sequence: 1, text: index ? 'Migration ready for review.\nShould I apply the compatibility fix?' : 'Companion prototype\nChecking the mobile workflow…\nReady for your next prompt.', cols: 80, rows: 24, cursor_row: 2, cursor_col: 0, control: { epoch: { incarnation: `incarnation_${index}_1`, generation: 1 }, owner: { id: 'desktop_fixture', label: 'Taskmaster desktop', role: 'desktop' }, command_seq: 0 }, exited: false, truncated: false }]));
   let base;
   const issuePairing = (scopes = ['read', 'interact', 'lifecycle']) => {
     const code = randomBytes(32).toString('hex'), expires_at_ms = Date.now() + 120000;
@@ -36,7 +36,7 @@ export async function createFixture({ port = 0 } = {}) {
     mode = value;
     if (value === 'revoked') { for (const device of devices.values()) device.revoked = true; for (const peer of sockets) { peer.send({ code: 'revoked' }); peer.socket.end(); } }
     if (value === 'offline') for (const peer of sockets) peer.socket.destroy();
-    if (value === 'desktop') { for (const screen of screens.values()) { screen.control.epoch.generation++; screen.control.owner = { id: 'desktop_fixture', label: 'Zeus desktop', role: 'desktop' }; } emit(); }
+    if (value === 'desktop') { for (const screen of screens.values()) { screen.control.epoch.generation++; screen.control.owner = { id: 'desktop_fixture', label: 'Taskmaster desktop', role: 'desktop' }; } emit(); }
     if (value === 'restart') { engineEpoch = 'engine_' + randomUUID(); streamId = 'stream_' + randomUUID(); sequence = 0; for (const screen of screens.values()) { screen.incarnation = randomUUID(); screen.control.epoch = { incarnation: screen.incarnation, generation: 1 }; screen.control.owner = null; } emit('resync_required'); }
     if (value === 'gap') { sequence += 10; emit(); }
   };
@@ -50,7 +50,7 @@ export async function createFixture({ port = 0 } = {}) {
       if (request.method === 'GET' && path === '/fixture') {
         const payload = issuePairing();
         response.writeHead(200, { 'Content-Type': 'text/html', 'Cache-Control': 'no-store', 'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'" });
-        response.end(`<!doctype html><html lang="en"><meta name="viewport" content="width=device-width"><title>Zeus local fixture</title><body style="font:18px system-ui;max-width:700px;margin:2rem;padding:1rem"><h1>Local fixture · synthetic data only</h1><p>Pairing expires in two minutes. This page is fixture tooling, never shipped with the PWA.</p><label for="fixture-payload">Pairing payload</label><textarea id="fixture-payload" rows="8" style="width:100%">${JSON.stringify(payload)}</textarea><p><a href="/">Open Companion</a></p><p>Use the test suite for deterministic revocation, replay, reconnect, and failure scenarios.</p></body></html>`); return;
+        response.end(`<!doctype html><html lang="en"><meta name="viewport" content="width=device-width"><title>Taskmaster local fixture</title><body style="font:18px system-ui;max-width:700px;margin:2rem;padding:1rem"><h1>Local fixture · synthetic data only</h1><p>Pairing expires in two minutes. This page is fixture tooling, never shipped with the PWA.</p><label for="fixture-payload">Pairing payload</label><textarea id="fixture-payload" rows="8" style="width:100%">${JSON.stringify(payload)}</textarea><p><a href="/">Open Companion</a></p><p>Use the test suite for deterministic revocation, replay, reconnect, and failure scenarios.</p></body></html>`); return;
       }
       if (request.method === 'GET' && STATIC.has(path) && !url.search) {
         const [file, type] = STATIC.get(path); const content = await readFile(new URL(`../public/${file}`, import.meta.url));
@@ -165,7 +165,7 @@ export async function createFixture({ port = 0 } = {}) {
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const fixture = await createFixture({ port: Number(process.env.COMPANION_FIXTURE_PORT ?? 4174) });
-  process.stdout.write(`Zeus Companion fixture: ${fixture.origin}\nPairing screen: ${fixture.origin}/fixture\nSynthetic data only; no Engine connection.\n`);
+  process.stdout.write(`Taskmaster Companion fixture: ${fixture.origin}\nPairing screen: ${fixture.origin}/fixture\nSynthetic data only; no Engine connection.\n`);
   process.on('SIGINT', () => { void fixture.close().then(() => process.exit(0)); });
   process.on('SIGTERM', () => { void fixture.close().then(() => process.exit(0)); });
 }

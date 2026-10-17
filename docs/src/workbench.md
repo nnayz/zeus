@@ -1,6 +1,6 @@
 # The workbench
 
-Zeus is a three-pane machine. Learn the panes and the rest of the product
+Taskmaster is a three-pane machine. Learn the panes and the rest of the product
 falls into place.
 
 ## Workspaces
@@ -63,7 +63,7 @@ Closing an edited file requires saving or reverting its changes. `⌘W` closes
 the active panel tab while the panel has focus; in the main terminal it closes
 the selected session. Arrow keys browse the tab strip when a tab has focus.
 
-Review is how Zeus earns the "accept the work" claim. Let the agent finish,
+Review is how Taskmaster earns the "accept the work" claim. Let the agent finish,
 then read the diff in the same window you used to watch it.
 
 Files opens on **Changed**, using the same staged, working-tree, rename,
@@ -88,7 +88,7 @@ Details keeps Git to a one-shot working-tree summary that jumps to Review; it do
 not poll in the background, show pull-request content, or mutate the repository.
 Artifacts and listening ports appear in the same Details tab. Installation-
 level usage remains in the account menu at the bottom of the sidebar; Details
-only shows usage when Zeus can attribute it to the selected session.
+only shows usage when Taskmaster can attribute it to the selected session.
 
 ## Session overview
 
@@ -104,20 +104,20 @@ scrollback.
 
 ## Worktrees sheet
 
-`⌥⌘W` lists git worktrees Zeus knows about, which session owns which, and
+`⌥⌘W` lists git worktrees Taskmaster knows about, which session owns which, and
 which look stale enough to clean up. Cleanup is suggest-only: dirty,
 unmerged, or main-branch trees will not reach the confirm step. See
 [Worktrees](worktrees.md).
 
 ## Menu bar
 
-The Zeus extra in the macOS menu bar is a quiet radar. It shows how many
+The Taskmaster extra in the macOS menu bar is a quiet radar. It shows how many
 sessions need you without stealing focus. Click it to pick a row and come
 back to the window.
 
 ## Command palette and Quick Open
 
-`⌘K` is the index of everything Zeus can start: new agents, new shells,
+`⌘K` is the index of everything Taskmaster can start: new agents, new shells,
 "New Claude Code in *this project*", "New Codex on *this host*", move the
 selected Claude session, sync prefs, settings, docs, updates.
 

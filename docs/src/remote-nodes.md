@@ -1,11 +1,11 @@
 # Remote nodes
 
-`zeus-node` makes a VPS (or another workstation) a first-party Zeus execution
+`taskmaster-node` makes a VPS (or another workstation) a first-party Taskmaster execution
 host. Use it when SSH is not enough: you want per-machine Claude/Codex
 logins, merged usage in the inspector, and a move/fork of a live thread
 between laptop and VPS.
 
-Provider credentials stay on the machine where the CLI runs. Zeus gets a
+Provider credentials stay on the machine where the CLI runs. Taskmaster gets a
 versioned management interface for accounts, usage, provider sessions, and
 handoff.
 
@@ -14,7 +14,7 @@ compatibility terminal path. It is no longer the source of truth for
 identity, usage, or movement.
 
 Most people should start with [Remote hosts](remote-hosts.md). Come here
-when you are ready to treat a VPS as a first-class Zeus machine.
+when you are ready to treat a VPS as a first-class Taskmaster machine.
 
 ## Install on the VPS
 
@@ -22,40 +22,40 @@ The VPS needs Claude Code and/or Codex on `PATH`, a private Tailscale address,
 and systemd user services.
 
 ```sh
-cargo build --release -p zeus-node
+cargo build --release -p taskmaster-node
 ./scripts/install-node.sh
-systemctl --user edit zeus-node
+systemctl --user edit taskmaster-node
 ```
 
 Set the listener to the VPS's Tailscale address in the override:
 
 ```ini
 [Service]
-Environment=ZEUS_NODE_LISTEN=100.64.0.2:7337
+Environment=TASKMASTER_NODE_LISTEN=100.64.0.2:7337
 ```
 
 Then start it and print the one-time enrollment values:
 
 ```sh
-systemctl --user enable --now zeus-node
-zeus-node init
+systemctl --user enable --now taskmaster-node
+taskmaster-node init
 ```
 
 The node config is owner-only and contains its app-layer capability token.
-Tailscale encrypts the transport; the token authenticates Zeus at the
+Tailscale encrypts the transport; the token authenticates Taskmaster at the
 application layer. Do not bind the listener to a public interface and do not
 copy `node.json` wholesale.
 
 On the local Mac, put only the printed token in an owner-only file:
 
 ```sh
-mkdir -p ~/.config/zeus
-chmod 700 ~/.config/zeus
-printf '%s\n' 'PASTE_THE_TOKEN' > ~/.config/zeus/forge.token
-chmod 600 ~/.config/zeus/forge.token
+mkdir -p ~/.config/taskmaster
+chmod 700 ~/.config/taskmaster
+printf '%s\n' 'PASTE_THE_TOKEN' > ~/.config/taskmaster/forge.token
+chmod 600 ~/.config/taskmaster/forge.token
 ```
 
-In Zeus, open **Settings → Remote** and add both the SSH fallback and
+In Taskmaster, open **Settings → Remote** and add both the SSH fallback and
 first-party node fields. The resulting `hosts.json` entry is:
 
 ```json
@@ -66,7 +66,7 @@ first-party node fields. The resulting `hosts.json` entry is:
   "defaultCwd": "~/code",
   "node": {
     "endpoint": "tcp://100.64.0.2:7337",
-    "tokenFile": "~/.config/zeus/forge.token",
+    "tokenFile": "~/.config/taskmaster/forge.token",
     "nodeId": "node-a1b2c3d4"
   }
 }
@@ -79,17 +79,17 @@ should be saved after the first verified hello.
 
 Profiles are labels and identity metadata. An installation is that profile's
 login on one node. Provider secrets never appear in the profile registry or over
-the Zeus protocol.
+the Taskmaster protocol.
 
 ```sh
-zeus-node account add --provider codex --id personal --label Personal
-zeus-node account add --provider codex --id work --label Work
-zeus-node account add --provider claude --id personal --label Personal
+taskmaster-node account add --provider codex --id personal --label Personal
+taskmaster-node account add --provider codex --id work --label Work
+taskmaster-node account add --provider claude --id personal --label Personal
 
-zeus-node account login --id personal
-zeus-node account status --id personal
-zeus-node account default --provider codex --id work
-zeus-node account list
+taskmaster-node account login --id personal
+taskmaster-node account status --id personal
+taskmaster-node account default --provider codex --id work
+taskmaster-node account list
 ```
 
 You can run those commands directly from the local Mac against the VPS. No
@@ -97,9 +97,9 @@ interactive SSH shell is required. Add the enrolled connection flags to any
 `status` or `account` command:
 
 ```sh
-zeus-node account login --id personal \
+taskmaster-node account login --id personal \
   --endpoint tcp://100.64.0.2:7337 \
-  --token-file ~/.config/zeus/forge.token \
+  --token-file ~/.config/taskmaster/forge.token \
   --node-id node-a1b2c3d4
 ```
 
@@ -142,12 +142,12 @@ session. This example moves a Codex thread from the local node to Forge; use
 `--mode fork` to leave the source lease running:
 
 ```sh
-zeus-node handoff \
+taskmaster-node handoff \
   --provider codex --profile work \
-  --session zeus-session-id --provider-session codex-thread-id \
+  --session taskmaster-session-id --provider-session codex-thread-id \
   --workspace "$PWD" --mode move \
   --target-endpoint tcp://100.64.0.2:7337 \
-  --target-token-file ~/.config/zeus/forge.token \
+  --target-token-file ~/.config/taskmaster/forge.token \
   --target-node-id node-a1b2c3d4
 ```
 
@@ -191,4 +191,7 @@ retried on reconciliation.
 
 Protocol changes are additive within `NODE_PROTOCOL_VERSION = 1`. Clients
 authenticate with `node.hello`, verify the pinned identity, and negotiate
-explicit capability strings before using a feature.
+explicit capability strings before using a feature. That negotiation is an
+implementation detail; the
+[engineering index on GitHub](https://github.com/nnayz/taskmaster/blob/main/docs/dev/src/engineering-index.md) points at the authoritative
+notes. This page stays the operator workflow.

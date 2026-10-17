@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the ZeusCompanion iOS app with xcodebuild.
+# Build the TaskmasterCompanion iOS app with xcodebuild.
 #
 # Usage: scripts/build.sh [--release] [--destination DESTINATION]
 
@@ -7,17 +7,17 @@ set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ios_dir="$(cd "${script_dir}/.." && pwd)"
-project="${ios_dir}/ZeusCompanion/ZeusCompanion.xcodeproj"
-scheme="ZeusCompanion"
-configuration="${ZEUS_IOS_CONFIGURATION:-Debug}"
-destination="${ZEUS_IOS_DESTINATION:-generic/platform=iOS Simulator}"
-derived_data="${ZEUS_IOS_DERIVED_DATA:-${ios_dir}/.build}"
+project="${ios_dir}/TaskmasterCompanion/TaskmasterCompanion.xcodeproj"
+scheme="TaskmasterCompanion"
+configuration="${TASKMASTER_IOS_CONFIGURATION:-Debug}"
+destination="${TASKMASTER_IOS_DESTINATION:-generic/platform=iOS Simulator}"
+derived_data="${TASKMASTER_IOS_DERIVED_DATA:-${ios_dir}/.build}"
 
 usage() {
     cat <<'USAGE'
 Usage: scripts/build.sh [--release] [--destination DESTINATION]
 
-Build the ZeusCompanion iOS app with xcodebuild.
+Build the TaskmasterCompanion iOS app with xcodebuild.
 
 Options:
   --release                  Build with the Release configuration.
@@ -26,9 +26,9 @@ Options:
   -h, --help                 Show this help.
 
 Environment:
-  ZEUS_IOS_CONFIGURATION  Debug or Release (default: Debug).
-  ZEUS_IOS_DESTINATION    Destination used when --destination is absent.
-  ZEUS_IOS_DERIVED_DATA   Derived data directory (default: ios/.build).
+  TASKMASTER_IOS_CONFIGURATION  Debug or Release (default: Debug).
+  TASKMASTER_IOS_DESTINATION    Destination used when --destination is absent.
+  TASKMASTER_IOS_DERIVED_DATA   Derived data directory (default: ios/.build).
 USAGE
 }
 

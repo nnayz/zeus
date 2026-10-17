@@ -1,6 +1,6 @@
 # Keyboard
 
-Zeus is built to be driven without hunting through menus. The palette (`⌘K`)
+Taskmaster is built to be driven without hunting through menus. The palette (`⌘K`)
 is the backup for anything you forget.
 
 ## Start and stop
@@ -82,5 +82,5 @@ type:
 - a host name (`new codex on forge`)
 - `worktree`, `settings`, `update`
 
-Unavailable agents stay searchable. If Zeus has a setup URL it will open the
+Unavailable agents stay searchable. If Taskmaster has a setup URL it will open the
 install docs instead of spawning a dead session.

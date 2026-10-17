@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 900" width="1280" height="900" role="img" aria-label="Zeus code architecture">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 900" width="1280" height="900" role="img" aria-label="Taskmaster code architecture">
   <defs>
     <style>
       @font-face {
@@ -39,7 +39,7 @@
   <rect width="1280" height="900" fill="#fafafa"/>
 
   <!-- title -->
-  <text x="64" y="56" class="h1">Zeus</text>
+  <text x="64" y="56" class="h1">Taskmaster</text>
   <text x="140" y="56" class="muted" style="font-size:28px;font-weight:400;letter-spacing:-0.03em;">Code architecture</text>
   <line x1="64" y1="80" x2="1216" y2="80" stroke="#e5e5e5" stroke-width="1"/>
 
@@ -47,24 +47,24 @@
   <text x="64" y="120" class="h2">DESKTOP</text>
 
   <rect x="64" y="140" width="340" height="56" rx="2" fill="#fff" stroke="#0a0a0a" stroke-width="1.25"/>
-  <text x="84" y="164" class="crate">zeus-app</text>
+  <text x="84" y="164" class="crate">taskmaster-app</text>
   <text x="84" y="182" class="small">bin · GPUI shell</text>
 
   <!-- deps under app -->
   <rect x="64" y="220" width="160" height="48" rx="2" fill="#fff" stroke="#d4d4d4" stroke-width="1"/>
-  <text x="80" y="249" class="crate" style="font-weight:400;">zeus-term</text>
+  <text x="80" y="249" class="crate" style="font-weight:400;">taskmaster-term</text>
 
   <rect x="244" y="220" width="160" height="48" rx="2" fill="#fff" stroke="#d4d4d4" stroke-width="1"/>
-  <text x="260" y="249" class="crate" style="font-weight:400;">zeus-ui</text>
+  <text x="260" y="249" class="crate" style="font-weight:400;">taskmaster-ui</text>
 
   <rect x="64" y="284" width="160" height="48" rx="2" fill="#fff" stroke="#d4d4d4" stroke-width="1"/>
-  <text x="80" y="313" class="crate" style="font-weight:400;">zeus-client</text>
+  <text x="80" y="313" class="crate" style="font-weight:400;">taskmaster-client</text>
 
   <rect x="244" y="284" width="160" height="48" rx="2" fill="#fff" stroke="#d4d4d4" stroke-width="1"/>
-  <text x="260" y="313" class="crate" style="font-weight:400;">zeus-usage</text>
+  <text x="260" y="313" class="crate" style="font-weight:400;">taskmaster-usage</text>
 
   <rect x="64" y="348" width="340" height="48" rx="2" fill="#fff" stroke="#d4d4d4" stroke-width="1"/>
-  <text x="80" y="377" class="crate" style="font-weight:400;">zeus-updater</text>
+  <text x="80" y="377" class="crate" style="font-weight:400;">taskmaster-updater</text>
 
   <!-- app to children -->
   <line x1="234" y1="196" x2="144" y2="220" stroke="#a3a3a3" stroke-width="1"/>
@@ -77,7 +77,7 @@
   <text x="470" y="120" class="h2">ENGINE</text>
 
   <rect x="470" y="140" width="340" height="56" rx="2" fill="#fff" stroke="#0a0a0a" stroke-width="1.25"/>
-  <text x="490" y="164" class="crate">zeus-engine</text>
+  <text x="490" y="164" class="crate">taskmaster-engine</text>
   <text x="490" y="182" class="small">control plane · sessions · status</text>
 
   <!-- modules as quiet list -->
@@ -110,7 +110,7 @@
   <text x="896" y="182" class="small">authenticated byte transport</text>
 
   <rect x="876" y="220" width="340" height="56" rx="2" fill="#fff" stroke="#0a0a0a" stroke-width="1.25"/>
-  <text x="896" y="244" class="crate">zeus-remote</text>
+  <text x="896" y="244" class="crate">taskmaster-remote</text>
   <text x="896" y="262" class="small">probe · launch · attach · inspect</text>
 
   <rect x="876" y="300" width="340" height="56" rx="2" fill="#fff" stroke="#0a0a0a" stroke-width="1"/>
@@ -134,15 +134,15 @@
   <text x="64" y="556" class="h2">SHARED</text>
 
   <rect x="64" y="576" width="360" height="72" rx="2" fill="#fff" stroke="#0a0a0a" stroke-width="1.25"/>
-  <text x="84" y="608" class="crate">zeus-proto</text>
+  <text x="84" y="608" class="crate">taskmaster-proto</text>
   <text x="84" y="628" class="small">models · methods · remote_pty</text>
 
   <rect x="460" y="576" width="360" height="72" rx="2" fill="#fff" stroke="#0a0a0a" stroke-width="1.25"/>
-  <text x="480" y="608" class="crate">zeus-terminal-state</text>
+  <text x="480" y="608" class="crate">taskmaster-terminal-state</text>
   <text x="480" y="628" class="small">parser · grid · snapshot · diff</text>
 
   <rect x="856" y="576" width="360" height="72" rx="2" fill="#fff" stroke="#0a0a0a" stroke-width="1.25"/>
-  <text x="876" y="608" class="crate">zeus-pty</text>
+  <text x="876" y="608" class="crate">taskmaster-pty</text>
   <text x="876" y="628" class="small">PTY primitives</text>
 
   <!-- compile deps down -->
@@ -161,9 +161,9 @@
   <line x1="64" y1="692" x2="1216" y2="692" stroke="#e5e5e5" stroke-width="1"/>
 
   <text x="64" y="732" class="h2">BOUNDARIES</text>
-  <text x="64" y="764" class="note">App never owns PTYs or runs SSH — only zeus-client talks to the Engine.</text>
+  <text x="64" y="764" class="note">App never owns PTYs or runs SSH — only taskmaster-client talks to the Engine.</text>
   <text x="64" y="788" class="note">Engine is the control plane. Holders own the data plane: PTY, process tree, terminal grid.</text>
-  <text x="64" y="812" class="note">zeus-remote depends on proto, terminal-state, and pty only — never app, client, or engine.</text>
+  <text x="64" y="812" class="note">taskmaster-remote depends on proto, terminal-state, and pty only — never app, client, or engine.</text>
 
   <text x="64" y="860" class="small">Heavy border = binary · Light border = library · Dashed = runtime · Gray = compile dep</text>
 </svg>

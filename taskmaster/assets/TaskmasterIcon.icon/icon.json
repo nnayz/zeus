@@ -1,0 +1,21 @@
+{
+  "fill": {
+    "automatic-gradient": "srgb:0.00000,0.00000,0.00000,1.00000"
+  },
+  "groups": [
+    {
+      "layers": [
+        {
+          "image-name": "TaskmasterMark.svg",
+          "name": "Taskmaster connected lightning and frame",
+          "glass": true
+        }
+      ],
+      "lighting": "individual",
+      "specular": true,
+      "shadow": { "kind": "neutral", "opacity": 0.15 },
+      "translucency": { "enabled": false, "value": 0.0 }
+    }
+  ],
+  "supported-platforms": { "squares": ["macOS"] }
+}

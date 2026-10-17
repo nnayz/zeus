@@ -3,8 +3,8 @@ set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-WORKSPACE="${REPO_ROOT}/zeus"
-DEV_DIR="${HOME}/.zeus-companion-dev"
+WORKSPACE="${REPO_ROOT}/taskmaster"
+DEV_DIR="${HOME}/.taskmaster-companion-dev"
 CERTS_DIR="${DEV_DIR}/certs"
 CERT_FILE="${CERTS_DIR}/localhost.pem"
 KEY_FILE="${CERTS_DIR}/localhost-key.pem"
@@ -26,9 +26,9 @@ chmod 700 "${DEV_DIR}" "${CERTS_DIR}"
 
 # Reuse existing certificates if available from previous setup or generate fresh with mkcert
 if [[ ! -f "${CERT_FILE}" || ! -f "${KEY_FILE}" ]]; then
-  if [[ -f "${HOME}/.zeus-test/certs/localhost+1.pem" && -f "${HOME}/.zeus-test/certs/localhost+1-key.pem" ]]; then
-    cp "${HOME}/.zeus-test/certs/localhost+1.pem" "${CERT_FILE}"
-    cp "${HOME}/.zeus-test/certs/localhost+1-key.pem" "${KEY_FILE}"
+  if [[ -f "${HOME}/.taskmaster-test/certs/localhost+1.pem" && -f "${HOME}/.taskmaster-test/certs/localhost+1-key.pem" ]]; then
+    cp "${HOME}/.taskmaster-test/certs/localhost+1.pem" "${CERT_FILE}"
+    cp "${HOME}/.taskmaster-test/certs/localhost+1-key.pem" "${KEY_FILE}"
     chmod 600 "${CERT_FILE}" "${KEY_FILE}"
   elif command -v mkcert >/dev/null 2>&1; then
     echo "==> Generating local development certificate with mkcert..."
@@ -66,6 +66,6 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-echo "==> Starting Zeus Companion Engine fixture..."
+echo "==> Starting Taskmaster Companion Engine fixture..."
 cd "${WORKSPACE}"
-cargo run -p zeus-companion --example fixture -- "${PAIR_FILE}"
+cargo run -p taskmaster-companion --example fixture -- "${PAIR_FILE}"

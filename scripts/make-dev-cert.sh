@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Creates a stable self-signed "Zeus Dev" code-signing identity in the login
+# Creates a stable self-signed "Taskmaster Dev" code-signing identity in the login
 # keychain so the app's code signature (and TCC permission grants) survive
 # rebuilds. Ad-hoc signing changes identity every build → macOS re-prompts for
 # every permission. Run once.
 set -euo pipefail
 
-if security find-certificate -c "Zeus Dev" >/dev/null 2>&1; then
-    echo "'Zeus Dev' cert already exists."
+if security find-certificate -c "Taskmaster Dev" >/dev/null 2>&1; then
+    echo "'Taskmaster Dev' cert already exists."
     exit 0
 fi
 
@@ -18,7 +18,7 @@ distinguished_name = dn
 x509_extensions = v3
 prompt = no
 [dn]
-CN = Zeus Dev
+CN = Taskmaster Dev
 [v3]
 keyUsage = critical, digitalSignature
 extendedKeyUsage = critical, codeSigning
@@ -27,6 +27,6 @@ CONF
 openssl req -x509 -newkey rsa:2048 -keyout "$tmp/k.key" -out "$tmp/c.crt" \
     -days 3650 -nodes -config "$tmp/cert.conf" 2>/dev/null
 openssl pkcs12 -export -inkey "$tmp/k.key" -in "$tmp/c.crt" -out "$tmp/id.p12" \
-    -passout pass:zeus -name "Zeus Dev" 2>/dev/null
-security import "$tmp/id.p12" -k ~/Library/Keychains/login.keychain-db -P zeus -A
-echo "Created 'Zeus Dev' code-signing identity. Rebuild the app to use it."
+    -passout pass:taskmaster -name "Taskmaster Dev" 2>/dev/null
+security import "$tmp/id.p12" -k ~/Library/Keychains/login.keychain-db -P taskmaster -A
+echo "Created 'Taskmaster Dev' code-signing identity. Rebuild the app to use it."

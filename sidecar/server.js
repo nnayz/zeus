@@ -1,4 +1,4 @@
-// Zeus test sidecar — a Playwright browser pool the daemon drives over stdio.
+// Taskmaster test sidecar — a Playwright browser pool the daemon drives over stdio.
 // One browser process per engine (chromium/webkit/firefox), reused across every
 // test; each run gets a cheap isolated context. Transport: newline-delimited
 // JSON on stdin/stdout — {id, method, params} → {id, result} | {id, error};
@@ -250,4 +250,4 @@ async function shutdown(code) {
 
 process.on("SIGTERM", () => shutdown(0));
 process.on("SIGINT", () => shutdown(0));
-console.error("zeus test sidecar ready");
+console.error("taskmaster test sidecar ready");

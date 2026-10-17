@@ -5,16 +5,12 @@ on:
     branches: [main]
     paths:
       - "docs/**"
-      - "developer-docs/**"
-      - "site/**"
-      - "scripts/check-docs-links.py"
+      - "website/**"
       - ".github/workflows/pages.yml"
   pull_request:
     paths:
       - "docs/**"
-      - "developer-docs/**"
-      - "site/**"
-      - "scripts/check-docs-links.py"
+      - "website/**"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 
@@ -28,7 +24,7 @@ concurrency:
 
 jobs:
   build:
-    name: Build site and docs
+    name: Build website
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -42,60 +38,28 @@ jobs:
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
-          cache: npm
-          cache-dependency-path: site/package-lock.json
 
-      - name: Install site dependencies
-        working-directory: site
-        run: npm ci
-
-      - name: Build site
-        working-directory: site
+      - name: Test and build website
+        working-directory: website
         env:
           BASE_PATH: ${{ steps.pages.outputs.base_path }}
-        run: npm run build
-
-      - name: Install mdBook
-        env:
-          MDBOOK_VERSION: "0.4.52"
+          SITE_ORIGIN: ${{ steps.pages.outputs.origin || 'https://nnayz.github.io' }}
         run: |
           set -euo pipefail
-          curl --fail --silent --show-error --location \
-            "https://github.com/rust-lang/mdBook/releases/download/v${MDBOOK_VERSION}/mdbook-v${MDBOOK_VERSION}-x86_64-unknown-linux-gnu.tar.gz" \
-            --output "${RUNNER_TEMP}/mdbook.tar.gz"
-          tar -xzf "${RUNNER_TEMP}/mdbook.tar.gz" -C "${RUNNER_TEMP}"
-          echo "${RUNNER_TEMP}" >> "${GITHUB_PATH}"
-          "${RUNNER_TEMP}/mdbook" --version
-
-      - name: Build docs
-        env:
-          MDBOOK_OUTPUT__HTML__SITE_URL: ${{ steps.pages.outputs.base_path }}/docs/
-        run: mdbook build docs
-
-      - name: Build developer docs
-        env:
-          MDBOOK_OUTPUT__HTML__SITE_URL: ${{ steps.pages.outputs.base_path }}/docs/dev/
-        run: mdbook build developer-docs
-
-      - name: Assemble Pages artifact
-        run: |
-          set -euo pipefail
-          mkdir -p site/build/docs/dev
-          cp -R docs/book/. site/build/docs/
-          cp -R developer-docs/book/. site/build/docs/dev/
-          touch site/build/.nojekyll
-          test -f site/build/index.html
-          test -f site/build/docs/index.html
-          test -f site/build/docs/dev/index.html
-          test -f site/build/preview.png
-
-      - name: Check documentation links and assets
-        run: python3 scripts/check-docs-links.py --site-build site/build
+          npm test
+          npm run build
+          test -f dist/index.html
+          test -f dist/docs/index.html
+          test -f dist/docs/playbooks/index.html
+          test -f dist/install/index.html
+          test -f dist/docs/dev/index.html
+          test ! -e dist/docs/dev/remote/index.html
+          test ! -e dist/docs/dev/introduction/index.html
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v5
         with:
-          path: site/build
+          path: website/dist
 
   deploy:
     name: Deploy Pages

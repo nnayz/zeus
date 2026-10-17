@@ -1,19 +1,19 @@
-Zeus — third-party attributions
+Taskmaster — third-party attributions
 ==================================
 
 GPUI (https://github.com/zed-industries/zed)
 --------------------------------------------
-The GPUI crates used by Zeus are pinned to a specific Zed revision. Crates
+The GPUI crates used by Taskmaster are pinned to a specific Zed revision. Crates
 marked Apache-2.0 by upstream remain under that license. Zed describes its
 repository as primarily GPL-3.0-or-later with Apache-2.0 components where
 marked.
 
-Zeus replaces GPUI's disabled, no-op `ztracing` profiling surface with a small
-independent Apache-2.0 compatibility implementation in `zeus/vendor/` so the
+Taskmaster replaces GPUI's disabled, no-op `ztracing` profiling surface with a small
+independent Apache-2.0 compatibility implementation in `taskmaster/vendor/` so the
 unused GPL logging/profiling implementation is not linked into release builds.
 
 The vendored `gpui_macos` renderer is an Apache-2.0 component from the same
-pinned revision, with the local changes described in `zeus/Cargo.toml`.
+pinned revision, with the local changes described in `taskmaster/Cargo.toml`.
 
 herdr (https://github.com/herdrdev/herdr)
 -----------------------------------------
@@ -23,32 +23,47 @@ A copy of the license is available at http://www.apache.org/licenses/LICENSE-2.0
 The screen-detection predicates in the following files are ADAPTED from
 herdr's TOML screen manifests (`src/detect/manifests/*.toml`):
 
-    Sources/ZeusCore/Resources/manifests/amp.json
-    Sources/ZeusCore/Resources/manifests/antigravity.json
-    Sources/ZeusCore/Resources/manifests/copilot.json
-    Sources/ZeusCore/Resources/manifests/devin.json
-    Sources/ZeusCore/Resources/manifests/droid.json
-    Sources/ZeusCore/Resources/manifests/grok.json
-    Sources/ZeusCore/Resources/manifests/hermes.json
-    Sources/ZeusCore/Resources/manifests/kilo.json
-    Sources/ZeusCore/Resources/manifests/kimi.json
-    Sources/ZeusCore/Resources/manifests/kiro.json
-    Sources/ZeusCore/Resources/manifests/opencode.json
-    Sources/ZeusCore/Resources/manifests/pi.json
-    Sources/ZeusCore/Resources/manifests/qoder.json
+    Sources/TaskmasterCore/Resources/manifests/amp.json
+    Sources/TaskmasterCore/Resources/manifests/antigravity.json
+    Sources/TaskmasterCore/Resources/manifests/copilot.json
+    Sources/TaskmasterCore/Resources/manifests/devin.json
+    Sources/TaskmasterCore/Resources/manifests/droid.json
+    Sources/TaskmasterCore/Resources/manifests/grok.json
+    Sources/TaskmasterCore/Resources/manifests/hermes.json
+    Sources/TaskmasterCore/Resources/manifests/kilo.json
+    Sources/TaskmasterCore/Resources/manifests/kimi.json
+    Sources/TaskmasterCore/Resources/manifests/kiro.json
+    Sources/TaskmasterCore/Resources/manifests/opencode.json
+    Sources/TaskmasterCore/Resources/manifests/pi.json
+    Sources/TaskmasterCore/Resources/manifests/qoder.json
 
 Changes made: the rules were translated from herdr's TOML rule schema into
-Zeus's JSON predicate schema, re-prioritised for Zeus's evaluator (which
+Taskmaster's JSON predicate schema, re-prioritised for Taskmaster's evaluator (which
 stops at the first matching rule by descending priority), restricted to the
-screen regions Zeus implements, and paired with capture regions. Rules that
+screen regions Taskmaster implements, and paired with capture regions. Rules that
 depend on herdr-only regions (`top_non_empty_lines`, `after_last_horizontal_rule`,
 `after_last_prompt_marker`) were dropped rather than approximated.
 
 The `"agent"` capability blocks in those files — binaries, resume specs,
 session-id flags, approve/deny keystrokes, env hygiene, injection wiring — are
-Zeus's own; herdr does not model most of them. Binary names and resume
+Taskmaster's own; herdr does not model most of them. Binary names and resume
 argv were cross-checked against herdr's `src/detect/mod.rs` and
 `src/agent_resume.rs`.
 
 The manifests for claude-code, codex, cursor, gemini, generic, and shell are
-Zeus's own and predate this attribution.
+Taskmaster's own and predate this attribution.
+
+Diri website (https://github.com/cristicretu/diri)
+---------------------------------------------------
+Licensed under the Apache License, Version 2.0.
+A copy of the license is available at http://www.apache.org/licenses/LICENSE-2.0
+
+The static website in `website/` is adapted from the Diri website: layout,
+styles, documentation chrome, icon set, and the small Markdown renderer.
+Product copy, the Taskmaster user guide, and playbooks are Taskmaster's own. Diri wordmarks
+are not included.
+
+Geist (https://github.com/vercel/geist-font)
+---------------------------------------------
+The site ships `website/assets/fonts/geist.woff2` under the SIL Open Font
+License. See `website/assets/fonts/GEIST-OFL.txt`.

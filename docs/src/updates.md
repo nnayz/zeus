@@ -3,9 +3,9 @@
 The updater is disabled for the current ad-hoc-signed release. It rejects
 builds that are not Developer ID signed and notarized, including v0.3.0. Until
 a qualifying release ships, download new versions manually from
-[GitHub Releases](https://github.com/nnayz/zeus/releases).
+[GitHub Releases](https://github.com/nnayz/taskmaster/releases).
 
-Once signed releases are available, Zeus will use the flow below. Checks are
+Once signed releases are available, Taskmaster will use the flow below. Checks are
 automatic; installing an update always waits for you.
 
 ## What you see
@@ -17,9 +17,9 @@ Checks run about 20 seconds after launch, then every 6 hours (toggleable in
    **Update to …** pill. Nothing else happens.
 2. Click it → **Downloading…** with progress → the bundle is verified and
    staged.
-3. Click **Restart to update…** → Zeus hands off to a helper and quits.
+3. Click **Restart to update…** → Taskmaster hands off to a helper and quits.
 
-Zeus holds live agent sessions, so it never relaunches itself uninvited.
+Taskmaster holds live agent sessions, so it never relaunches itself uninvited.
 **⌘K → Check for Updates…** and the version row in the account popover both run
 a manual check and report when you are already up to date.
 
@@ -38,7 +38,7 @@ At the feed layer, only strictly newer versions are offered (no downgrades), and
 downloads use HTTPS to the releases host. The feed URL is stable:
 
 ```text
-https://github.com/nnayz/zeus/releases/latest/download/appcast.json
+https://github.com/nnayz/taskmaster/releases/latest/download/appcast.json
 ```
 
 ## Local cache
@@ -46,13 +46,11 @@ https://github.com/nnayz/zeus/releases/latest/download/appcast.json
 Staging lives under:
 
 ```text
-~/Library/Caches/zeus/updates/<version>/
+~/Library/Caches/taskmaster/updates/<version>/
 ```
 
 If the app sits somewhere the user cannot write, the writability check fails
 *before* the download starts.
 
-Release packaging and updater implementation live in
-[`zeus/UPDATING.md`](https://github.com/nnayz/zeus/blob/main/zeus/UPDATING.md);
-the Developer Guide collects that alongside the rest of the engineering
-documents in [Releases and updates](dev/releases-and-updates.html).
+Release packaging steps live in [`taskmaster/UPDATING.md`](https://github.com/nnayz/taskmaster/blob/main/taskmaster/UPDATING.md)
+in the repository.

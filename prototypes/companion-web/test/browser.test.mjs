@@ -71,7 +71,7 @@ test('mobile browser: pair, inspect, explicit control, prompt, lifecycle cancel,
   await browser.evaluate(click('#reveal')); await browser.wait('document.querySelector("#connection").textContent === "Connected"');
   assert.equal(fixture.stats.prompts, 1);
   fixture.setMode('desktop');
-  await browser.wait('document.querySelector("#controller").textContent.includes("Zeus desktop")');
+  await browser.wait('document.querySelector("#controller").textContent.includes("Taskmaster desktop")');
   assert.equal(await browser.evaluate('document.querySelector("#send-prompt").disabled'), true);
   fixture.setMode('revoked');
   await browser.wait('document.querySelector("#connection").textContent === "Device revoked"');

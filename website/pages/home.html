@@ -1,0 +1,147 @@
+    <main id="main">
+      <section class="intro" aria-labelledby="page-title">
+        <div class="intro-heading">
+          <h1 id="page-title">Run coding agents side by side</h1>
+          <p><span class="sub-line">Claude Code, Codex, Cursor and 19 others, each in its own terminal.</span> <span class="sub-line">When one stops to ask you something, Taskmaster lets you know.</span></p>
+        </div>
+        <div class="intro-actions">
+          <a id="download-primary" class="button primary" href="{{dmg}}"><img class="button-mark" src="{{base}}/assets/brand/apple.svg" width="15" height="15" alt=""><span class="button-label">Download for macOS</span></a>
+          <details class="download-options">
+            <summary class="button secondary text-link">Other platforms<span class="icon" data-icon="chevron-down" aria-hidden="true"></span></summary>
+            <div class="download-menu">
+              <div class="download-menu-head"><span id="download-version">macOS 15+</span><a id="download-notes" href="{{notes}}">Release notes</a></div>
+              <div id="download-assets"></div>
+              <a href="{{base}}/install/">Install guide</a>
+              <span class="download-upcoming"><img src="{{base}}/assets/brand/windows.svg" width="12" height="12" alt="">Windows · in progress</span>
+              <a href="{{releases}}">All releases</a>
+            </div>
+          </details>
+        </div>
+      </section>
+
+
+      <section class="product" aria-label="Interactive Taskmaster preview" data-nosnippet>
+        <div class="desktop-stage">
+        <div class="app-window" id="demo-window" role="region" aria-label="Taskmaster workspace preview">
+          <aside class="app-sidebar" aria-label="Demo agents">
+            <div class="sidebar-top"><span class="traffic-lights" aria-hidden="true"><i></i><i></i><i></i></span><button class="icon-button" data-open="command" aria-label="Open commands"><span class="icon" data-icon="settings"></span></button><button class="icon-button" data-open="command" aria-label="Search conversations"><span class="icon" data-icon="search"></span></button><button class="icon-button" id="toggle-sidebar" aria-label="Collapse sidebar"><span class="icon" data-icon="sidebar"></span></button></div>
+            <div class="sidebar-rows">
+            <button class="new-chat" data-open="command"><span class="icon" data-icon="new-agent"></span>New Agent <span class="agent-logo new-chat-agent" data-agent="claude"></span></button>
+            <div class="sidebar-group"><span class="group-chevron"><span class="icon" data-icon="chevron-down"></span></span>Taskmaster</div>
+            <button class="chat-row selected" data-chat="release" aria-pressed="true"><span class="chat-state completed" aria-label="Completed"><span class="icon" data-icon="check"></span></span><span>Ship the 0.9 release</span><span class="agent-logo claude" data-agent="claude"></span></button>
+            <div class="chat-children" aria-label="Agents started by Ship the 0.9 release">
+              <div class="chat-row child" data-child-row><span class="chat-state completed" aria-label="Completed"><span class="icon" data-icon="check"></span></span><span>Write the release notes</span><span class="agent-logo" data-agent="codex"></span></div>
+              <div class="chat-row child" data-child-row><span class="chat-state completed" aria-label="Completed"><span class="icon" data-icon="check"></span></span><span>Verify the Linux build</span><span class="agent-logo claude" data-agent="claude"></span></div>
+              <div class="chat-row child" data-child-row><span class="chat-state completed" aria-label="Completed"><span class="icon" data-icon="check"></span></span><span>Test the updater</span><span class="agent-logo gemini" data-agent="gemini"></span></div>
+            </div>
+            <div class="chat-row static"><span class="chat-state working" aria-label="Working"><span class="icon" data-icon="working-0"></span></span><span>Fix the flaky reconnect test</span><span class="agent-logo" data-agent="codex"></span></div>
+            <div class="chat-row static"><span class="chat-state completed" aria-label="Completed"><span class="icon" data-icon="check"></span></span><span>Review PR #412: session restore</span><span class="agent-logo claude" data-agent="claude"></span></div>
+            <button class="chat-row" data-chat="website" aria-pressed="false"><span class="chat-state completed" aria-label="Completed"><span class="icon" data-icon="check"></span></span><span>Build the Taskmaster website</span><span class="agent-logo" data-agent="codex"></span></button>
+            <button class="chat-row" data-chat="notes" aria-pressed="false"><span class="chat-state needs-input" aria-label="Needs input"><span class="icon" data-icon="warning"></span></span><span>Weekly plan</span><span class="agent-logo claude" data-agent="claude"></span></button>
+            <button class="chat-row" data-chat="details" aria-pressed="false"><span class="chat-state working" aria-label="Working"><span class="icon" data-icon="working-0"></span></span><span>Keyboard navigation</span><span class="agent-logo" data-agent="cursor"></span></button>
+            <div class="sidebar-group second"><span class="group-chevron"><span class="icon" data-icon="chevron-down"></span></span>api</div>
+            <div class="chat-row static"><span class="chat-state working" aria-label="Working"><span class="icon" data-icon="working-0"></span></span><span>Rate limit the public API</span><span class="agent-logo claude" data-agent="claude"></span></div>
+            <div class="chat-row static"><span class="chat-state needs-input" aria-label="Needs input"><span class="icon" data-icon="warning"></span></span><span>Migrate auth to passkeys</span><span class="agent-logo" data-agent="codex"></span></div>
+            <div class="chat-row static"><span class="chat-state completed" aria-label="Completed"><span class="icon" data-icon="check"></span></span><span>Upgrade to Postgres 18</span><span class="agent-logo" data-agent="opencode"></span></div>
+            <div class="chat-row static"><span class="chat-state working" aria-label="Working"><span class="icon" data-icon="working-0"></span></span><span>Cut p95 latency on /search</span><span class="agent-logo" data-agent="cursor"></span></div>
+            <div class="sidebar-group second"><span class="group-chevron"><span class="icon" data-icon="chevron-down"></span></span>Experiments</div>
+            <div class="chat-row static"><span class="chat-state idle" aria-label="Hibernated"><span class="icon" data-icon="moon"></span></span><span>Benchmark the terminal parser</span><span class="agent-logo" data-agent="opencode"></span></div>
+            <button class="chat-row" data-chat="weekend" aria-pressed="false"><span class="chat-state idle" aria-label="Hibernated"><span class="icon" data-icon="moon"></span></span><span>Travel map</span><span class="agent-logo gemini" data-agent="gemini"></span></button>
+            </div>
+            <div class="sidebar-bottom">
+              <div class="sidebar-filter"><span class="icon" data-icon="search"></span>Filter agents</div>
+              <div class="account-summary"><span class="account-avatar" aria-hidden="true">G</span><span class="account-name">giga</span><span class="account-cost" title="Estimated usage cost today" aria-label="Estimated usage cost today: 19 dollars and 41 cents">$19.41</span><span class="icon" data-icon="chevron-up-down"></span></div>
+            </div>
+          </aside>
+          <div class="app-main">
+            <div class="app-titlebar"><span class="traffic-lights mobile-traffic-lights" aria-hidden="true"><i></i><i></i><i></i></span>
+              <span class="current-agent"><span class="agent-logo" data-agent="codex"></span><span id="agent-name" class="sr-only">Codex</span></span><span class="session-name" id="session-name">Build the Taskmaster website</span>
+              <div class="app-tools">
+                <button class="app-tool links-trigger" data-open="links" aria-expanded="false" aria-controls="links-panel"><span class="icon" data-icon="external-link"></span><span class="link-count">2</span></button>
+                <span class="pane-tool" aria-hidden="true"><span class="icon" data-icon="split"></span></span>
+                <span class="pane-tool" aria-hidden="true"><span class="icon" data-icon="expand"></span></span>
+                <button class="icon-button notification-trigger" data-open="notifications" aria-expanded="false" aria-controls="notifications-panel" aria-label="Open demo notifications"><span class="icon" data-icon="bell"></span></button>
+                <button class="icon-button" id="toggle-changes" aria-label="Toggle changes" aria-expanded="true"><span class="icon" data-icon="sidebar-right"></span></button>
+              </div>
+            </div>
+            <div class="terminal-body">
+            <div class="terminal" id="terminal-content" aria-live="polite"></div>
+            <div class="terminal-composer" aria-label="Example terminal prompt"><span>›</span><span>Ask a question or describe a task</span><span class="terminal-cursor" aria-hidden="true"></span></div>
+            <div class="terminal-footer"><span id="terminal-status">Completed</span><button data-open="command" aria-label="Explore the command menu"><span class="icon" data-icon="search"></span><kbd>⌘K</kbd></button></div>
+            </div>
+          </div>
+          <aside class="changes-panel" aria-label="Changes preview">
+            <div class="changes-header"><span class="icon" data-icon="code"></span><strong>Changes</strong><span class="diff-count"></span><button class="icon-button" id="close-changes" aria-label="Close changes"><span class="icon" data-icon="close"></span></button></div>
+            <div class="changes-content"></div>
+          </aside>
+          <div class="demo-shade" id="demo-shade" hidden></div>
+          <section class="palette floating-panel" id="palette" aria-label="Demo command menu" hidden>
+            <div class="palette-head"><button id="palette-back" class="icon-button" aria-label="Back to commands" hidden><span class="icon" data-icon="chevron-left"></span></button><span id="palette-search-icon" class="icon" data-icon="search"></span><input id="palette-input" aria-label="Search demo commands" placeholder="Search chats or run a command…" autocomplete="off" spellcheck="false" role="combobox" aria-expanded="true" aria-controls="palette-list" aria-autocomplete="list"><button class="escape-key" data-close aria-label="Close command menu">esc</button></div>
+            <div class="palette-list" id="palette-list" role="listbox" aria-label="Commands"></div>
+          </section>
+          <section class="links-panel floating-panel" id="links-panel" aria-label="Demo links" hidden>
+            <div class="floating-head"><span class="icon" data-icon="external-link"></span><span>Links</span><button class="escape-key" data-close aria-label="Close links">esc</button></div>
+            <a class="link-row" href="https://github.com/nnayz/taskmaster/pulls" target="_blank" rel="noopener noreferrer"><span class="icon pr-icon" data-icon="pull-request"></span><span><strong>Update website</strong><small>Pull request preview</small></span><span class="checks-label">Checks passed</span><span class="icon" data-icon="external-link"></span></a>
+            <button class="link-row" id="preview-website"><span class="icon" data-icon="monitor"></span><span><strong>Website</strong><small>Local preview</small></span><span class="icon" data-icon="external-link"></span></button>
+            <div class="link-context"><span class="icon" data-icon="branch"></span>Branch <span>design/website</span></div>
+          </section>
+          <section class="notifications-panel floating-panel" id="notifications-panel" aria-label="Demo notifications" hidden>
+            <div class="floating-head"><span class="icon" data-icon="bell"></span><span>Notifications</span><button class="escape-key" data-close aria-label="Close notifications">esc</button></div>
+            <button class="notification-row" data-chat="website"><span class="icon green-icon" data-icon="check-circle"></span><span><strong>Taskmaster website</strong><small>Codex finished</small></span></button>
+            <button class="notification-row" data-chat="notes"><span class="icon orange-icon" data-icon="bell"></span><span><strong>Weekly plan</strong><small>Claude has a question</small></span></button>
+          </section>
+        </div>
+        </div>
+      </section>
+
+
+      <section class="compatible" aria-label="Preview each agent"><div>
+        <button class="agent-switch" data-chat="notes" aria-pressed="false"><i class="agent-logo claude" data-agent="claude"></i>Claude Code</button>
+        <button class="agent-switch" data-chat="website" aria-pressed="true"><i class="agent-logo" data-agent="codex"></i>Codex</button>
+        <button class="agent-switch" data-chat="details" aria-pressed="false"><i class="agent-logo" data-agent="cursor"></i>Cursor</button>
+        <button class="agent-switch" data-chat="weekend" aria-pressed="false"><i class="agent-logo gemini" data-agent="gemini"></i>Gemini</button>
+        <span class="agent-chip"><i class="agent-logo" data-agent="pi"></i>Pi</span>
+        <span class="agent-chip"><i class="agent-logo" data-agent="opencode"></i>OpenCode</span>
+        <span class="agent-chip"><i class="agent-logo" data-agent="copilot"></i>Copilot</span>
+        <span class="agent-chip"><i class="agent-logo" data-agent="kimi"></i>Kimi</span>
+        <a class="agent-more" href="{{base}}/docs/">+14 more</a>
+      </div></section>
+
+      <section class="features" id="features" aria-labelledby="features-title">
+        <div class="features-heading"><h2 id="features-title">Features</h2><a href="{{base}}/docs/">Read the docs <span class="icon" data-icon="chevron-right" aria-hidden="true"></span></a></div>
+        <dl class="bento">
+          <div class="bento-card "><div class="bento-visual" aria-hidden="true"><div class="mini"><div class="mini-title">New Agent</div><div class="mini-row selected"><i class="agent-logo claude" data-agent="claude"></i><span>Claude Code</span><small>Opus</small></div><div class="mini-row"><i class="agent-logo" data-agent="codex"></i><span>Codex</span><small>gpt-6</small></div><div class="mini-row"><i class="agent-logo" data-agent="cursor"></i><span>Cursor</span><small>Auto</small></div><div class="mini-row mini-skeleton"><i></i><b></b><em></em></div></div></div><dt>Every agent you already use</dt><dd>Claude Code, Codex, Cursor, Gemini and 18 more, in their own real terminals, with your existing logins.</dd></div>
+          <div class="bento-card "><div class="bento-visual" aria-hidden="true"><div class="mini"><div class="mini-row"><span class="icon" data-icon="check" aria-hidden="true"></span><span>Ship the 0.9 release</span><i class="agent-logo claude" data-agent="claude"></i></div><div class="mini-tree"><div class="mini-row"><span class="icon" data-icon="check" aria-hidden="true"></span><span>Write the release notes</span><small>2m</small></div><div class="mini-row"><span class="icon" data-icon="check" aria-hidden="true"></span><span>Verify the Linux build</span><small>7m</small></div><div class="mini-row working"><span class="icon" data-icon="working-0" aria-hidden="true"></span><span>Test the updater</span><small>9m</small></div></div></div></div><dt>Agents that run agents</dt><dd>One prompt starts a team. Agents hand out tasks, follow progress and bring back one result.</dd></div>
+          <div class="bento-card "><div class="bento-visual" aria-hidden="true"><div class="mini"><div class="mini-title"><span class="icon" data-icon="bell" aria-hidden="true"></span>Notifications</div><div class="mini-row note"><span class="icon" data-icon="warning" aria-hidden="true"></span><span>Weekly plan</span><small>Claude has a question</small></div><div class="mini-row done"><span class="icon" data-icon="check-circle" aria-hidden="true"></span><span>Taskmaster website</span><small>Codex finished</small></div><div class="mini-row mini-skeleton"><i></i><b></b><em></em></div></div></div><dt>Know who needs you</dt><dd>One sidebar, not thirty terminals. Jump straight to the session that is waiting.</dd></div>
+          <div class="bento-card wide"><div class="bento-visual" aria-hidden="true"><div class="mini mini-table"><div class="mini-tr head"><span>Branch</span><span>Agent</span><span>Changes</span></div><div class="mini-tr"><span><span class="icon" data-icon="branch" aria-hidden="true"></span>fix/reconnect-test</span><span><i class="agent-logo" data-agent="codex"></i></span><span><b>+42</b> <s>−7</s></span></div><div class="mini-tr"><span><span class="icon" data-icon="branch" aria-hidden="true"></span>feat/passkeys</span><span><i class="agent-logo claude" data-agent="claude"></i></span><span><b>+318</b> <s>−40</s></span></div><div class="mini-tr"><span><span class="icon" data-icon="branch" aria-hidden="true"></span>perf/search-p95</span><span><i class="agent-logo" data-agent="cursor"></i></span><span><b>+27</b> <s>−12</s></span></div></div></div><dt>A workspace per agent</dt><dd>Each agent gets its own Git worktree and branch, so parallel work never collides.</dd></div>
+          <div class="bento-card wide"><div class="bento-visual" aria-hidden="true"><div class="mini mini-diff"><div class="mini-file"><span class="icon" data-icon="code" aria-hidden="true"></span>src/updater/linux.rs<small>+18 −6</small></div><code class="del">−    fs::rename(new, &amp;current)?;</code><code class="add">+    fs::rename(new, &amp;staged)?;</code><code class="add">+    verify_bundle(&amp;staged)?;</code></div><div class="mini mini-pr"><span class="icon" data-icon="pull-request" aria-hidden="true"></span><span>Swap the bundle atomically</span><small><span class="icon" data-icon="check" aria-hidden="true"></span>Checks passed</small></div></div><dt>Review and ship</dt><dd>Inspect diffs, commit, and follow the pull request from the session that did the work.</dd></div>
+        </dl>
+        <dl class="bento-small">
+          <div class="bento-card small"><span class="icon" data-icon="moon" aria-hidden="true"></span><dt>Sessions that stay open</dt><dd>Close Taskmaster and agents keep working. Idle ones hibernate.</dd></div>
+          <div class="bento-card small"><span class="icon" data-icon="server" aria-hidden="true"></span><dt>Remote machines</dt><dd>Run sessions on your own SSH hosts, with no hosted relay.</dd></div>
+          <div class="bento-card small"><span class="icon" data-icon="monitor" aria-hidden="true"></span><dt>iPhone companion</dt><dd>Answer questions and review changes from your phone. Beta.</dd></div>
+          <div class="bento-card small"><span class="icon" data-icon="clock" aria-hidden="true"></span><dt>Conversation history</dt><dd>Find and resume past Claude and Codex chats, even ones started elsewhere.</dd></div>
+          <div class="bento-card small"><span class="icon" data-icon="refresh" aria-hidden="true"></span><dt>Handoffs &amp; forks</dt><dd>Pass a task and its context to another agent, or fork the conversation.</dd></div>
+          <div class="bento-card small"><span class="icon" data-icon="local-agents" aria-hidden="true"></span><dt>Usage &amp; limits</dt><dd>Spend, tokens, context and plan limits beside your sessions.</dd></div>
+          <div class="bento-card small"><span class="icon" data-icon="user" aria-hidden="true"></span><dt>Work &amp; personal accounts</dt><dd>Choose a Claude or Codex account for each session.</dd></div>
+          <div class="bento-card small"><span class="icon" data-icon="note" aria-hidden="true"></span><dt>Notes &amp; to-dos</dt><dd>Plans next to your agents. Any to-do can start one.</dd></div>
+          <div class="bento-card small"><span class="icon" data-icon="keyboard" aria-hidden="true"></span><dt>Command menu</dt><dd>Chats, projects and settings one ⌘K away. Rebind any shortcut.</dd></div>
+          <div class="bento-card small"><span class="icon" data-icon="code" aria-hidden="true"></span><dt>Files &amp; source</dt><dd>Open file references from output and search symbols in place.</dd></div>
+          <div class="bento-card small"><span class="icon" data-icon="file" aria-hidden="true"></span><dt>Skill library</dt><dd>Search, read and copy personal, project and plugin skills.</dd></div>
+          <div class="bento-card small"><span class="icon" data-icon="shield" aria-hidden="true"></span><dt>Free &amp; open source</dt><dd>Apache 2.0, native Rust, no Electron, no account.</dd></div>
+        </dl>
+        <section class="more-section" aria-labelledby="guides-title">
+          <div class="features-heading"><h2 id="guides-title">Guides</h2><a href="{{base}}/docs/playbooks/">All guides <span class="icon" data-icon="chevron-right" aria-hidden="true"></span></a></div>
+          <dl class="bento-small guide-cards">
+            <div class="bento-card small guide-card"><dt><a href="{{base}}/docs/getting-started/">Your first agent</a></dt><dd>Install an agent, give it a task in plain English, and answer it when it asks.</dd><span class="icon" data-icon="chevron-right" aria-hidden="true"></span></div>
+            <div class="bento-card small guide-card"><dt><a href="{{base}}/docs/playbooks/delegate/">Let agents work as a team</a></dt><dd>Ask one agent to split a big job, start helpers, and bring you one result.</dd><span class="icon" data-icon="chevron-right" aria-hidden="true"></span></div>
+            <div class="bento-card small guide-card"><dt><a href="{{base}}/docs/playbooks/idle-and-limits/">Never lose your work</a></dt><dd>What keeps running when you close Taskmaster, and how to get any conversation back.</dd><span class="icon" data-icon="chevron-right" aria-hidden="true"></span></div>
+            <div class="bento-card small guide-card"><dt><a href="{{base}}/docs/playbooks/local-or-remote/">Run agents on your own server</a></dt><dd>Start agents on a machine you control over SSH, with nothing to install by hand.</dd><span class="icon" data-icon="chevron-right" aria-hidden="true"></span></div>
+          </dl>
+        </section>
+        <section class="more-section" id="faq" aria-labelledby="faq-title">
+          <div class="features-heading"><h2 id="faq-title">Questions</h2></div>
+          <dl class="faq-grid"><div><dt>Is Taskmaster free?</dt><dd>Yes. Taskmaster is free and open source under Apache 2.0. You only pay for the agents you use, through your own Claude, ChatGPT or other accounts.</dd></div><div><dt>Which agents does it work with?</dt><dd>Claude Code, Codex, Cursor, Gemini, OpenCode, Pi, Copilot, Kimi and more: 22 agent definitions ship with the app, and any terminal agent can be added with a short JSON file.</dd></div><div><dt>Do I need to know how to code?</dt><dd>No. You describe tasks in plain English and the agents do the work. The guides are written for marketers and product managers as well as developers.</dd></div><div><dt>What happens when I close Taskmaster?</dt><dd>Your agents keep working. Reopen Taskmaster and every session is where you left it. Restarting your Mac stops them, but Claude Code, Codex and most others can resume the same conversation.</dd></div><div><dt>Can agents work together?</dt><dd>Yes. Claude Code, Codex and Cursor sessions started in Taskmaster can start other agents, hand them tasks, and collect their results. Ask in plain English, starting with “Use Taskmaster to…”.</dd></div><div><dt>Does Taskmaster see my code or prompts?</dt><dd>No. Agents run on your Mac or your own servers, with no Taskmaster account and no hosted relay. Nothing is uploaded to Taskmaster.</dd></div><div><dt>Which platforms are supported?</dt><dd>macOS 15 or newer, Apple silicon and Intel, from one universal build.</dd></div></dl>
+        </section>
+      </section>
+    </main>

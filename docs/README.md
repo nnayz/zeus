@@ -1,56 +1,60 @@
 # Documentation
 
-Zeus documentation is split by audience into two [mdBook](https://rust-lang.github.io/mdBook/)
-sources, published together on the documentation site:
+Taskmaster has two guides. Only one of them is a website.
 
-| Guide | Source | Audience | Published at |
-|-------|--------|----------|--------------|
-| User Guide | `docs/` | People using Zeus | `/docs/` |
-| Developer Guide | [`developer-docs/`](../developer-docs/) | People building, extending, or maintaining Zeus | `/docs/dev/` |
+| Guide | Who it is for | Source | Published |
+|-------|----------------|--------|-----------|
+| User guide, including playbooks | Installing and operating Taskmaster | `docs/src/` | [nnayz.github.io/taskmaster/docs/](https://nnayz.github.io/taskmaster/docs/) |
+| Developer guide | Building, testing, and maintaining Taskmaster | `docs/dev/src/` | GitHub only. Not on the website. |
 
-Canonical engineering documents (`zeus/REMOTE_PORT.md`, `zeus/PACKAGING.md`,
-`zeus/UPDATING.md`, the Companion records) stay next to the code and are
-linked from the Developer Guide's
-[Engineering documents](../developer-docs/src/engineering-documents.md) index.
-Neither book keeps a competing copy.
+Playbooks are user-facing pages under the same `/docs/` base, at
+`/docs/playbooks/`. They are not a separate site. The website in `website/`
+renders both from `docs/src/SUMMARY.md`. There is no mdBook and no Fumadocs
+build.
 
-## Build and preview
+## Where a new page goes
+
+Put operator instructions in `docs/src/` and add them to `docs/src/SUMMARY.md`.
+That includes CLI commands and advanced remote workflows when they explain
+how to use Taskmaster. Task write-ups with prerequisites, steps, expected results,
+and pitfalls go under `docs/src/playbooks/` and in the Playbooks section of
+`SUMMARY.md`.
+
+Put contributor instructions in `docs/dev/src/` and add them to
+`docs/dev/src/SUMMARY.md`. That includes the workspace map, manifests, tests,
+packaging, and pointers at Engine, Holder, and Companion internals. Do not add
+those pages to the website.
+
+Do not copy an architecture decision into either guide when a canonical file
+already exists. Link it from `docs/dev/src/engineering-index.md` instead.
+`taskmaster/REMOTE_PORT.md`, `taskmaster/PACKAGING.md`, `taskmaster/UPDATING.md`, and the
+Companion specs are the sources of truth for their subjects.
+`taskmaster/PORT.md` and `taskmaster/PLAN.md` are historical. Say so if you cite them.
+
+If a user-guide URL must change, add a redirect in `website/scripts/docs.mjs`
+and repair links. Leaving the old chapter in `docs/src/SUMMARY.md` puts it
+back into the website navigation and search.
+
+## Preview and check
+
+Node.js 22 or newer. From the repository root:
 
 ```sh
-# from the repository root
-mdbook serve docs --open             # User Guide  → http://localhost:3000
-mdbook serve developer-docs --open   # Developer Guide
-mdbook build docs                    # output in docs/book/
-mdbook build developer-docs          # output in developer-docs/book/
+cd website
+npm test
+npm run dev
 ```
 
-Install mdBook with `cargo install mdbook --locked` or `brew install mdbook`.
+User guide: <http://127.0.0.1:4177/docs/>. Playbooks:
+<http://127.0.0.1:4177/docs/playbooks/>.
 
-If your shell is already in a book directory, drop the extra path:
+GitHub Pages publishes `website/dist` with `BASE_PATH` set, so the same tree
+is served at `https://nnayz.github.io/taskmaster/docs/`.
 
-```sh
-cd docs
-mdbook serve --open
-```
+## User guide chapters
 
-Do not run `mdbook serve docs` from `docs/` or `docs/book/`. That looks for
-`docs/src/SUMMARY.md` under the current directory and fails.
-
-## Check links and assets
-
-```sh
-python3 scripts/check-docs-links.py                  # both sources
-mdbook build docs && mdbook build developer-docs
-python3 scripts/check-docs-links.py --site-build site/build   # assembled output
-```
-
-The checker validates internal links, anchors, images, and the compatibility
-redirects. The Pages workflow runs it on the assembled site before upload.
-
-## User Guide contents
-
-| Book page | Source |
-|-----------|--------|
+| Section | Source |
+|---------|--------|
 | Introduction | [`src/introduction.md`](src/introduction.md) |
 | Getting started | [`src/getting-started.md`](src/getting-started.md) |
 | The workbench | [`src/workbench.md`](src/workbench.md) |
@@ -72,22 +76,7 @@ redirects. The Pages workflow runs it on the assembled site before upload.
 | Support | [`src/support.md`](src/support.md) |
 | Roadmap | [`src/roadmap.md`](src/roadmap.md) |
 
-## Where new documentation goes
-
-- **Using Zeus** → User Guide. Task-oriented workflows belong in the
-  [Playbooks](src/playbooks/) section.
-- **Building or maintaining Zeus** → Developer Guide, whose
-  [Writing documentation](../developer-docs/src/writing-documentation.md)
-  page has the full placement rules, cross-guide link convention, and the
-  page-move/redirect policy.
-- **Architecture decisions and protocol contracts** → their canonical
-  repository location next to the code; link them from the Developer Guide.
-
-## Moved pages
-
-Pages that moved from the User Guide to the Developer Guide leave a
-compatibility file at the old path (a meta refresh plus a visible link), so
-existing URLs keep working:
-
-- `src/companion-architecture.html` → Developer Guide
-- `src/screenshot-soak.html` → Developer Guide
+Companion architecture and the screenshot soak test are developer pages:
+[`dev/src/companion-architecture.md`](dev/src/companion-architecture.md) and
+[`dev/src/testing.md`](dev/src/testing.md). Old user-guide URLs redirect to
+GitHub.

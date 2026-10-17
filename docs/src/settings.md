@@ -12,7 +12,7 @@ trailing edge, inspector on the leading one.
 
 **Word wrap.** Soft-wraps long lines in inspector Review and Code.
 
-**Start Zeus at login.** Opens the app after you sign in to macOS. Sessions
+**Start Taskmaster at login.** Opens the app after you sign in to macOS. Sessions
 were already alive (the Engine outlives the window). This just puts the
 glass in front of you.
 
@@ -33,8 +33,8 @@ folder plus parents of open projects.
 ## Terminal
 
 **Color theme.** Applies to the app chrome and every open terminal at
-once. The catalog includes the monochromatic Zeus Dark (default), Zeus Dark
-High Contrast, Zeus Light, Solarized, Dracula, One Dark, Gruvbox, Tokyo Night,
+once. The catalog includes the monochromatic Taskmaster Dark (default), Taskmaster Dark
+High Contrast, Taskmaster Light, Solarized, Dracula, One Dark, Gruvbox, Tokyo Night,
 Catppuccin, Vesper, Nord, Rosé Pine, Kanagawa, Everforest, GitHub Light, and
 friends.
 
@@ -57,7 +57,7 @@ overnight runs stay polite.
 
 Add, edit, or remove SSH execution hosts here. That is the supported path.
 The on-disk catalog is
-`~/Library/Application Support/Zeus/hosts.json` if you prefer to edit JSON.
+`~/Library/Application Support/Taskmaster/hosts.json` if you prefer to edit JSON.
 
 Each host has a name, an SSH destination (`you@forge` or an `~/.ssh/config`
 alias), a default remote cwd, and optional first-party node fields

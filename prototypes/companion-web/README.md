@@ -1,9 +1,9 @@
-# Zeus Companion web prototype (#74)
+# Taskmaster Companion web prototype (#74)
 
 An isolated, command-oriented mobile/PWA client for the curated Companion API.
 This directory is development tooling, outside the Rust workspace and shipped
 product. It adds no Swift, Engine behavior, Holder transport, or runtime
-dependency to Zeus. The Node server is a **synthetic loopback fixture**, never a
+dependency to Taskmaster. The Node server is a **synthetic loopback fixture**, never a
 gateway. Real actions go through the #73 Rust gateway and authoritative Engine.
 
 ## Run the fixture
@@ -41,9 +41,9 @@ measurement harness live in `scripts/`.
 
 ## Gateway contract
 
-The authority is `zeus/crates/zeus-companion-api/src/lib.rs` from #73 (initial
+The authority is `taskmaster/crates/taskmaster-companion-api/src/lib.rs` from #73 (initial
 DTO foundation commit `76d4c4a`). Browser-facing DTOs are snake_case and remain
-independent of internal `zeus-proto`/`remote_pty` structs. The adapter is
+independent of internal `taskmaster-proto`/`remote_pty` structs. The adapter is
 `public/client.js`; its public methods expose only the operations below.
 
 | Operation | External route and key fields |
@@ -97,7 +97,7 @@ The PWA does not configure proxies, certificates, Tailscale, or bind addresses.
 The pairing payload entered into the form is:
 
 ```json
-{"origin":"https://zeus.example","server_id":"EXPECTED_ID","code":"ONE_TIME_CODE","expires_at_ms":1790000000000}
+{"origin":"https://taskmaster.example","server_id":"EXPECTED_ID","code":"ONE_TIME_CODE","expires_at_ms":1790000000000}
 ```
 
 Use the actual short-lived payload from the local enrollment tool, not this

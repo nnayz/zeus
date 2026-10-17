@@ -1,0 +1,24 @@
+[package]
+name = "taskmaster-node"
+version = "0.3.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "taskmaster-node"
+path = "src/main.rs"
+
+[dependencies]
+taskmaster-client.workspace = true
+taskmaster-proto.workspace = true
+taskmaster-usage.workspace = true
+getrandom.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -192,11 +192,11 @@ async function forgetDevice() {
     const registration = await navigator.serviceWorker?.getRegistration();
     registration?.active?.postMessage('delete-shell'); await registration?.unregister();
   } catch { /* Browser storage restrictions must not prevent local unpair. */ }
-  notice(revoked ? 'Device revoked. Local credentials and session data deleted.' : 'Local credentials and session data deleted. Server revocation could not be confirmed. Revoke this device on your Zeus computer.'); render();
+  notice(revoked ? 'Device revoked. Local credentials and session data deleted.' : 'Local credentials and session data deleted. Server revocation could not be confirmed. Revoke this device on your Taskmaster computer.'); render();
 }
 $('unpair').addEventListener('click', () => {
   if (state.busy) return;
-  state.dialog = { action: 'unpair' }; $('confirm-title').textContent = 'Revoke and delete local data?'; $('confirm-description').textContent = 'Revoke this device and delete this tab’s credential and session data. If the gateway is unreachable, local deletion still completes and you must revoke the device on your Zeus computer.'; $('rename-label').hidden = true; $('confirm-action').textContent = 'Revoke and delete'; $('confirmation').showModal();
+  state.dialog = { action: 'unpair' }; $('confirm-title').textContent = 'Revoke and delete local data?'; $('confirm-description').textContent = 'Revoke this device and delete this tab’s credential and session data. If the gateway is unreachable, local deletion still completes and you must revoke the device on your Taskmaster computer.'; $('rename-label').hidden = true; $('confirm-action').textContent = 'Revoke and delete'; $('confirmation').showModal();
 });
 function hideScreen() {
   if (state.hidden) return;

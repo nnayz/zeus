@@ -1,8 +1,8 @@
 # Orchestration
 
-Zeus is most itself when one agent runs others. A hosted session can spawn a
+Taskmaster is most itself when one agent runs others. A hosted session can spawn a
 child, wait until it is done or stuck, read the output, answer a prompt, and
-release it. Those children are real Zeus sessions, grouped under their lead
+release it. Those children are real Taskmaster sessions, grouped under their lead
 in the sidebar, with their own terminal and Review diffs.
 
 This is powerful. A spawned agent runs as your macOS user. Only talk to
@@ -10,11 +10,11 @@ agents you trust, and read what they ask before you approve it.
 
 ## You do not configure MCP by hand
 
-For Claude Code, Codex, Grok, OpenCode, Gemini, and Cursor, Zeus writes a
+For Claude Code, Codex, Grok, OpenCode, Gemini, and Cursor, Taskmaster writes a
 per-session MCP overlay when it launches the process. The agent sees a
-`zeus` server. You do not paste JSON into a dotfile for the default path.
+`taskmaster` server. You do not paste JSON into a dotfile for the default path.
 
-Codex's built-in multi-agent spawn is turned off on purpose while Zeus is
+Codex's built-in multi-agent spawn is turned off on purpose while Taskmaster is
 hosting it. Those inner workers never become sidebar sessions. `spawn_agent`
 is the path that does.
 
@@ -24,7 +24,7 @@ A plain `⌥⌘T` shell does not get this server.
 
 | Tool | When to use it |
 |------|----------------|
-| `spawn_agent` | Open a **new** Zeus session nested under this one. Pass `kind`, `cwd`, optional `worktree`, `name`, and `prompt`. `worktree` is local only. This is the only spawn that shows up in the UI. |
+| `spawn_agent` | Open a **new** Taskmaster session nested under this one. Pass `kind`, `cwd`, optional `worktree`, `name`, and `prompt`. `worktree` is local only. This is the only spawn that shows up in the UI. |
 | `list_agents` | Survey the fleet: id, kind, title, status, parent, cwd. |
 | `list_children` | Just the sessions this lead spawned. |
 | `get_status` | One session: working, idle, needsInput (with detail), or exited. |
@@ -36,7 +36,7 @@ A plain `⌥⌘T` shell does not get this server.
 | `create_worktree` / `list_worktrees` / `remove_worktree` | Isolate parallel git work. |
 | `whoami` | The calling session's id, kind, cwd, and parent. |
 
-`zeus mcp-tools` prints the live catalog. `zeus mcp-call --tool list_agents`
+`taskmaster mcp-tools` prints the live catalog. `taskmaster mcp-call --tool list_agents`
 is the one-shot CLI for the same socket.
 
 ## How to ask
@@ -63,7 +63,7 @@ tell the lead to `send_prompt`.
 - **Send the assignment after the child is ready.** MCP `spawn_agent` returns
   `pendingPrompt`. The Engine does not type it. The lead should
   `wait_for_agent` (or wait until the child is idle) and then `send_prompt`.
-  The CLI `--prompt` flag is different: `zeus session spawn` injects that
+  The CLI `--prompt` flag is different: `taskmaster session spawn` injects that
   text once the agent can take it.
 - **Wait with a timeout.** `wait_for_agent` defaults to five minutes. Long
   jobs should say so.
@@ -72,30 +72,30 @@ tell the lead to `send_prompt`.
 
 ## CLI as a second conductor
 
-Anything MCP can do, the `zeus` CLI can do from a script or from another
+Anything MCP can do, the `taskmaster` CLI can do from a script or from another
 terminal:
 
 ```sh
-zeus session spawn codex --cwd ~/src/mldrills --worktree \
+taskmaster session spawn codex --cwd ~/src/mldrills --worktree \
   --title auth-rewrite \
   --prompt "Implement the JWT refresh plan in AGENTS.md. Stop at a passing test."
 
-zeus session wait <id> --until done --timeout 1200
-zeus session read <id> --source output --lines 80
+taskmaster session wait <id> --until done --timeout 1200
+taskmaster session read <id> --source output --lines 80
 ```
 
 See [Command line](cli.md). The bridge itself — how the MCP overlay is
-injected, the hooks, and the server binary — is documented in the Developer
-Guide: [MCP, hooks, and automation](dev/mcp-and-hooks.html).
+injected, the hooks, and the server binary — is documented in the
+[developer guide on GitHub](dev/manifests.html).
 
 ## What not to do
 
-- Do not tell Codex to "use its subagents" while it is hosted in Zeus. Those
+- Do not tell Codex to "use its subagents" while it is hosted in Taskmaster. Those
   stay inside one PTY. The sidebar will look empty and you will have lost
   the plot.
 - Do not expect a local lead to MCP-spawn onto a remote host. `host` is not
   a supported MCP argument yet. Start remote sessions from the palette or
-  `zeus session spawn --host`, then orchestrate children on that same
+  `taskmaster session spawn --host`, then orchestrate children on that same
   machine.
 - Do not confuse a worktree with a sandbox. Children still have your keys.
 - Do not skip Review. Orchestration without an accept step is just more

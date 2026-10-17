@@ -27,13 +27,13 @@ for tool in bash cargo python3; do
 done
 
 echo "==> Shell and release publishing guards"
-bash -n "${root}"/scripts/*.sh "${root}"/ios/scripts/*.sh "${root}"/zeus/scripts/*.sh
-bash "${root}/zeus/scripts/test-publish-github-release.sh"
-bash "${root}/zeus/scripts/test-publish-homebrew-cask.sh"
+bash -n "${root}"/scripts/*.sh "${root}"/ios/scripts/*.sh "${root}"/taskmaster/scripts/*.sh
+bash "${root}/taskmaster/scripts/test-publish-github-release.sh"
+bash "${root}/taskmaster/scripts/test-publish-homebrew-cask.sh"
 
 echo "==> Rust workspace"
 (
-    cd "${root}/zeus"
+    cd "${root}/taskmaster"
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
     cargo test --workspace
@@ -52,8 +52,8 @@ if [[ "${run_browser}" == "1" ]]; then
         npx playwright install chromium webkit firefox
     )
     (
-        cd "${root}/zeus"
-        cargo test -p zeus-engine browser
+        cd "${root}/taskmaster"
+        cargo test -p taskmaster-engine browser
     )
 fi
 

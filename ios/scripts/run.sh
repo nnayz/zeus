@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build and launch ZeusCompanion on an iOS simulator.
+# Build and launch TaskmasterCompanion on an iOS simulator.
 #
 # Usage: scripts/run.sh [--release] [--device NAME|UDID]
 #
@@ -10,16 +10,16 @@ set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ios_dir="$(cd "${script_dir}/.." && pwd)"
-configuration="${ZEUS_IOS_CONFIGURATION:-Debug}"
-requested_simulator="${ZEUS_IOS_SIMULATOR:-}"
-bundle_id="${ZEUS_IOS_BUNDLE_ID:-com.zeus.companion}"
-derived_data="${ZEUS_IOS_DERIVED_DATA:-${ios_dir}/.build}"
+configuration="${TASKMASTER_IOS_CONFIGURATION:-Debug}"
+requested_simulator="${TASKMASTER_IOS_SIMULATOR:-}"
+bundle_id="${TASKMASTER_IOS_BUNDLE_ID:-com.taskmaster.companion}"
+derived_data="${TASKMASTER_IOS_DERIVED_DATA:-${ios_dir}/.build}"
 
 usage() {
     cat <<'USAGE'
 Usage: scripts/run.sh [--release] [--device NAME|UDID]
 
-Build and launch ZeusCompanion on an iOS simulator.
+Build and launch TaskmasterCompanion on an iOS simulator.
 
 Options:
   --release        Build with the Release configuration.
@@ -29,9 +29,9 @@ Options:
   -h, --help       Show this help.
 
 Environment:
-  ZEUS_IOS_SIMULATOR  Simulator used when --device is absent.
-  ZEUS_IOS_BUNDLE_ID  Bundle identifier to launch (default: com.zeus.companion).
-  ZEUS_IOS_CONFIGURATION, ZEUS_IOS_DERIVED_DATA
+  TASKMASTER_IOS_SIMULATOR  Simulator used when --device is absent.
+  TASKMASTER_IOS_BUNDLE_ID  Bundle identifier to launch (default: com.taskmaster.companion).
+  TASKMASTER_IOS_CONFIGURATION, TASKMASTER_IOS_DERIVED_DATA
                       See scripts/build.sh.
 USAGE
 }
@@ -131,10 +131,10 @@ xcrun simctl bootstatus "${udid}" -b
 # Best effort: install and launch also work without the Simulator UI.
 open -a Simulator >/dev/null 2>&1 || true
 
-ZEUS_IOS_CONFIGURATION="${configuration}" ZEUS_IOS_DERIVED_DATA="${derived_data}" \
+TASKMASTER_IOS_CONFIGURATION="${configuration}" TASKMASTER_IOS_DERIVED_DATA="${derived_data}" \
     "${script_dir}/build.sh" --destination "platform=iOS Simulator,id=${udid}"
 
-app="${derived_data}/Build/Products/${configuration}-iphonesimulator/ZeusCompanion.app"
+app="${derived_data}/Build/Products/${configuration}-iphonesimulator/TaskmasterCompanion.app"
 if [[ ! -d "${app}" ]]; then
     echo "error: built app not found at ${app}" >&2
     exit 1

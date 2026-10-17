@@ -1,0 +1,14 @@
+{
+  "name": "taskmaster-website",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node scripts/build.mjs && node server.mjs",
+    "build": "node scripts/build.mjs",
+    "test": "node --test scripts/*.test.mjs",
+    "check": "node --check scripts/render.mjs && node --check scripts/docs.mjs && node --check scripts/pages.mjs && node --check scripts/site.mjs && node --check scripts/build.mjs && node --check server.mjs && node --check docs.js && node --check docs-search.js && node --check downloads.js && node --check stats.js"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

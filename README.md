@@ -1,32 +1,32 @@
 <div align="center">
-  <img src="docs/src/images/zeus-header.svg" width="100%" alt="Zeus: A Native Command Center for Coding Agents">
+  <img src="docs/src/images/taskmaster-header.svg" width="100%" alt="Taskmaster: A Native Command Center for Coding Agents">
 
   <p>
-    <a href="https://github.com/nnayz/zeus/actions/workflows/ci.yml"><img src="https://github.com/nnayz/zeus/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-    <a href="https://github.com/nnayz/zeus/releases/latest"><img src="https://img.shields.io/github/v/release/nnayz/zeus" alt="GitHub release"></a>
+    <a href="https://github.com/nnayz/taskmaster/actions/workflows/ci.yml"><img src="https://github.com/nnayz/taskmaster/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+    <a href="https://github.com/nnayz/taskmaster/releases/latest"><img src="https://img.shields.io/github/v/release/nnayz/taskmaster" alt="GitHub release"></a>
   </p>
 </div>
 
-Zeus is a native macOS command center for coding agents. It gives Claude Code,
+Taskmaster is a native macOS command center for coding agents. It gives Claude Code,
 Codex, Cursor, Grok, OpenCode, Gemini, and ordinary shells their own live
 terminals, then lets you run them side by side in local Git worktrees or on
 machines reached through SSH.
 
 Every session advertises a simple state: working, waiting for you, or finished.
 You can supervise the group without continually scanning terminal output. The
-sessions belong to a background Engine, not the window: quitting Zeus does not
+sessions belong to a background Engine, not the window: quitting Taskmaster does not
 stop them, and an Engine restart can recover their conversations.
 
-![Zeus desktop app preview](site/static/preview.png)
+![Taskmaster desktop app preview](site/static/preview.png)
 
-## Get Zeus
+## Get Taskmaster
 
-Zeus requires macOS 15 or later. Version 0.3.0 is available as a universal DMG
-from the [GitHub release](https://github.com/nnayz/zeus/releases/tag/v0.3.0).
-Download it, move Zeus into Applications, then right-click the app and choose
+Taskmaster requires macOS 15 or later. Version 0.3.0 is available as a universal DMG
+from the [GitHub release](https://github.com/nnayz/taskmaster/releases/tag/v0.3.0).
+Download it, move Taskmaster into Applications, then right-click the app and choose
 **Open**. The package supports both Apple silicon and Intel Macs.
 
-The [illustrated macOS install guide](https://nnayz.github.io/zeus/install/)
+The [illustrated macOS install guide](https://nnayz.github.io/taskmaster/install/)
 shows the complete one-time Gatekeeper flow, including the **Privacy &
 Security → Open Anyway** fallback.
 
@@ -50,18 +50,15 @@ Developer ID signing and Apple notarization are in place.
 4. Review proposed changes in the inspector's **Review** tab. You can close and
    reopen the app without surrendering the PTYs held by the Engine.
 
-The complete guide is published at [docs.zeus.nasrul.info](https://docs.zeus.nasrul.info).
-That is the **User Guide**: the workbench, shortcuts, agent setup,
-orchestration, fleet patterns, remote execution, playbooks, and removal. Its
-source is [`docs/`](docs/); preview it with `mdbook serve docs`.
-
-Building or maintaining Zeus? The **Developer Guide** covers development
-setup, the crate map, agent manifests, tests, packaging, and releases. Its
-source is [`developer-docs/`](developer-docs/); preview it with
-`mdbook serve developer-docs`.
+The [user guide](https://nnayz.github.io/taskmaster/docs/) covers the workbench,
+shortcuts, agent setup, orchestration, fleet patterns, remote execution, and
+removal. [Playbooks](https://nnayz.github.io/taskmaster/docs/playbooks/) are part of
+that same site. The [developer guide](docs/dev/src/introduction.md) stays in
+the repository. To preview the site locally, run `npm test && npm run dev`
+inside [`website/`](website/).
 
 The monorepo also contains a native SwiftUI iOS Companion at
-[`ios/ZeusCompanion/`](ios/ZeusCompanion/). It connects to the private-network
+[`ios/TaskmasterCompanion/`](ios/TaskmasterCompanion/). It connects to the private-network
 Companion HTTPS gateway and keeps its pairing token in the iOS Keychain. See
 the [iOS Companion guide](docs/src/ios-companion.md).
 
@@ -70,47 +67,45 @@ the [iOS Companion guide](docs/src/ios-companion.md).
 - **Parallel sessions without terminal juggling.** Every agent receives a real
   PTY. Sessions can share a project, occupy isolated worktrees, or execute on an
   SSH host.
-- **State at a glance.** Zeus interprets the screen an agent actually renders
+- **State at a glance.** Taskmaster interprets the screen an agent actually renders
   and reduces it to useful states such as active, attention required, and done.
 - **Processes independent of the UI.** PTYs are retained outside the desktop
   process, so closing the window does not end the work behind it.
-- **Agent-driven coordination.** Through Zeus's MCP interface, one running agent
+- **Agent-driven coordination.** Through Taskmaster's MCP interface, one running agent
   can create another session, observe it, collect its output, and respond when
   it asks a question.
 
 Claude Code and Codex currently have the deepest resume and state integration.
 Cursor, Grok, OpenCode, Gemini, and the rest of the catalog still receive a full
-PTY and sidebar presence. If no manifest exists for a command, Zeus opens it as
+PTY and sidebar presence. If no manifest exists for a command, Taskmaster opens it as
 a basic terminal and reports only whether it is running or has exited.
 
 ## How it is assembled
 
-![Zeus architecture](docs/src/images/zeus-architecture.svg)
+![Taskmaster architecture](docs/src/images/taskmaster-architecture.svg)
 
 The desktop and session machinery are implemented in Rust:
 
-- **Desktop application:** `zeus`, built with
+- **Desktop application:** `taskmaster`, built with
   [GPUI](https://github.com/zed-industries/zed), renders the workbench, terminal,
-  sidebar, command palette, and usage views. Its workspace is [`zeus/`](zeus/).
-- **Local Engine:** `zeusd-rs` owns the session registry, child processes, PTYs,
+  sidebar, command palette, and usage views. Its workspace is [`taskmaster/`](taskmaster/).
+- **Local Engine:** `taskmasterd-rs` owns the session registry, child processes, PTYs,
   persistence, worktrees, and local control socket. It is launched by the app
   but is able to remain alive after the app exits.
-- **Session holders:** `zeus-holder` retains local PTY ownership across Engine
+- **Session holders:** `taskmaster-holder` retains local PTY ownership across Engine
   replacement or restart. Remote sessions use a bootstrapped Rust Remote PTY
   Holder over SSH rather than a remote terminal multiplexer.
-- **Automation CLI:** the bundled `zeus` command provides hooks, notifications,
+- **Automation CLI:** the bundled `taskmaster` command provides hooks, notifications,
   the MCP bridge, and commands such as `status` and `doctor`.
 
 The desktop communicates with the Engine through a versioned protocol; the app
-does not launch SSH on its own. See [`zeus/REMOTE_PORT.md`](zeus/REMOTE_PORT.md)
-for the remote transport's active design constraints. The
-[Developer Guide](developer-docs/) explains how to build and modify these
-pieces.
+does not launch SSH on its own. See [`taskmaster/REMOTE_PORT.md`](taskmaster/REMOTE_PORT.md)
+for the remote transport's active design constraints.
 
 ## Extending agent support
 
 Agent behavior is catalog data. Files under
-[`zeus/crates/zeus-engine/manifests/`](zeus/crates/zeus-engine/manifests/)
+[`taskmaster/crates/taskmaster-engine/manifests/`](taskmaster/crates/taskmaster-engine/manifests/)
 declare each agent's launch and resume behavior, its prompt approval and denial
 keys, and the screen patterns used for status detection. Supporting an agent
 does not require hard-coding it into the application.
@@ -118,10 +113,8 @@ does not require hard-coding it into the application.
 ## Compile it yourself
 
 The required Rust version is fixed by
-[`zeus/rust-toolchain.toml`](zeus/rust-toolchain.toml). Expect the initial build
-to take longer because it compiles GPUI from Zeus's pinned Zed revision. The
-[Developer Guide](developer-docs/) walks through prerequisites, development
-builds, previews, and every required check.
+[`taskmaster/rust-toolchain.toml`](taskmaster/rust-toolchain.toml). Expect the initial build
+to take longer because it compiles GPUI from Taskmaster's pinned Zed revision.
 
 ```sh
 # Compile and run.
@@ -138,14 +131,15 @@ Everyday commands are wrapped in
 `just --list` shows the rest, including `just check` for the repository's
 CI-equivalent checks, `just ios` for the iOS Companion, and `just prototypes`
 for the prototypes. The underlying scripts remain available directly:
-`zeus/scripts/package.sh`, `zeus/scripts/install-local.sh`, and
+`taskmaster/scripts/package.sh`, `taskmaster/scripts/install-local.sh`, and
 `./scripts/check.sh`.
 
-The source for the User Guide is in [`docs/`](docs/); the Developer Guide
-lives in [`developer-docs/`](developer-docs/). Release engineering is
-documented in [`zeus/PACKAGING.md`](zeus/PACKAGING.md) and
-[`zeus/UPDATING.md`](zeus/UPDATING.md), indexed alongside every other
-engineering record in the Developer Guide.
+The user guide and playbooks are [`docs/src/`](docs/src/). The developer guide
+is [`docs/dev/src/`](docs/dev/src/) and is not published. [`docs/README.md`](docs/README.md)
+says which audience a new page belongs to. Release
+engineering stays in [`taskmaster/PACKAGING.md`](taskmaster/PACKAGING.md) and
+[`taskmaster/UPDATING.md`](taskmaster/UPDATING.md). Architecture decisions stay in those
+files rather than being copied into the guides.
 
 ## Help and policies
 

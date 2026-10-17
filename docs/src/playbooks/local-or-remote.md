@@ -1,76 +1,84 @@
-# Choosing local or remote execution
+# Choose local or remote execution and reconnect
 
-**When this is useful.** You are deciding where a session should run, or you
-came back to the laptop and want to know whether the work survived. The short
-rule: run agents where they should outlive your window; review where the glass
-is best.
+## When this is useful
 
-**Prerequisites.**
+The Mac is where you look. You need to decide whether the agent runs on
+that Mac or on another machine you can SSH to, and you need the same
+session again after you quit Taskmaster or the connection drops.
 
-- **Local:** macOS 15 or newer.
-- **Remote:** an SSH-reachable machine you can log in to, ideally with a
-  dedicated non-admin account, and an entry under Settings → Remote.
+## Prerequisites
+
+- Local: a project open in Taskmaster, and the agent CLI on `PATH`.
+- Remote: the host saved under **Settings → Remote** (`⌘,`). Set a name
+  (the palette label), an SSH destination or `~/.ssh/config` alias, and a
+  default remote cwd.
+- Prefer a dedicated non-admin account and narrowly scoped credentials.
+- Most hosts should stay SSH-only. Add a first-party node only when you
+  need per-machine Claude or Codex logins, merged usage, or a move/fork of
+  a live thread. That setup is [Remote nodes](../remote-nodes.md).
 
 ## Steps
 
-### Run locally
+1. Stay local when the checkout and the credentials you want are already on
+   this Mac. `⌘N` or `⌘T` starts a session in the open project. The palette
+   row does not name a host.
+2. Use a remote host when the work should run somewhere else. Open `⌘K` and
+   search the host name, for example **New Codex on Forge**.
+   Or from the CLI:
 
-1. `⌘T` starts your default agent in the current project; `⌘N` picks a
-   different kind. Local is the best default for tight edit/review loops.
-2. Sessions belong to the background Engine, not the window: `⌘Q` and reopen
-   keeps the process and its scrollback alive.
+   ```sh
+   taskmaster session spawn codex --host forge --cwd ~/code/mldrills
+   ```
 
-### Run on a host
+3. The first successful connection uploads a small Helper (`taskmaster-remote`).
+   SSH is only the authenticated pipe. The Helper owns the agent PTY. You
+   do not install `tmux`, Node.js, Python, or a Taskmaster service on the host.
+   OpenSSH config and a short-lived ControlMaster are used for speed when
+   they already exist. The session does not depend on them to survive.
+4. Password and host-key prompts go through Taskmaster's askpass helper. They are
+   not typed into the agent terminal and they are not parsed out of the
+   protocol stream.
+5. Treat status, hibernate, Review, and sidebar grouping as you would
+   locally. A hosted session already running on that host can spawn
+   children there. A lead that is still on the laptop cannot MCP-spawn
+   onto the host. Start those workers from the palette or
+   `taskmaster session spawn --host`.
+6. Quit with `⌘Q` when you are done looking. Reopen Taskmaster and select the
+   same sidebar row to attach again. The Engine keeps the session record;
+   closing the window is not what ends the remote process.
+7. Before you rely on a disconnect, open **Details** for that session. It
+   says whether the remote process can survive disconnect. If it cannot,
+   Taskmaster does not leave a `tmux` session for you to reattach. A Helper that
+   fails verification fails closed with a structured error.
+8. **Move Session to …** in the palette migrates the selected Claude
+   session across hosts. That move is Claude-only, because resume has to
+   be trustworthy. Other agents stay where you spawned them.
+9. If you enrolled a `taskmaster-node`, handoff can move or fork a Codex or
+   Claude thread without copying `auth.json`. Follow
+   [Remote nodes](../remote-nodes.md). That path is not the SSH reconnect
+   in steps 6 and 7.
 
-1. Press `⌘,` → **Remote** and add the host: name, SSH destination (or an
-   `~/.ssh/config` alias), and a default working directory. Save.
-2. Open `⌘K` and type the host name — **New Codex on Forge**, or whichever
-   agent you want — to spawn there. Status, hibernate, Review, and grouping
-   behave like local sessions.
-3. The first connection bootstraps a small Helper on the host; there is no
-   `tmux`, Node.js, Python, or preinstalled Zeus service to maintain.
-4. To move an existing **Claude** session between hosts, use **Move Session
-   to …** in the palette. It is Claude-only in this version because resume has
-   to be trustworthy.
+## Expected result
 
-### Reconnect
-
-1. Reopen Zeus after quitting — local and remote sessions are still listed
-   with their state.
-2. Select the session. Local sessions replay their holder's PTY. Remote
-   sessions reconnect to the remote Helper that owns the PTY.
-3. Open **Details** to see the session briefing, including whether a remote
-   process can survive disconnect.
-
-## Expected results
-
-- Local and remote sessions share the same sidebar, status vocabulary, and
-  review surfaces.
-- A remote session keeps running when your window or connection drops, as
-  long as the host's persistence situation allows it; Details reports what it
-  knows.
-- A failed or unverifiable Helper never silently falls back to another
-  transport: Zeus reports a structured error instead.
+- A remote row shows the host, and the terminal is the PTY on that machine.
+- After you quit and reopen Taskmaster, the session is still in the sidebar and
+  selecting it attaches again when the process is still alive.
+- A host that cannot keep the process is reported as such, instead of
+  looking like a multiplexer you can resume by hand.
 
 ## Pitfalls
 
-- **Do not treat remote as a sandbox.** Sessions run under a real account
-  with that machine's credentials. Prefer a non-admin user and narrowly
-  scoped keys.
-- **A laptop lead cannot MCP-spawn onto a host yet.** Start remote workers
-  from the palette or `zeus session spawn --host`, then orchestrate children
-  on that machine.
-- **SSH prompts**: password and host-key prompts appear through Zeus's
-  askpass helper; they are not scraped from the protocol.
-- **Host unreachable?** Local sessions and local numbers never block on it.
-  Check the host entry and try again.
-- **Remote files are not indexed locally.** Quick Open and the Files tab do
-  not browse a remote filesystem; review happens through the terminal and the
-  Review surface.
+- Tailscale addresses and MagicDNS names work only when OpenSSH can already
+  resolve them. Taskmaster does not configure Tailscale.
+- Do not rewrite a host's frozen `id` in `hosts.json` to "fix" a rename.
+  Change the label. Sessions store the id.
+- Do not copy provider `auth.json` onto the VPS as a shortcut. Node handoff
+  exists so you do not have to.
+- Two writing agents on one remote checkout still collide. Use a worktree
+  there too ([Parallel agents in worktrees](parallel-worktrees.md)).
+- There is no `tmux` fallback when the Helper is missing, corrupt, or the
+  wrong build.
 
-## Related
-
-- [Remote hosts](../remote-hosts.md)
-- [Remote nodes](../remote-nodes.md)
-- [Settings](../settings.md)
-- [Agents and status](../agents.md)
+Host fields are in [Remote hosts](../remote-hosts.md). The day-to-day split
+between the laptop and a big machine is also sketched in
+[Fleet patterns](../fleet.md).

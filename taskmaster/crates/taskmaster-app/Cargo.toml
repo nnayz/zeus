@@ -1,0 +1,110 @@
+[package]
+name = "taskmaster-app"
+version = "0.3.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "taskmaster"
+path = "src/main.rs"
+
+[features]
+default = ["audio-playback"]
+audio-playback = []
+
+[package.metadata.packager]
+product-name = "taskmaster"
+identifier = "com.taskmaster.taskmaster"
+category = "public.app-category.developer-tools"
+formats = ["app"]
+target-triple = "universal-apple-darwin"
+icons = ["../../assets/icon.icns"]
+binaries = [{ path = "taskmaster", main = true }]
+
+[package.metadata.packager.macos]
+minimum-system-version = "15.0"
+info-plist-path = "../../assets/Info.plist"
+entitlements = "../../assets/taskmaster.entitlements"
+background-app = false
+
+[dependencies]
+taskmaster-client.workspace = true
+taskmaster-proto.workspace = true
+taskmaster-term.workspace = true
+taskmaster-ui.workspace = true
+taskmaster-updater.workspace = true
+taskmaster-usage.workspace = true
+gpui = { workspace = true, features = ["test-support"] }
+gpui_platform = { workspace = true, features = ["test-support"] }
+image = { workspace = true, features = ["gif", "jpeg", "png", "webp"] }
+nucleo-matcher.workspace = true
+notify.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+smallvec.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+unicode-segmentation.workspace = true
+url.workspace = true
+raw-window-handle = "=0.6.2"
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "=0.6.2"
+objc2 = "=0.6.5"
+objc2-app-kit = { version = "=0.3.2", default-features = false, features = [
+    "NSApplication",
+    "NSBezierPath",
+    "NSBitmapImageRep",
+    "NSBox",
+    "NSButton",
+    "NSButtonCell",
+    "NSCell",
+    "NSColor",
+    "NSControl",
+    "NSFont",
+    "NSFontDescriptor",
+    "NSGraphics",
+    "NSGraphicsContext",
+    "NSImage",
+    "NSImageView",
+    "NSImageRep",
+    "NSPanel",
+    "NSParagraphStyle",
+    "NSResponder",
+    "NSStatusBar",
+    "NSStatusBarButton",
+    "NSStatusItem",
+    "NSText",
+    "NSTextField",
+    "NSView",
+    "NSVisualEffectView",
+    "NSWindow",
+    "objc2-core-foundation",
+] }
+objc2-foundation = { version = "=0.3.2", default-features = false, features = [
+    "NSArray",
+    "NSBundle",
+    "NSError",
+    "NSGeometry",
+    "NSObject",
+    "NSPathUtilities",
+    "NSSet",
+    "NSString",
+] }
+objc2-user-notifications = { version = "=0.3.2", default-features = false, features = [
+    "UNNotification",
+    "UNNotificationAction",
+    "UNNotificationCategory",
+    "UNNotificationContent",
+    "UNNotificationRequest",
+    "UNNotificationResponse",
+    "UNNotificationSound",
+    "UNNotificationTrigger",
+    "UNUserNotificationCenter",
+    "block2",
+] }

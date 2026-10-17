@@ -92,13 +92,13 @@ server.on('upgrade', (req, socket, head) => {
 
 server.listen(listenPort, () => {
   console.log('\n============================================================');
-  console.log(`✓ Zeus Companion HTTPS Gateway ready at https://localhost:${listenPort}`);
+  console.log(`✓ Taskmaster Companion HTTPS Gateway ready at https://localhost:${listenPort}`);
   if (copiedToClipboard) {
     console.log('✓ Pairing payload copied to clipboard.');
   } else {
     console.log(`✓ Pairing payload written to ${pairHttpsPath}`);
   }
-  console.log('-> In iOS Simulator: paste into "Pair with Zeus" and tap "Pair device".');
+  console.log('-> In iOS Simulator: paste into "Pair with Taskmaster" and tap "Pair device".');
   console.log('-> Press Ctrl+C in this terminal when finished.');
   console.log('============================================================\n');
 });

@@ -1,38 +1,38 @@
-# Zeus repository instructions
+# Taskmaster repository instructions
 
 ## Scope
 
-These instructions apply to the whole repository. The active architecture decision baseline for remote work is `zeus/REMOTE_PORT.md`; read it before changing remote session behavior, SSH handling, PTYs, holders, terminal state, or packaging.
+These instructions apply to the whole repository. The active architecture decision baseline for remote work is `taskmaster/REMOTE_PORT.md`; read it before changing remote session behavior, SSH handling, PTYs, holders, terminal state, or packaging.
 
 ## Completed remote architecture baseline
 
-- The remote refactor is complete. Maintain the bootstrapped Remote PTY Holder as Zeus's only remote session transport; future remote work extends this architecture rather than reopening the transport migration.
-- Implement and maintain remote behavior entirely in the Rust workspace under `zeus/`.
-- Zeus is a monorepo: the desktop, Engine, CLI, and transport remain Rust-owned under `zeus/`; the native iOS Companion is a separate SwiftUI client under `ios/ZeusCompanion/`.
-- Swift in `ios/ZeusCompanion/` must remain a client of the versioned Companion HTTPS API. It must not embed an Engine, execute SSH, own sessions, or introduce a Swift daemon or Swift CLI.
-- `zeus/crates/zeus-engine/manifests` is the Agent catalog. A missing manifest does not error at runtime — it silently downgrades that agent to a bare login shell. Never shrink the catalog.
+- The remote refactor is complete. Maintain the bootstrapped Remote PTY Holder as Taskmaster's only remote session transport; future remote work extends this architecture rather than reopening the transport migration.
+- Implement and maintain remote behavior entirely in the Rust workspace under `taskmaster/`.
+- Taskmaster is a monorepo: the desktop, Engine, CLI, and transport remain Rust-owned under `taskmaster/`; the native iOS Companion is a separate SwiftUI client under `ios/TaskmasterCompanion/`.
+- Swift in `ios/TaskmasterCompanion/` must remain a client of the versioned Companion HTTPS API. It must not embed an Engine, execute SSH, own sessions, or introduce a Swift daemon or Swift CLI.
+- `taskmaster/crates/taskmaster-engine/manifests` is the Agent catalog. A missing manifest does not error at runtime — it silently downgrades that agent to a bare login shell. Never shrink the catalog.
 - Existing Rust behavior is the implementation baseline. Historical comments about Swift compatibility do not create new requirements.
 - The former Rust SSH + `tmux` transport has been deleted. Never reintroduce it as `legacy_tmux`, a feature flag, a migration path, or a runtime fallback. Missing, corrupt, unsupported, or capability-incompatible Helper artifacts must fail closed with a structured error; an unavailable packaged transport reports `remote_transport_unavailable`.
-- When implementation and `zeus/REMOTE_PORT.md` disagree, stop and resolve the design mismatch explicitly instead of silently choosing one.
+- When implementation and `taskmaster/REMOTE_PORT.md` disagree, stop and resolve the design mismatch explicitly instead of silently choosing one.
 
 ## Rust workspace map
 
-- `zeus/crates/zeus-engine`: authoritative local session engine, PTY/holder lifecycle, status reduction, host orchestration, and remote bootstrap/SSH seam.
-- `zeus/crates/zeus-proto`: shared Rust data models and wire codecs. `remote_pty` is the authoritative versioned Remote Helper protocol; companion access is not part of the current remote transport.
-- `zeus/crates/zeus-client`: local app-to-engine client. It should not execute SSH directly.
-- `zeus/crates/zeus-term`: GPUI terminal renderer and client-side terminal interaction.
-- `zeus/crates/zeus-app`: desktop UI. It requests remote actions through the local Engine.
-- `zeus/crates/zeus-cli`: shipped `zeus` automation CLI (hooks, notify, MCP backend, session/worktree commands).
-- `zeus/crates/zeus-node`: optional enhanced node mode. It is not a dependency of the default SSH bootstrap path.
-- `zeus/crates/zeus-terminal-state`: shared headless terminal parser/Grid/Snapshot/Diff implementation used by the local Engine and remote Holder.
-- `zeus/crates/zeus-remote`: minimal remote Helper binary. Keep it independent of GPUI, `zeus-app`, `zeus-client`, and `zeus-node`.
+- `taskmaster/crates/taskmaster-engine`: authoritative local session engine, PTY/holder lifecycle, status reduction, host orchestration, and remote bootstrap/SSH seam.
+- `taskmaster/crates/taskmaster-proto`: shared Rust data models and wire codecs. `remote_pty` is the authoritative versioned Remote Helper protocol; companion access is not part of the current remote transport.
+- `taskmaster/crates/taskmaster-client`: local app-to-engine client. It should not execute SSH directly.
+- `taskmaster/crates/taskmaster-term`: GPUI terminal renderer and client-side terminal interaction.
+- `taskmaster/crates/taskmaster-app`: desktop UI. It requests remote actions through the local Engine.
+- `taskmaster/crates/taskmaster-cli`: shipped `taskmaster` automation CLI (hooks, notify, MCP backend, session/worktree commands).
+- `taskmaster/crates/taskmaster-node`: optional enhanced node mode. It is not a dependency of the default SSH bootstrap path.
+- `taskmaster/crates/taskmaster-terminal-state`: shared headless terminal parser/Grid/Snapshot/Diff implementation used by the local Engine and remote Holder.
+- `taskmaster/crates/taskmaster-remote`: minimal remote Helper binary. Keep it independent of GPUI, `taskmaster-app`, `taskmaster-client`, and `taskmaster-node`.
 
-The Rust toolchain is pinned by `zeus/rust-toolchain.toml` to Rust 1.95.0, edition 2024.
+The Rust toolchain is pinned by `taskmaster/rust-toolchain.toml` to Rust 1.95.0, edition 2024.
 
 ## Remote architecture invariants
 
 - SSH is the authenticated encrypted byte transport. Use `ssh -T` for Helper protocol channels; SSH must not own the Agent PTY.
-- The current baseline must not require remote `tmux`, `screen`, `zellij`, Node.js, Python, `socat`, `nc`, `curl`, `wget`, or a preinstalled Zeus service.
+- The current baseline must not require remote `tmux`, `screen`, `zellij`, Node.js, Python, `socat`, `nc`, `curl`, `wget`, or a preinstalled Taskmaster service.
 - Reuse OpenSSH configuration and a finite-lived ControlMaster for performance only. A ControlMaster must never be required for session survival.
 - Bootstrap is idempotent: probe platform, select an exact local artifact, upload to a nonce temp path, verify, then atomically rename. Versioned binaries coexist by protocol and Build ID.
 - Never overwrite a live Helper version in place. GC must retain every Build ID referenced by a session.
@@ -41,17 +41,17 @@ The Rust toolchain is pinned by `zeus/rust-toolchain.toml` to Rust 1.95.0, editi
 - Capture the remote login/cwd environment on the remote host. Do not copy the local process environment wholesale or propagate local secrets and socket paths.
 - The remote Holder owns only the PTY, Agent process tree, current terminal grid/modes/cursor, bounded output, exit facts, and controller lease.
 - The local Rust Engine owns `SessionRecord`, manifests, status reduction, project/worktree state, GUI events, orchestration, lifecycle policy, and host management.
-- Use exactly one independent Holder process and Unix socket per Session; do not add a multi-session Zeus Supervisor to the current baseline.
+- Use exactly one independent Holder process and Unix socket per Session; do not add a multi-session Taskmaster Supervisor to the current baseline.
 - A Holder may spawn one minimal liveness guard for its Agent process group. The guard may only wait for Holder pipe closure and kill that one process group; it must not own a PTY, socket, state, or orchestration.
 - The app and client must verify the local Engine's explicit Rust identity during `Hello`; fail closed on missing, old, or unknown daemon identities.
 - The iOS Companion must verify the configured HTTPS origin and server ID during pairing and Hello, store tokens in Keychain, and never put authentication material in URLs, logs, UserDefaults, or WebSocket query parameters.
-- Agent manifests used by the Rust Engine are Rust-owned resources under `zeus-engine`; remote launch must not load Swift resource bundles or fall back to a Swift Holder.
-- Share terminal parsing through a minimal `zeus-terminal-state` crate; do not make `zeus-remote` depend on the full Engine or create a second parser implementation.
+- Agent manifests used by the Rust Engine are Rust-owned resources under `taskmaster-engine`; remote launch must not load Swift resource bundles or fall back to a Swift Holder.
+- Share terminal parsing through a minimal `taskmaster-terminal-state` crate; do not make `taskmaster-remote` depend on the full Engine or create a second parser implementation.
 - PTY reads must never block on the attached client. Bound the connection queue; when it falls behind, discard stale diffs and reseed it with a Full Snapshot.
 - The completed baseline permits exactly one live attach/controller. A new attach atomically increments the controller epoch and revokes the old attach. Multiple read-only observers are deferred enhancements.
 - Full Snapshot contains only the visible grid, cursor, modes, dimensions, and sequence. Bound scrollback to 4 MiB and serve it on demand with `Scroll`.
 - Reject incompatible protocol majors, missing required capabilities, wrong session incarnations, oversized frames, and stale controller epochs with structured errors.
-- `zeus-remote` must remain a Helper, not a second Zeus Engine. Hooks, MCP forwarding, artifacts, ports, usage, handoff, checkpoints, resource governance, and multiple observers remain separate enhancements unless `zeus/REMOTE_PORT.md` is explicitly revised.
+- `taskmaster-remote` must remain a Helper, not a second Taskmaster Engine. Hooks, MCP forwarding, artifacts, ports, usage, handoff, checkpoints, resource governance, and multiple observers remain separate enhancements unless `taskmaster/REMOTE_PORT.md` is explicitly revised.
 
 ## Performance and stability
 
@@ -59,14 +59,14 @@ The Rust toolchain is pinned by `zeus/rust-toolchain.toml` to Rust 1.95.0, editi
 - Among correct designs, require measurements and prefer lower latency, CPU, memory, copies, and wakeups. Do not add a supervisor, fan-out, lock, or cache without benchmark evidence.
 - Keep one owner/event loop for PTY read, terminal parse, diff construction, and attach write. Reuse buffers and communicate through bounded channels; do not place a cross-task `Arc<Mutex<Terminal>>` on the hot path.
 - Coalesce active output for no more than 16 ms. With no attach, continue updating terminal state but do not construct or serialize diffs; do not poll or run heartbeats/GC in an idle Holder.
-- Preserve the local Helper/UDS gates from `zeus/REMOTE_PORT.md`: snapshot p90 <= 100 ms, input-to-PTY p95 <= 10 ms, output-to-diff p90 <= 50 ms, and loopback interaction median <= 75 ms / p90 <= 150 ms.
+- Preserve the local Helper/UDS gates from `taskmaster/REMOTE_PORT.md`: snapshot p90 <= 100 ms, input-to-PTY p95 <= 10 ms, output-to-diff p90 <= 50 ms, and loopback interaction median <= 75 ms / p90 <= 150 ms.
 
 ## Security and durability
 
 - Remote cache/state directories are owner-only (`0700`); state/log files and Unix sockets are owner-only (`0600`); Helper binaries are owner executable only (`0700`).
 - Verify packaged artifact length, SHA-256, Build ID, and protocol before activation.
 - Never log credentials, authentication responses, full environments, Agent prompts, or protocol payloads that may contain secrets.
-- Keep SSH protocol stdin exclusively for Helper frames. On macOS, route OpenSSH prompts through the packaged Rust `zeus-ssh-askpass`; do not parse passwords or host-key answers in the Engine.
+- Keep SSH protocol stdin exclusively for Helper frames. On macOS, route OpenSSH prompts through the packaged Rust `taskmaster-ssh-askpass`; do not parse passwords or host-key answers in the Engine.
 - A failed upload/install may clean up only its own nonce temp file. It must not delete validated binaries or session state.
 - Except for the closed-lid power exception below, never request elevation or host-wide configuration: no `sudo`, package installation, PAM/sshd changes, system services, persistent user units/LaunchAgents, or `loginctl enable-linger`.
 - Detect persistence rather than assuming `setsid()` survives logout. Surface `native-detach`, `user-supervisor`, and `non-persistent` distinctly. Use only an already-available, no-configuration transient user supervisor; otherwise report non-persistent. Never fall back to `tmux`.
@@ -108,8 +108,8 @@ The exception does not permit:
 - claiming readiness merely because registration or one closed-lid trial works.
 
 Production shipment is authorized only when all of these release gates pass and
-are recorded in `zeus/CLOSED_LID_DECISIONS.md` and
-`zeus/CLOSED_LID_SPIKE_REPORT.md`:
+are recorded in `taskmaster/CLOSED_LID_DECISIONS.md` and
+`taskmaster/CLOSED_LID_SPIKE_REPORT.md`:
 
 - signed and notarized packaging, registration, upgrade, rollback, app
   relocation, and uninstall tests;
@@ -136,7 +136,7 @@ unqualified “Safe to close” claim.
 
 ## Build and verification
 
-Run Rust commands from `zeus/`.
+Run Rust commands from `taskmaster/`.
 
 ```sh
 cargo fmt --all -- --check
@@ -161,12 +161,12 @@ Remote tests should be deterministic and not require a developer's real SSH host
 
 Any test requiring a real remote host must be opt-in and document its environment variables and cleanup behavior.
 
-CI must also build and execute `zeus-remote probe` natively on Linux x86_64/aarch64 and macOS arm64, and run a disposable ordinary-user OpenSSH detach/reconnect soak. These are release gates for the completed transport. macOS x86_64 and Rosetta are not supported Remote Helper targets.
+CI must also build and execute `taskmaster-remote probe` natively on Linux x86_64/aarch64 and macOS arm64, and run a disposable ordinary-user OpenSSH detach/reconnect soak. These are release gates for the completed transport. macOS x86_64 and Rosetta are not supported Remote Helper targets.
 
 ## Change discipline
 
 - Keep protocol and on-disk changes versioned and additive for live Helper sessions. There is no legacy `tmux` compatibility boundary and no transport migration still in progress.
-- Update `zeus/REMOTE_PORT.md` when a design decision, phase boundary, dependency, platform matrix, or acceptance condition changes.
+- Update `taskmaster/REMOTE_PORT.md` when a design decision, phase boundary, dependency, platform matrix, or acceptance condition changes.
 - Do not describe deferred product enhancements as prerequisites for completion of the remote transport refactor.
 - Keep unrelated user changes intact. Do not rewrite historical port documents merely to make them match the new remote direction.
 - Add production dependencies only when they materially reduce protocol, terminal, platform, or security risk; explain the tradeoff in the change.

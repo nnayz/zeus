@@ -1,4 +1,4 @@
-// Interactive per-session browser for Zeus agents.
+// Interactive per-session browser for Taskmaster agents.
 //
 // `test.run` (server.js) is a *scripted* runner: one call in, pass/fail out, the
 // context thrown away. This module is the other half — a browser an agent drives
@@ -13,7 +13,7 @@
 // load, the thing @e3 pointed at is genuinely gone.
 //
 // Refs are deliberately NOT Playwright's private `_snapshotForAI`: that API is
-// unstable across versions and chromium-only, and Zeus's whole browser story
+// unstable across versions and chromium-only, and Taskmaster's whole browser story
 // is "the same flow on webkit and firefox too". A DOM walk works everywhere.
 
 "use strict";
@@ -21,7 +21,7 @@
 const fs = require("fs");
 const path = require("path");
 
-// One live context+page per Zeus session id. Contexts are cheap; the browser
+// One live context+page per Taskmaster session id. Contexts are cheap; the browser
 // process underneath is shared with the test pool, so N agents browsing at once
 // still cost one Chrome.
 const sessions = new Map();
@@ -108,7 +108,7 @@ async function closeAll() {
 // ── Snapshot: stamp refs, return a compact tree ──────────────────────────────
 
 // Runs inside the page. Returns [{ref, role, name, depth, extra}] for every
-// visible element worth acting on, having stamped data-zeus-ref on each.
+// visible element worth acting on, having stamped data-taskmaster-ref on each.
 const SNAPSHOT_FN = function (opts) {
   const INTERACTIVE = [
     "a[href]", "button", "input:not([type=hidden])", "select", "textarea", "summary",
@@ -119,7 +119,7 @@ const SNAPSHOT_FN = function (opts) {
   ].join(",");
   const STRUCTURAL = "h1,h2,h3,h4,h5,h6,[role=heading],[role=alert],[role=status],[role=dialog],label,legend,th,caption";
 
-  for (const el of document.querySelectorAll("[data-zeus-ref]")) el.removeAttribute("data-zeus-ref");
+  for (const el of document.querySelectorAll("[data-taskmaster-ref]")) el.removeAttribute("data-taskmaster-ref");
 
   function visible(el) {
     const r = el.getBoundingClientRect();
@@ -199,7 +199,7 @@ const SNAPSHOT_FN = function (opts) {
     let depth = 0;
     for (let p = el.parentElement; p; p = p.parentElement) if (set.has(p)) depth++;
     const ref = "e" + ++n;
-    el.setAttribute("data-zeus-ref", ref);
+    el.setAttribute("data-taskmaster-ref", ref);
 
     const extra = {};
     const type = (el.type || "").toLowerCase();
@@ -255,7 +255,7 @@ async function snapshot(session, params) {
 async function locate(session, params) {
   if (params.ref) {
     const ref = String(params.ref).replace(/^@/, "");
-    const loc = session.page.locator(`[data-zeus-ref="${ref}"]`);
+    const loc = session.page.locator(`[data-taskmaster-ref="${ref}"]`);
     if ((await loc.count()) === 0) {
       throw new Error(
         `@${ref} is no longer on the page — refs go stale when the page navigates or re-renders. Take a fresh snapshot and use the new ref.`);
@@ -385,16 +385,16 @@ async function waitFor(session, params) {
 // up — without it an agent has to correlate "@e7" against pixels by guesswork.
 const ANNOTATE_FN = function () {
   const layer = document.createElement("div");
-  layer.id = "__zeus_annotations";
+  layer.id = "__taskmaster_annotations";
   layer.style.cssText = "position:fixed;inset:0;z-index:2147483647;pointer-events:none";
-  for (const el of document.querySelectorAll("[data-zeus-ref]")) {
+  for (const el of document.querySelectorAll("[data-taskmaster-ref]")) {
     const r = el.getBoundingClientRect();
     if (r.width <= 0 || r.height <= 0) continue;
     if (r.bottom < 0 || r.top > innerHeight) continue;
     const box = document.createElement("div");
     box.style.cssText = `position:absolute;left:${r.left}px;top:${r.top}px;width:${r.width}px;height:${r.height}px;border:1.5px solid #ff2d55;box-sizing:border-box`;
     const tag = document.createElement("div");
-    tag.textContent = "@" + el.getAttribute("data-zeus-ref");
+    tag.textContent = "@" + el.getAttribute("data-taskmaster-ref");
     tag.style.cssText = `position:absolute;left:${r.left}px;top:${Math.max(0, r.top - 14)}px;background:#ff2d55;color:#fff;font:10px/1.2 -apple-system,sans-serif;padding:1px 3px;border-radius:2px`;
     layer.appendChild(box);
     layer.appendChild(tag);
@@ -412,7 +412,7 @@ async function screenshot(session, params) {
     await session.page.screenshot({ path: file, type: "jpeg", quality: 60, fullPage: !!params.full });
   } finally {
     if (annotated) {
-      await session.page.evaluate(() => document.getElementById("__zeus_annotations")?.remove()).catch(() => {});
+      await session.page.evaluate(() => document.getElementById("__taskmaster_annotations")?.remove()).catch(() => {});
     }
   }
   return { screenshotPath: file, annotated };

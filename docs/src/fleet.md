@@ -1,6 +1,6 @@
 # Fleet patterns
 
-Zeus is for the week you have more bets than attention. These patterns use
+Taskmaster is for the week you have more bets than attention. These patterns use
 only what the app already does. Mix them.
 
 ## The lead and two specialists
@@ -48,9 +48,9 @@ babysit.
 A session that is already on Forge can spawn children there (same host,
 same MCP). A lead that is still on the laptop cannot MCP-hire onto Forge
 yet. Start the remote workers from the palette or
-`zeus session spawn --host forge`, then select them in the sidebar.
+`taskmaster session spawn --host forge`, then select them in the sidebar.
 
-If you enrolled a `zeus-node`, use handoff to move a Codex or Claude
+If you enrolled a `taskmaster-node`, use handoff to move a Codex or Claude
 thread to the VPS without copying `auth.json`. See
 [Remote nodes](remote-nodes.md).
 

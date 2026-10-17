@@ -2,7 +2,7 @@
 
 Direction only — not a release calendar.
 
-Zeus is the attention and lifecycle layer for a fleet of coding agents. It sits
+Taskmaster is the attention and lifecycle layer for a fleet of coding agents. It sits
 above Claude Code, Codex, Cursor, Gemini, and shells: a native macOS control
 plane that keeps real PTYs alive, tells you which sessions actually need you,
 and is where you accept the work. It is not an IDE, not a model, and not a
@@ -10,13 +10,13 @@ hosted agent.
 
 The durable work is:
 
-1. **Status you can leave the room on.** Zeus reads the PTY grid, hooks, process
+1. **Status you can leave the room on.** Taskmaster reads the PTY grid, hooks, process
    facts, and title/progress, then reduces them to working / needs-you / done.
    Status is not a vendor API. The manifest catalog and the status reducer are
    how that knowledge ships.
 2. **Sessions that survive the app, the Engine, and SSH.** Holders own the PTY.
    Quitting the window, restarting the daemon, or dropping a remote connection
-   must not kill the agent. Remotely, Zeus bootstraps a Helper over `ssh -T`
+   must not kill the agent. Remotely, Taskmaster bootstraps a Helper over `ssh -T`
    and owns the remote PTY — no `tmux`, no preinstalled service.
 3. **An agent-agnostic control plane.** A new agent is a manifest: spawn,
    resume, approve/deny keys, screen rules. Worktrees isolate git collisions.
@@ -27,7 +27,7 @@ not take.
 
 ## Now
 
-Harden what already makes Zeus usable as a fleet cockpit.
+Harden what already makes Taskmaster usable as a fleet cockpit.
 
 - **Session persistence and Engine upgrades that stay boring and recoverable.**
   Holders keep the PTY and agent process tree across app quit, Engine crash,
@@ -68,7 +68,7 @@ reducer cannot name the blocker, the inbox must not invent one.
 
 ### Accept-the-work surface
 
-Agents produce. Zeus is where you accept.
+Agents produce. Taskmaster is where you accept.
 
 Each session that edits a repo should have a review cockpit bound to its
 worktree: live diff, stage, commit, PR, conflict view, this-agent-branch vs
@@ -105,13 +105,13 @@ the same persistence.
   persistence capability (`native-detach` / `user-supervisor` / `non-persistent`),
   and structured transport errors must be explainable in the UI, not only in
   logs.
-- Instant move and fork between laptop and an enrolled `zeus-node` (the
+- Instant move and fork between laptop and an enrolled `taskmaster-node` (the
   existing handoff coordinator): checkpoint at a turn boundary, transfer only
   missing blobs, restore into quarantine, provider-native resume or fork,
   commit the location lease. The live workspace is never overwritten during
   staging.
 - The Mac stays the glass. Compute lives wherever it is cheapest or most
-  persistent. SSH remains the authenticated byte transport; Zeus never
+  persistent. SSH remains the authenticated byte transport; Taskmaster never
   reintroduces `tmux` as a remote session fabric.
 
 ### Human-gated agent-to-agent
@@ -128,7 +128,7 @@ Make orchestration a first-class object, not a hidden tool call:
 - budgets (see fleet cost below)
 - a paper trail of who spawned whom and what was sent
 
-Do not add a multi-session remote supervisor or turn `zeus-remote` into a
+Do not add a multi-session remote supervisor or turn `taskmaster-remote` into a
 second Engine. Orchestration stays in the local Engine; the Helper stays a
 Helper.
 
@@ -141,7 +141,7 @@ catalog are trustworthy.
 
 Desktop — and later phone — alerts only on `needs-you` or `done`, carrying the
 actual blocker text. Quiet hours. Per-project and per-agent mute. Persistence
-plus a page is how Zeus becomes all-day infrastructure instead of a window you
+plus a page is how Taskmaster becomes all-day infrastructure instead of a window you
 stare at.
 
 This is not a firehose of token activity. Working sessions stay silent.
@@ -153,7 +153,7 @@ did the Codex on `auth-rewrite` decide about JWT?” Jump to that screen offset.
 A week of parallel agents becomes recoverable memory, not forty dead tabs.
 
 Replay stays local. Terminal logs already can contain secrets; search must not
-create a new exfiltration path, a Zeus-operated index, or a requirement to
+create a new exfiltration path, a Taskmaster-operated index, or a requirement to
 keep unbounded raw logs.
 
 ### Cost and quota as control
@@ -178,8 +178,8 @@ revokes the old one. That remains correct for input.
 
 A later enhancement is read-only spectators: a teammate or a second device
 watches a live session without resizing the PTY or injecting keystrokes. Share
-a session, not a screenshot. This is how Zeus becomes a team product without
-becoming a hosted SaaS. Multi-controller input and a Zeus-operated relay stay
+a session, not a screenshot. This is how Taskmaster becomes a team product without
+becoming a hosted SaaS. Multi-controller input and a Taskmaster-operated relay stay
 out of scope.
 
 ### Cross-platform Engine
@@ -187,13 +187,13 @@ out of scope.
 The desktop app is macOS. The Engine, Holder, and Remote Helper are already
 Rust. Broader Engine coverage (Linux as an execution host and, later, as a
 headless cockpit) extends the same ownership model. It does not reopen the
-transport, reintroduce Swift, or make a hosted Zeus account a prerequisite.
+transport, reintroduce Swift, or make a hosted Taskmaster account a prerequisite.
 
 ## Distribution
 
 - Signed, notarized GitHub Releases
 - Homebrew cask (monorepo tap):
-  `brew tap nnayz/zeus https://github.com/nnayz/zeus.git && brew install --cask nnayz/zeus/zeus`
+  `brew tap nnayz/taskmaster https://github.com/nnayz/taskmaster.git && brew install --cask nnayz/taskmaster/taskmaster`
 - Deeper end-to-end coverage for updates and session recovery, including the
   existing remote soak and Helper-native probe gates
 
@@ -201,24 +201,24 @@ transport, reintroduce Swift, or make a hosted Zeus account a prerequisite.
 
 These fights are already lost, or they contradict the product.
 
-- **A hosted Zeus account, analytics, or telemetry service.** There is no
-  Zeus-operated relay for terminal contents or session history.
-- **Treating agent processes as a security sandbox.** Zeus launches powerful
+- **A hosted Taskmaster account, analytics, or telemetry service.** There is no
+  Taskmaster-operated relay for terminal contents or session history.
+- **Treating agent processes as a security sandbox.** Taskmaster launches powerful
   local tools with the user’s privileges. Isolation is an OS account, VM, or
-  container — not a Zeus feature.
-- **Becoming an IDE.** Zed, Cursor, and VS Code win the editor. Zeus owns
+  container — not a Taskmaster feature.
+- **Becoming an IDE.** Zed, Cursor, and VS Code win the editor. Taskmaster owns
   fleet attention, PTY lifecycle, and accept-the-work.
 - **Becoming an agent or a model vendor.** Claude Code, Codex, Gemini, and the
-  rest win the conversation. Zeus stays above them.
-- **A Zeus Cloud that runs your agents for you.** Remote execution is your
+  rest win the conversation. Taskmaster stays above them.
+- **A Taskmaster Cloud that runs your agents for you.** Remote execution is your
   SSH host or your enrolled node, on your credentials.
 - **Reintroducing `tmux`, `screen`, or `zellij` as the remote session
   transport.** The Remote Holder is the only remote transport.
-- **A multi-session remote Zeus supervisor, or growing `zeus-remote` into a
+- **A multi-session remote Taskmaster supervisor, or growing `taskmaster-remote` into a
   second Engine.** Hooks, MCP forwarding, artifacts, ports, usage, handoff,
   checkpoints, and resource governance stay local-Engine concerns unless this
-  document and `zeus/REMOTE_PORT.md` are revised together.
-- **Requiring Node.js, Python, or a preinstalled Zeus service on the remote
+  document and `taskmaster/REMOTE_PORT.md` are revised together.
+- **Requiring Node.js, Python, or a preinstalled Taskmaster service on the remote
   host** for the default SSH path.
 - **Host-wide configuration:** no `sudo`, package installation, PAM/sshd
   changes, system services, or persistent user units as a setup step.

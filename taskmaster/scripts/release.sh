@@ -1,0 +1,344 @@
+#!/bin/bash
+# Build, sign, notarize, and publish a taskmaster release.
+#
+# Usage: taskmaster/scripts/release.sh <version>        e.g. taskmaster/scripts/release.sh 0.2.0
+#
+# Env overrides:
+#   TASKMASTER_SIGN_IDENTITY  "Developer ID Application: ..." (default: auto-detected)
+#   NOTARY_PROFILE      notarytool keychain profile (default: taskmaster-notary)
+#   GH_REPO             GitHub repo to publish to (default: nnayz/taskmaster)
+#   TAP_DIR             Taskmaster monorepo checkout (default: repository root)
+#   SKIP_CASK=1         explicitly publish without updating the Homebrew cask
+#   SKIP_GATES=1        skip cargo test/clippy (for re-running a failed publish)
+#   SKIP_PERF_GATE=1   skip packaged app memory/idle-CPU probe
+#
+# This publishes TWO application artifacts per release, both notarized and stapled:
+#   taskmaster-<version>-universal.dmg  what people download by hand
+#   taskmaster-<version>-universal.zip  what the in-app updater fetches
+# plus appcast.json, SHA256SUMS, and the reviewed dependency-license inventory.
+# All are attached to a GitHub Release, so the updater feed has a stable URL.
+# See taskmaster/UPDATING.md for the trust model and one-time setup.
+set -euo pipefail
+
+if [ $# -lt 1 ]; then
+    echo "usage: taskmaster/scripts/release.sh <version>   (e.g. 0.2.0)" >&2
+    exit 2
+fi
+VERSION="$1"
+if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "error: version '$VERSION' is not X.Y.Z" >&2
+    exit 2
+fi
+
+WORKSPACE="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="$(cd "$WORKSPACE/.." && pwd)"
+cd "$WORKSPACE"
+
+DIST="$WORKSPACE/dist"
+APP="$DIST/taskmaster.app"
+DMG="$DIST/taskmaster-$VERSION-universal.dmg"
+ZIP="$DIST/taskmaster-$VERSION-universal.zip"
+MANIFEST="$WORKSPACE/crates/taskmaster-app/Cargo.toml"
+
+NOTARY_PROFILE="${NOTARY_PROFILE:-taskmaster-notary}"
+GH_REPO="${GH_REPO:-nnayz/taskmaster}"
+# The in-tree Homebrew cask is bumped in lockstep with each release (step 6).
+TAP_DIR="${TAP_DIR:-$ROOT}"
+TAG="v$VERSION"
+FEED="$DIST/appcast.json"
+CHECKSUMS="$DIST/SHA256SUMS"
+INVENTORY="$DIST/THIRD-PARTY-LICENSES.json"
+MINIMUM_SYSTEM="15.0"
+# Old builds stay downloadable but the repo should not grow without bound.
+KEEP_RELEASES=5
+
+# See package.sh: prefer the persistent home toolchain over the /tmp one, which
+# macOS sweeps out from under us.
+if [ -x "$HOME/.cargo/bin/cargo" ]; then
+    export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
+    export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
+else
+    export CARGO_HOME="${CARGO_HOME:-/tmp/taskmaster-cargo-home}"
+    export RUSTUP_HOME="${RUSTUP_HOME:-/tmp/taskmaster-rustup-home}"
+fi
+export PATH="$CARGO_HOME/bin:$PATH"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$WORKSPACE/target}"
+
+if [ -z "${TASKMASTER_SIGN_IDENTITY:-}" ]; then
+    # `|| true`: grep exits 1 with no match, which pipefail would turn into an
+    # abort before the friendly error below.
+    TASKMASTER_SIGN_IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null \
+        | grep "Developer ID Application" | head -1 \
+        | sed -E 's/.*"(.*)".*/\1/' || true)"
+fi
+if [ -z "${TASKMASTER_SIGN_IDENTITY:-}" ]; then
+    cat >&2 <<EOF
+error: no "Developer ID Application" signing identity found.
+
+  Create one in Xcode → Settings → Accounts → Manage Certificates → +
+  → "Developer ID Application", then re-run. Or set TASKMASTER_SIGN_IDENTITY.
+  See taskmaster/UPDATING.md.
+EOF
+    exit 1
+fi
+
+echo "==> Releasing taskmaster $VERSION"
+echo "    Sign identity : $TASKMASTER_SIGN_IDENTITY"
+echo "    Notary profile: $NOTARY_PROFILE"
+echo "    Publishing to : $GH_REPO"
+
+if ! command -v gh >/dev/null 2>&1; then
+    echo "error: the GitHub CLI (gh) is required to publish" >&2
+    exit 1
+fi
+if [ "${SKIP_CASK:-0}" != "1" ] \
+    && [ ! -f "$TAP_DIR/Casks/taskmaster.rb" ]; then
+    cat >&2 <<EOF
+error: Taskmaster checkout is missing Casks/taskmaster.rb: $TAP_DIR
+
+Set TAP_DIR to a clean nnayz/taskmaster monorepo checkout. The release cannot claim
+success unless its in-tree cask is pushed and verified. Use SKIP_CASK=1 only
+when you intentionally do not want this release offered through Homebrew.
+EOF
+    exit 1
+fi
+
+# ----------------------------------------------------------------------------
+# 1. Source provenance
+# ----------------------------------------------------------------------------
+# The updater compares against CARGO_PKG_VERSION, so the manifest is the single
+# source of truth for what version this build claims to be. Version bumps go
+# on main first; a release must build the exact remote main commit rather than
+# creating an unpushed release-only commit.
+CURRENT="$(sed -n 's/^version = "\(.*\)"/\1/p' "$MANIFEST" | head -1)"
+if [ "$CURRENT" != "$VERSION" ]; then
+    cat >&2 <<EOF
+error: taskmaster-app is $CURRENT, not $VERSION
+
+Bump taskmaster-app to $VERSION on main first, then run this script from a clean
+main checkout. Release artifacts must map to that source commit.
+EOF
+    exit 1
+fi
+if [ -n "$(git -C "$ROOT" status --porcelain --untracked-files=no)" ]; then
+    echo "error: tracked files are dirty; release from a clean main checkout" >&2
+    exit 1
+fi
+git -C "$ROOT" fetch --quiet origin main --tags
+SOURCE_COMMIT="$(git -C "$ROOT" rev-parse HEAD)"
+REMOTE_MAIN="$(git -C "$ROOT" rev-parse origin/main)"
+if [ "$SOURCE_COMMIT" != "$REMOTE_MAIN" ]; then
+    cat >&2 <<EOF
+error: release source is not the current origin/main
+  local:  $SOURCE_COMMIT
+  remote: $REMOTE_MAIN
+
+Merge the source and version bump first, then check out and pull main.
+EOF
+    exit 1
+fi
+if git -C "$ROOT" rev-parse --verify --quiet "refs/tags/$TAG" >/dev/null; then
+    TAG_COMMIT="$(git -C "$ROOT" rev-list -n 1 "$TAG")"
+    if [ "$TAG_COMMIT" != "$SOURCE_COMMIT" ]; then
+        echo "error: $TAG points to $TAG_COMMIT, not release source $SOURCE_COMMIT" >&2
+        exit 1
+    fi
+fi
+echo "    source commit : $SOURCE_COMMIT"
+
+# ----------------------------------------------------------------------------
+# 2. Gates
+# ----------------------------------------------------------------------------
+if [ "${SKIP_GATES:-0}" != "1" ]; then
+    echo "==> Running release gates"
+    cargo clippy --workspace --all-targets -- -D warnings
+    cargo test --workspace
+fi
+
+# ----------------------------------------------------------------------------
+# 3. Build, sign, notarize, staple (app first, then DMG — see package.sh)
+# ----------------------------------------------------------------------------
+# Agent worktrees are told to share this target dir (see the warning in
+# package.sh). A build from a worktree whose sources differ writes artifacts
+# that cargo then considers fresh here -- a cross-workspace fingerprint
+# collision -- so a stale crate from another checkout can be linked in silently.
+# It has happened: an x86_64 taskmaster-term with a NEWER mtime than its source but
+# missing a method the source had. A compile error is the lucky outcome; the
+# unlucky one is a signed, notarized build shipping someone else's code. Third-
+# party deps cannot collide this way (they are immutable at a given version), so
+# only first-party crates are purged and the expensive GPUI build stays cached.
+echo "==> Purging first-party build artifacts (cross-worktree cache safety)"
+FIRST_PARTY=(-p taskmaster-app -p taskmaster-client -p taskmaster-proto -p taskmaster-term -p taskmaster-ui -p taskmaster-updater)
+for release_target in aarch64-apple-darwin x86_64-apple-darwin; do
+    cargo clean "${FIRST_PARTY[@]}" --release --target "$release_target"
+done
+
+echo "==> Packaging (notarization can take a few minutes)"
+TASKMASTER_VERSION="$VERSION" \
+TASKMASTER_SIGN_IDENTITY="$TASKMASTER_SIGN_IDENTITY" \
+TASKMASTER_CREATE_DMG=1 \
+TASKMASTER_CREATE_ZIP=1 \
+APPLE_NOTARIZATION_KEYCHAIN_PROFILE="$NOTARY_PROFILE" \
+    "$WORKSPACE/scripts/package.sh"
+
+for artifact in "$APP" "$DMG" "$ZIP"; do
+    if [ ! -e "$artifact" ]; then
+        echo "error: packaging did not produce $artifact" >&2
+        exit 1
+    fi
+done
+
+# The updater refuses a download whose ticket does not validate offline, so
+# check that here rather than discovering it from a user's failed update.
+echo "==> Verifying the stapled bundle the updater will install"
+xcrun stapler validate "$APP"
+spctl --assess --type execute -vv "$APP"
+
+# The regression probe must run against this exact signed/notarized bundle.
+# It owns and terminates only the two Taskmaster processes it launches.
+if [ "${SKIP_PERF_GATE:-0}" != "1" ]; then
+    echo "==> Running packaged memory/idle-CPU gate"
+    "$WORKSPACE/scripts/perf-gate.sh" --app "$APP" --scenario all
+fi
+
+# ----------------------------------------------------------------------------
+# 4. Build the update feed
+# ----------------------------------------------------------------------------
+# Download URLs are the release's own assets. The feed is attached to every
+# release, so the `latest` alias always resolves to the newest one — that is
+# what gives a stable feed URL with no server to run.
+BASE_URL="https://github.com/$GH_REPO/releases/download/$TAG"
+SIZE="$(stat -f%z "$ZIP")"
+SHA256="$(shasum -a 256 "$ZIP" | awk '{print $1}')"
+DMG_SHA256="$(shasum -a 256 "$DMG" | awk '{print $1}')"
+PUBLISHED="$(date -u +%Y-%m-%d)"
+
+# Start from the published feed so releases people skipped stay offerable.
+echo "==> Fetching the current feed"
+if ! curl -fsSL "https://github.com/$GH_REPO/releases/latest/download/appcast.json" -o "$FEED" 2>/dev/null; then
+    echo "    (no published feed yet — starting a new one)"
+    rm -f "$FEED"
+fi
+
+echo "==> Writing $FEED"
+VERSION="$VERSION" \
+URL="$BASE_URL/taskmaster-$VERSION-universal.zip" \
+SIZE="$SIZE" SHA256="$SHA256" PUBLISHED="$PUBLISHED" \
+MINIMUM_SYSTEM="$MINIMUM_SYSTEM" \
+FEED="$FEED" KEEP_RELEASES="$KEEP_RELEASES" \
+python3 - <<'PYFEED'
+import json, os, pathlib
+
+feed_path = pathlib.Path(os.environ["FEED"])
+feed = {"feed_version": 1, "releases": []}
+if feed_path.exists():
+    try:
+        feed = json.loads(feed_path.read_text())
+    except json.JSONDecodeError:
+        print("    (published feed did not parse — starting a new one)")
+        feed = {"feed_version": 1, "releases": []}
+    feed.setdefault("feed_version", 1)
+    feed.setdefault("releases", [])
+
+version = os.environ["VERSION"]
+entry = {
+    "version": version,
+    "url": os.environ["URL"],
+    "size": int(os.environ["SIZE"]),
+    "sha256": os.environ["SHA256"],
+    "minimum_system_version": os.environ["MINIMUM_SYSTEM"],
+    "published": os.environ["PUBLISHED"],
+}
+
+# Re-releasing a version replaces its row rather than adding a second one the
+# client would have to disambiguate.
+releases = [r for r in feed["releases"] if r.get("version") != version]
+releases.append(entry)
+
+
+def sort_key(release):
+    parts = (release.get("version") or "0").split(".")
+    return tuple(int(part) if part.isdigit() else 0 for part in (parts + ["0", "0", "0"])[:3])
+
+
+releases.sort(key=sort_key, reverse=True)
+feed["releases"] = releases[: int(os.environ["KEEP_RELEASES"])]
+feed_path.write_text(json.dumps(feed, indent=2) + "\n")
+print(f"    {len(feed['releases'])} release(s) in the feed, newest {feed['releases'][0]['version']}")
+PYFEED
+
+if [ ! -f "$INVENTORY" ]; then
+    echo "error: packaging did not produce $INVENTORY" >&2
+    exit 1
+fi
+
+echo "==> Writing $CHECKSUMS"
+(
+    cd "$DIST"
+    shasum -a 256 \
+        "$(basename "$DMG")" \
+        "$(basename "$ZIP")" \
+        "$(basename "$FEED")" \
+        "$(basename "$INVENTORY")" > "$(basename "$CHECKSUMS")"
+    shasum -a 256 -c "$(basename "$CHECKSUMS")"
+)
+
+# ----------------------------------------------------------------------------
+# 5. Publish the GitHub Release
+# ----------------------------------------------------------------------------
+NOTES_FILE="$DIST/notes-$VERSION.md"
+if [ ! -f "$NOTES_FILE" ]; then
+    cat > "$NOTES_FILE" <<NOTES
+## taskmaster $VERSION
+
+Native macOS orchestrator for coding agents.
+
+**Install:** download the DMG below, open it, drag taskmaster to Applications.
+Universal (Apple silicon and Intel), signed and notarized, so it opens without
+a Gatekeeper prompt.
+
+taskmaster updates itself from here — \`appcast.json\` is the feed it reads.
+NOTES
+    echo "==> Wrote default notes to $NOTES_FILE (edit and re-run to customize)"
+fi
+
+echo "==> Publishing $TAG to $GH_REPO"
+GH_REPO="$GH_REPO" SOURCE_COMMIT="$SOURCE_COMMIT" \
+    "$WORKSPACE/scripts/publish-github-release.sh" \
+    "$VERSION" "$NOTES_FILE" "$DMG" "$ZIP" "$FEED" "$CHECKSUMS" "$INVENTORY"
+
+# ----------------------------------------------------------------------------
+# 6. Bump the Homebrew cask
+# ----------------------------------------------------------------------------
+# The cask pins the DMG's sha256, so it has to move in lockstep. The publisher
+# verifies the local DMG against GitHub first, pushes even if the correct commit
+# already existed locally, then reads the remote branch back to prove the cask
+# users receive matches the immutable release asset.
+if [ "${SKIP_CASK:-0}" = "1" ]; then
+    echo "==> Skipping the Homebrew cask (SKIP_CASK=1)"
+else
+    echo "==> Publishing the Homebrew cask for $VERSION"
+    GH_REPO="$GH_REPO" \
+        "$WORKSPACE/scripts/publish-homebrew-cask.sh" \
+        "$VERSION" "$DMG" "$TAP_DIR"
+fi
+
+cat <<EOF
+
+============================================================
+  taskmaster $VERSION released
+============================================================
+  DMG        : $DMG
+  Update zip : $ZIP
+  DMG sha256 : $DMG_SHA256
+  ZIP sha256 : $SHA256
+  Checksums   : $CHECKSUMS
+  Licenses    : $INVENTORY
+  Source      : $SOURCE_COMMIT
+  Release    : https://github.com/$GH_REPO/releases/tag/$TAG
+  Feed       : https://github.com/$GH_REPO/releases/latest/download/appcast.json
+
+  Next steps:
+    1. Confirm an old build updates itself (taskmaster/UPDATING.md → "Verifying a release")
+============================================================
+EOF

@@ -2,21 +2,21 @@
 
 Two agents editing the same checkout will overwrite each other. A git
 worktree is a second working directory on a second branch, attached to the
-same repository. Zeus treats that as the default way to run parallel work.
+same repository. Taskmaster treats that as the default way to run parallel work.
 
 Worktrees are isolation from merge conflicts, not a security boundary.
 
 ## Create one
 
-The everyday path is to ask a hosted agent. Zeus MCP is already injected, so
+The everyday path is to ask a hosted agent. Taskmaster MCP is already injected, so
 a lead can call `spawn_agent` with `worktree: true`, or `create_worktree`
 first and then spawn into that path.
 
 From the CLI:
 
 ```sh
-zeus worktree create --repo ~/src/mldrills --branch spike-auth
-zeus session spawn claude-code --cwd ~/src/mldrills --worktree --prompt "own the auth rewrite"
+taskmaster worktree create --repo ~/src/mldrills --branch spike-auth
+taskmaster session spawn claude-code --cwd ~/src/mldrills --worktree --prompt "own the auth rewrite"
 ```
 
 The new directory is a normal checkout. Commit, stash, or cherry-pick as
@@ -25,10 +25,10 @@ you would anywhere else.
 ## See what you have
 
 `⌥⌘W` opens the worktrees sheet: path, branch, owning session, dirty or
-not, and whether Zeus thinks the tree is stale enough to remove.
+not, and whether Taskmaster thinks the tree is stale enough to remove.
 
 ```sh
-zeus worktree list --repo ~/src/mldrills
+taskmaster worktree list --repo ~/src/mldrills
 ```
 
 The inspector **Review** tab is bound to the session's cwd. If that cwd is
@@ -47,7 +47,7 @@ merged, not dirty, not `main`). Confirmation is required. It will not
 force-remove a dirty tree from the UI.
 
 ```sh
-zeus worktree remove --repo ~/src/mldrills --path /path/to/worktree
+taskmaster worktree remove --repo ~/src/mldrills --path /path/to/worktree
 ```
 
 `--force` exists on the CLI for when you know what you are doing. The app

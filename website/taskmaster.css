@@ -1,0 +1,13 @@
+.product-shot {
+  margin: 0 0 34px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-panel);
+  overflow: hidden;
+  background: var(--rp-surface);
+}
+.product-shot img { display: block; width: 100%; height: auto; }
+.lede-note { margin-top: 14px; color: var(--secondary); font-size: 13px; max-width: 40rem; }
+.lede-note a { text-decoration: underline; text-underline-offset: 3px; }
+.app-mark { border-radius: 6px; }
+.guide-card a { text-decoration: none; }
+.article-page .docs-content { max-width: 72ch; }

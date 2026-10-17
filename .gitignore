@@ -8,7 +8,7 @@ sidecar/node_modules/
 .skill-build/
 
 # Rust build output
-zeus/target/
+taskmaster/target/
 
 # Local agent skills and tool-specific links — never committed.
 .agents/
@@ -19,19 +19,18 @@ zeus/target/
 .serena
 .tokensave
 
-# mdBook output
+# Legacy mdBook output, if a local build is still on disk
 docs/book/
-developer-docs/book/
+docs/dev/book/
 
-# Product site
-site/node_modules/
-site/.svelte-kit/
-site/build/
+# Website
+website/dist/
+website/node_modules/
 
 # Companion development and test artifacts
 .companion-dev/
-.zeus-companion-dev/
-.zeus-test/
+.taskmaster-companion-dev/
+.taskmaster-test/
 *.pem
 pair*.json
 

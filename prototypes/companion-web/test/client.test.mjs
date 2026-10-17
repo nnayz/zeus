@@ -15,11 +15,11 @@ async function setup(t, options = {}) {
 const waitFor = async predicate => { const deadline = Date.now() + 3000; while (!predicate()) { assert.ok(Date.now() < deadline, 'event arrived before deadline'); await new Promise(resolve => setTimeout(resolve, 10)); } };
 
 test('pairing binds to same HTTPS origin and expected identity with a short deadline', () => {
-  const now = 1000000, value = { origin: 'https://zeus.example', server_id: 'server_74', code: 'fixture', expires_at_ms: now + 120000 };
+  const now = 1000000, value = { origin: 'https://taskmaster.example', server_id: 'server_74', code: 'fixture', expires_at_ms: now + 120000 };
   assert.deepEqual(pairingPayload(JSON.stringify(value), value.origin, now), value);
-  assert.throws(() => origin('http://zeus.example', 'http://zeus.example'), code('https_required'));
+  assert.throws(() => origin('http://taskmaster.example', 'http://taskmaster.example'), code('https_required'));
   assert.throws(() => origin('https://evil.example', value.origin), code('same_origin_required'));
-  for (const originValue of ['https://user:pass@zeus.example', 'https://zeus.example/?token=bad', 'https://zeus.example/#bad', 'https://zeus.example/path']) assert.throws(() => origin(originValue, value.origin), code('invalid_origin'));
+  for (const originValue of ['https://user:pass@taskmaster.example', 'https://taskmaster.example/?token=bad', 'https://taskmaster.example/#bad', 'https://taskmaster.example/path']) assert.throws(() => origin(originValue, value.origin), code('invalid_origin'));
   for (const expiry of [now - 1, now + 600001]) assert.throws(() => pairingPayload(JSON.stringify({ ...value, expires_at_ms: expiry }), value.origin, now), code('pairing_expired'));
 });
 

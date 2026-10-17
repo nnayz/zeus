@@ -1,6 +1,6 @@
 # Security model
 
-Zeus is a local developer tool that deliberately launches other powerful local
+Taskmaster is a local developer tool that deliberately launches other powerful local
 developer tools. It reduces orchestration mistakes; it is not a sandbox.
 
 ## Trust boundaries
@@ -21,7 +21,7 @@ an explicit migration.
 Shells, coding agents, hooks, MCP servers, and browser automation run with the
 macOS user's privileges. They can read any files that user and macOS privacy
 controls allow, use inherited environment variables, access configured
-credentials, and make network requests. Zeus does not inspect or approve each
+credentials, and make network requests. Taskmaster does not inspect or approve each
 operation they perform.
 
 Use separate worktrees to avoid accidental edit collisions, not as a security
@@ -31,7 +31,7 @@ restrict credentials and network access there.
 ### Remote nodes
 
 Remote sessions cross the SSH boundary and run under the configured remote
-account. Zeus relies on SSH host verification, keys, and configuration; it does
+account. Taskmaster relies on SSH host verification, keys, and configuration; it does
 not provide a separate encrypted relay or authorization layer. Prefer a
 dedicated non-admin user and narrowly scoped credentials.
 
@@ -43,35 +43,43 @@ Team ID and bundle identifier, validates notarization, and refuses downgrades.
 Published release assets are treated as immutable. Details are in
 [Updates](updates.md).
 
-### Companion and mobile access
+### Companion
 
-The optional Companion gateway is an experimental, private-network interface
-for viewing and controlling sessions from another device. Treat it as
-developer-gated work, not a shipped remote-access product. Grant `read` only
-to trusted devices; `interact`, `spawn`, and `lifecycle` exercise substantial
-desktop-account authority. Companion snapshots and recent output can disclose
-prompts, source code, paths, and tool-emitted secrets even to a read-only
-device.
+The iOS Companion is an optional client of a private-network HTTPS gateway.
+The phone does not connect to the Engine, a PTY, or SSH. Pairing starts on
+the trusted computer, expires quickly, and is meant for one device. See
+[iOS Companion](ios-companion.md) for setup and day-to-day use.
 
-Device credentials, pairing payloads, authentication responses, prompts,
-terminal payloads, and full environments must never enter request logs,
-diagnostics, or crash reports. Companion state and TLS keys require owner-only
-directories (`0700`) and files (`0600`); backups of that state are sensitive,
-and revocation cannot recall data already delivered. The architecture
-decision, the external v1 contract, and the production gates are recorded in
-the [Developer Guide: Companion architecture and trust model](dev/companion-architecture.html).
+Companion is an experimental interface. It is not a sandbox and not a
+production remote-access product. A device that can only read the screen can
+still see prompts, source, paths, and secrets. Do not publish the gateway on
+the public internet. Being on the same LAN, Tailscale, or another overlay
+does not by itself authorize a phone.
+
+The API, trust model, and client-development notes are in the
+[developer guide on GitHub](https://github.com/nnayz/taskmaster/blob/main/docs/dev/src/companion-architecture.md).
 
 ## Sensitive data
 
 Terminal replay logs can contain prompts, output, paths, and secrets emitted by
 tools. PR monitoring, remote hosts, and third-party agents can send data to their
-own services. Zeus itself has no account, analytics, or telemetry service; see
-[Privacy](privacy.md). Companion snapshots are sensitive in the same way; see
-[Companion and mobile access](#companion-and-mobile-access) above.
+own services. Taskmaster itself has no account, analytics, or telemetry service; see
+[Privacy](privacy.md).
+
+Companion snapshots and recent output are sensitive data: they may disclose
+prompts, source code, paths and tool-emitted secrets even to a read-only device.
+Grant `read` only to trusted devices; `interact`, `spawn` and `lifecycle` can
+exercise substantial desktop-account authority. Device credentials, pairing
+payloads, authentication responses, prompts, terminal payloads and full
+environments must never enter request logs, diagnostics or crash reports.
+Companion state/TLS keys require owner-only directories (`0700`) and files
+(`0600`); backups of that state are sensitive and must not silently reactivate
+restored credentials. Revocation cannot recall already delivered data or undo
+an operation that committed before revocation.
 
 ## Security assumptions
 
-Zeus assumes:
+Taskmaster assumes:
 
 - macOS and the current user account are not already compromised;
 - installed agents, MCP servers, hooks, and shell configuration are trusted;

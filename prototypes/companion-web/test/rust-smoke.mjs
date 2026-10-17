@@ -9,8 +9,8 @@ import { CompanionClient } from '../public/client.js';
 import { pairingPayload } from '../public/model.js';
 
 const binary = process.env.COMPANION_RUST_FIXTURE;
-if (!binary) throw new Error('Set COMPANION_RUST_FIXTURE to the built zeus-companion fixture example.');
-const directory = await mkdtemp(join(await realpath(tmpdir()), 'zeus-companion-rust-smoke-'));
+if (!binary) throw new Error('Set COMPANION_RUST_FIXTURE to the built taskmaster-companion fixture example.');
+const directory = await mkdtemp(join(await realpath(tmpdir()), 'taskmaster-companion-rust-smoke-'));
 const enrollment = join(directory, 'enrollment.json');
 const fixture = spawn(binary, [enrollment], { stdio: ['pipe', 'ignore', 'ignore'] });
 let launchFailed = false, finished = false, client, authorization = null, stage = 'fixture startup';

@@ -1,7 +1,7 @@
 version: 2
 updates:
   - package-ecosystem: cargo
-    directory: /zeus
+    directory: /taskmaster
     schedule:
       interval: weekly
       day: monday
@@ -37,7 +37,7 @@ updates:
     open-pull-requests-limit: 5
 
   - package-ecosystem: rust-toolchain
-    directory: /zeus
+    directory: /taskmaster
     schedule:
       interval: weekly
       day: monday

@@ -7,32 +7,32 @@ default:
 # Compile the Rust workspace.
 [group('rust')]
 build:
-    cd zeus && cargo build --workspace
+    cd taskmaster && cargo build --workspace
 
 # Compile the Rust workspace with the release profile.
 [group('rust')]
 build-release:
-    cd zeus && cargo build --workspace --release
+    cd taskmaster && cargo build --workspace --release
 
 # Format the Rust workspace.
 [group('rust')]
 fmt:
-    cd zeus && cargo fmt --all
+    cd taskmaster && cargo fmt --all
 
 # Verify Rust formatting without rewriting files.
 [group('rust')]
 fmt-check:
-    cd zeus && cargo fmt --all -- --check
+    cd taskmaster && cargo fmt --all -- --check
 
 # Lint the Rust workspace with Clippy.
 [group('rust')]
 lint:
-    cd zeus && cargo clippy --workspace --all-targets -- -D warnings
+    cd taskmaster && cargo clippy --workspace --all-targets -- -D warnings
 
 # Run the Rust workspace tests.
 [group('rust')]
 test:
-    cd zeus && cargo test --workspace
+    cd taskmaster && cargo test --workspace
 
 # Run the repository's CI-equivalent checks.
 [group('checks')]
@@ -47,37 +47,37 @@ check-browser:
 # Build and launch a development copy of the desktop app.
 [group('desktop')]
 dev:
-    zeus/scripts/dev.sh
+    taskmaster/scripts/dev.sh
 
 # Rebuild and relaunch the development app on changes.
 [group('desktop')]
 dev-watch:
-    zeus/scripts/dev.sh --watch
+    taskmaster/scripts/dev.sh --watch
 
 # Build the workbench preview.
 [group('desktop')]
 dev-ui:
-    zeus/scripts/dev-ui.sh
+    taskmaster/scripts/dev-ui.sh
 
-# Assemble the packaged zeus.app bundle.
+# Assemble the packaged taskmaster.app bundle.
 [group('desktop')]
 package:
-    zeus/scripts/package.sh
+    taskmaster/scripts/package.sh
 
-# Install the locally built zeus.app bundle.
+# Install the locally built taskmaster.app bundle.
 [group('desktop')]
 install:
-    zeus/scripts/install-local.sh
+    taskmaster/scripts/install-local.sh
 
-# Create the stable "Zeus Dev" code-signing identity used by dev builds.
+# Create the stable "Taskmaster Dev" code-signing identity used by dev builds.
 [group('desktop')]
 dev-cert:
     scripts/make-dev-cert.sh
 
-# Serve the user guide locally with mdBook.
+# Serve the website, user guide, and playbooks locally.
 [group('docs')]
 docs:
-    mdbook serve docs
+    cd website && npm run dev
 
 # iOS Companion recipes (`just ios`, `just ios build`, `just ios run`, ...).
 mod ios

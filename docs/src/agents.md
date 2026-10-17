@@ -5,8 +5,8 @@ describing how to spawn it, how to resume it, which keys approve or deny a
 prompt, and the screen rules that decide whether it is working, waiting, or
 done.
 
-Zeus never installs an agent for you. Put the binary on `PATH`, sign in the
-way that CLI expects, then launch it from Zeus.
+Taskmaster never installs an agent for you. Put the binary on `PATH`, sign in the
+way that CLI expects, then launch it from Taskmaster.
 
 ## What you can launch
 
@@ -21,12 +21,12 @@ A missing binary is not a crash. The row stays visible with an install hint
 and, when the manifest has one, a setup URL.
 
 `⌘T` always does something useful. If your saved default agent disappeared,
-Zeus falls through to another installed first-class agent, then to a login
+Taskmaster falls through to another installed first-class agent, then to a login
 shell.
 
 ## Status you can leave the room on
 
-Zeus reads the grid, the title, progress, hooks, and process facts. It
+Taskmaster reads the grid, the title, progress, hooks, and process facts. It
 reduces them to a small vocabulary:
 
 | State | Meaning |
@@ -40,7 +40,7 @@ reduces them to a small vocabulary:
 
 Claude Code and Codex have the richest rules (working, blocked-permission,
 blocked-question, idle, exited) plus resume. Other catalog agents get
-whatever their manifest knows. If Zeus cannot name a blocker it will not
+whatever their manifest knows. If Taskmaster cannot name a blocker it will not
 invent one. A lying spinner is worse than a quiet row.
 
 `⌘⇧J` walks every session that needs input. Gentle status chimes (Settings →
@@ -48,7 +48,7 @@ General) are optional and stay quiet on mere token activity.
 
 ## Resume
 
-Closing Zeus does not end the process. Closing a *session* might, after a
+Closing Taskmaster does not end the process. Closing a *session* might, after a
 confirm if you left that setting on.
 
 Agents that support resume can pick up a conversation after a clean exit or
@@ -59,8 +59,8 @@ Archiving (`⌘⇧W`) is for history, not resume.
 
 ## Hosted vs a bare shell
 
-A **hosted** agent is one Zeus launched from a manifest. Those sessions get
-Zeus MCP injected automatically (see [Orchestration](orchestration.md)).
+A **hosted** agent is one Taskmaster launched from a manifest. Those sessions get
+Taskmaster MCP injected automatically (see [Orchestration](orchestration.md)).
 
 A **plain terminal** (`⌥⌘T`) is your login shell. It still has a sidebar
 row and running/exited status. It does not get agent MCP, resume, or a

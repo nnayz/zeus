@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 export async function launchBrowser(executable) {
-  const profile = await mkdtemp(join(tmpdir(), 'zeus-companion-browser-'));
+  const profile = await mkdtemp(join(tmpdir(), 'taskmaster-companion-browser-'));
   const process = spawn(executable, ['--headless', '--no-sandbox', '--disable-gpu', '--disable-background-networking', '--disable-component-update', '--no-first-run', '--remote-debugging-pipe', `--user-data-dir=${profile}`], { stdio: ['ignore', 'ignore', 'ignore', 'pipe', 'pipe'] });
   let sequence = 0, buffer = Buffer.alloc(0), sessionId;
   const pending = new Map();

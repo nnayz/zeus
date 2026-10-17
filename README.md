@@ -124,18 +124,22 @@ to take longer because it compiles GPUI from Zeus's pinned Zed revision. The
 builds, previews, and every required check.
 
 ```sh
-(cd zeus && cargo build)                   # compile the workspace
-(cd zeus && cargo run -p zeus-app)         # launch a development build
+# Compile and run.
+just build                                 # compile the workspace
+just dev                                   # launch a development build
 
-zeus/scripts/package.sh                    # assemble the application bundle
-zeus/scripts/install-local.sh              # install that local bundle
+# Package or install a local bundle.
+just package                               # assemble the application bundle
+just install                               # install that local bundle
 ```
 
-Run the repository's main CI-equivalent checks with:
-
-```sh
-./scripts/check.sh
-```
+Everyday commands are wrapped in
+[just](https://github.com/casey/just) 1.31 or newer (`brew install just`);
+`just --list` shows the rest, including `just check` for the repository's
+CI-equivalent checks, `just ios` for the iOS Companion, and `just prototypes`
+for the prototypes. The underlying scripts remain available directly:
+`zeus/scripts/package.sh`, `zeus/scripts/install-local.sh`, and
+`./scripts/check.sh`.
 
 The source for the User Guide is in [`docs/`](docs/); the Developer Guide
 lives in [`developer-docs/`](developer-docs/). Release engineering is

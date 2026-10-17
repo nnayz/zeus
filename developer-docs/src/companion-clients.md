@@ -34,9 +34,9 @@ never connects to SSH, an Engine, or a real agent, and its routes must not be
 deployed.
 
 ```sh
-cd prototypes/companion-web
-npm start   # http://127.0.0.1:4174/ opens the pairing fixture
-npm test
+just prototypes start   # http://127.0.0.1:4174/ opens the pairing fixture
+just prototypes test
+just prototypes measure
 ```
 
 `README.md` documents the gateway contract, bounds, and the privacy/curtain
@@ -51,13 +51,18 @@ introduce a Swift daemon or CLI.
 
 - Open `ios/ZeusCompanion/ZeusCompanion.xcodeproj` in Xcode 26 or newer and
   run the `ZeusCompanion` scheme on an iOS 17+ device or simulator. Signing is
-  needed for a physical device.
+  needed for a physical device. Alternatively, install
+  [just](https://github.com/casey/just) 1.31 or newer and use `just ios build`
+  or `just ios run` from anywhere in the repository.
 - The client requires HTTPS; it stores the paired bearer token in Keychain and
   validates the server ID and API major version. See the client's
   [`README.md`](https://github.com/nnayz/zeus/blob/main/ios/ZeusCompanion/README.md).
-- For local work, `scripts/companion-dev.sh` from the repository root starts
-  an isolated test Engine, an HTTPS reverse proxy, and copies a fresh pairing
-  payload to the clipboard.
+- For local work, `just ios dev` starts an isolated test Engine, an HTTPS
+  reverse proxy, and copies a fresh pairing payload to the clipboard. The
+  underlying script is `ios/scripts/companion-dev.sh`.
+
+`just ios run` picks the first booted iPhone, otherwise the newest available
+one. Set `ZEUS_IOS_SIMULATOR="iPhone 17 Pro"` to choose another.
 
 The user-facing setup and pairing flow for the app is documented once, in the
 User Guide: [iOS Companion](../ios-companion.html).

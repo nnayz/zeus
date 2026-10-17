@@ -1,0 +1,25 @@
+set shell := ["bash", "-uc"]
+
+# List the available recipes.
+default:
+    @just --list
+
+# Start the local HTTPS development gateway used to test the app.
+dev:
+    ./scripts/companion-dev.sh
+
+# Build ZeusCompanion for the iOS Simulator.
+build:
+    ./scripts/build.sh
+
+# Build ZeusCompanion with the Release configuration.
+build-release:
+    ./scripts/build.sh --release
+
+# Build and launch ZeusCompanion on a simulator (ZEUS_IOS_SIMULATOR picks one).
+run:
+    ./scripts/run.sh
+
+# Open the Xcode project.
+xcode:
+    open ZeusCompanion/ZeusCompanion.xcodeproj

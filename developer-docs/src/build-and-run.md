@@ -113,17 +113,17 @@ deadline. It removes the parent and child sessions it creates.
 ## iOS Companion and the web prototype
 
 The iOS app is built from `ios/ZeusCompanion/ZeusCompanion.xcodeproj` in
-Xcode (see [Companion clients and prototypes](companion-clients.md)).
-`scripts/companion-dev.sh` from the repository root starts a self-contained
-local gateway with TLS, an isolated Engine, and a fresh pairing payload on the
+Xcode (see [Companion clients and prototypes](companion-clients.md)). With
+just 1.31 or newer, `just ios build` builds for the simulator, `just ios run`
+builds and launches it, and `just ios dev` starts a self-contained local
+gateway with TLS, an isolated Engine, and a fresh pairing payload on the
 clipboard.
 
 The browser prototype under `prototypes/companion-web/` is dependency-free:
 
 ```sh
-cd prototypes/companion-web
-npm start   # loopback synthetic fixture
-npm test
+just prototypes start   # loopback synthetic fixture
+just prototypes test
 ```
 
 ## The website and books

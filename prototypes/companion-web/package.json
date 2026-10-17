@@ -4,9 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "node dev-server.mjs",
+    "start": "node scripts/dev-server.mjs",
     "test": "node --test test/*.test.mjs",
-    "measure": "node measure.mjs"
+    "measure": "node scripts/measure.mjs"
   },
   "engines": { "node": ">=22" }
 }

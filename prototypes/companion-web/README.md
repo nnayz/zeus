@@ -34,6 +34,11 @@ served independently; the fixture routes must not be deployed.
 See [VALIDATION.md](VALIDATION.md) for optional dependency-free Chromium tests,
 measured latency/network/idle findings, coverage, and device-validation gaps.
 
+From `prototypes/`, `just start`, `just test`, and `just measure` wrap the npm
+commands above; from the repository root, use `just prototypes start`,
+`just prototypes test`, and `just prototypes measure`. The fixture server and
+measurement harness live in `scripts/`.
+
 ## Gateway contract
 
 The authority is `zeus/crates/zeus-companion-api/src/lib.rs` from #73 (initial

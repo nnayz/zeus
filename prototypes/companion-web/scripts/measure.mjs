@@ -1,6 +1,6 @@
 // Numeric-only fixture measurements. Never report credentials or content.
 import { createFixture } from './dev-server.mjs';
-import { CompanionClient } from './public/client.js';
+import { CompanionClient } from '../public/client.js';
 
 const fixture = await createFixture();
 const counts = { requestBodyBytes: 0, responseBodyBytes: 0, eventBodyBytes: 0 };

@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 WORKSPACE="${REPO_ROOT}/zeus"
 DEV_DIR="${HOME}/.zeus-companion-dev"
 CERTS_DIR="${DEV_DIR}/certs"

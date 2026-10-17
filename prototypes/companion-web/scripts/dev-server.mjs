@@ -53,7 +53,7 @@ export async function createFixture({ port = 0 } = {}) {
         response.end(`<!doctype html><html lang="en"><meta name="viewport" content="width=device-width"><title>Zeus local fixture</title><body style="font:18px system-ui;max-width:700px;margin:2rem;padding:1rem"><h1>Local fixture · synthetic data only</h1><p>Pairing expires in two minutes. This page is fixture tooling, never shipped with the PWA.</p><label for="fixture-payload">Pairing payload</label><textarea id="fixture-payload" rows="8" style="width:100%">${JSON.stringify(payload)}</textarea><p><a href="/">Open Companion</a></p><p>Use the test suite for deterministic revocation, replay, reconnect, and failure scenarios.</p></body></html>`); return;
       }
       if (request.method === 'GET' && STATIC.has(path) && !url.search) {
-        const [file, type] = STATIC.get(path); const content = await readFile(new URL(`./public/${file}`, import.meta.url));
+        const [file, type] = STATIC.get(path); const content = await readFile(new URL(`../public/${file}`, import.meta.url));
         response.writeHead(200, { 'Content-Type': type, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'Permissions-Policy': 'camera=(), microphone=(), geolocation=()', 'Content-Security-Policy': "frame-ancestors 'none'" }); response.end(content); return;
       }
       if (request.method === 'POST' && path === '/v1/pair') {

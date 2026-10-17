@@ -14,10 +14,21 @@ not supported by the native client.
 
 ## Local Development and Testing
 
-To run a self-contained local testing gateway on your Mac:
+The [`ios/justfile`](../justfile) wraps the everyday commands. Run `just` from
+`ios/`, or from the repository root as `just ios RECIPE`:
 
 ```sh
-./scripts/companion-dev.sh
+just dev     # start the local HTTPS testing gateway
+just build   # build ZeusCompanion for the iOS Simulator
+just run     # build, install, and launch on a simulator
+just xcode   # open ZeusCompanion.xcodeproj
+```
+
+The wrappers live in [`scripts/`](../scripts). From the repository root, the
+same gateway starts with:
+
+```sh
+ios/scripts/companion-dev.sh
 ```
 
 This script:

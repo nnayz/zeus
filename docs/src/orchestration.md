@@ -84,7 +84,9 @@ taskmaster session wait <id> --until done --timeout 1200
 taskmaster session read <id> --source output --lines 80
 ```
 
-See [Command line](cli.md).
+See [Command line](cli.md). The bridge itself — how the MCP overlay is
+injected, the hooks, and the server binary — is documented in the
+[developer guide on GitHub](dev/manifests.html).
 
 ## What not to do
 

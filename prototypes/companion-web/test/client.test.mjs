@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createFixture } from '../dev-server.mjs';
+import { createFixture } from '../scripts/dev-server.mjs';
 import { CompanionClient, boundedJSON, validateHello, validateScreen } from '../public/client.js';
 import { EventCursor, LIMITS, confirmation, errorMessage, origin, pairingPayload, promptText, terminalText } from '../public/model.js';
 

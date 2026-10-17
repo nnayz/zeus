@@ -15,6 +15,7 @@ pub mod fuzzy;
 mod git_review;
 pub mod history;
 mod image_attachment;
+pub mod inbox;
 mod inspector;
 mod launcher;
 pub mod markdown;

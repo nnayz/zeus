@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { createFixture } from '../dev-server.mjs';
+import { createFixture } from '../scripts/dev-server.mjs';
 import { launchBrowser } from './cdp.mjs';
 
 const executable = process.env.COMPANION_BROWSER;

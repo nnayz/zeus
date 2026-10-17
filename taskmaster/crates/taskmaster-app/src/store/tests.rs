@@ -3,18 +3,21 @@ use std::sync::Arc;
 
 use taskmaster_proto::{
     AgentDescriptor, AgentKind, AgentReadinessItem, AgentReadinessResult, AttentionLevel,
-    DateMillis, ExitInfo, ExitReason, Project, ProjectId, Resumability, SessionId,
+    DateMillis, ExitInfo, ExitReason, InboxItemKind, NeedsInputDetail, NeedsInputKind,
+    NeedsInputSource, Project, ProjectId, Resumability, RiskHint, SessionChange, SessionId,
     SessionListResult, SessionRecord, SessionStatus, TitleSource,
 };
 use tempfile::tempdir;
 use tokio::sync::mpsc;
 
+use crate::inbox::InboxKey;
 use crate::notifications::NotificationSound;
 
 use super::{
-    ClickModifiers, EventEnvelope, InspectorTab, LaunchRecipe, LineageView, Prefs, RecipeOverrides,
-    RecipeProject, RecipeWorktree, SessionStore, SidebarProjection, StoreEffect, StoreEventChange,
-    TerminalResidency, WindowMode, WindowPlacement, event_publication_policy,
+    ClickModifiers, EventEnvelope, INBOX_SNOOZE, InboxHandled, InspectorTab, LaunchRecipe,
+    LineageView, Prefs, RecipeOverrides, RecipeProject, RecipeWorktree, SessionStore,
+    SidebarProjection, StoreEffect, StoreEventChange, TerminalResidency, WindowMode,
+    WindowPlacement, event_publication_policy,
 };
 use crate::switcher::{OverviewFilter, OverviewLane, SwitcherKey};
 
@@ -2963,4 +2966,326 @@ fn remote_recipe_spawn_does_not_invoke_local_worktree_behavior() {
         ..remote
     };
     assert!(store.diagnose_launch_recipe(&invalid).is_err());
+}
+
+fn needs_input(value: &str, kind: NeedsInputKind, summary: &str, risk: RiskHint) -> SessionRecord {
+    let mut record = session(value, "a", 1.0);
+    record.status = SessionStatus::NeedsInput(kind);
+    record.needs_input = Some(NeedsInputDetail {
+        kind,
+        source: NeedsInputSource::ClaudePermissionHook,
+        tool_name: Some("Bash".to_owned()),
+        summary: summary.to_owned(),
+        prompt_excerpt: Some(format!("excerpt for {summary}")),
+        options: None,
+        risk_hint: risk,
+        occurred_at: DateMillis(10.0),
+    });
+    record
+}
+
+#[test]
+fn the_inbox_is_one_queue_for_local_and_remote_sessions() {
+    let mut remote = needs_input(
+        "remote",
+        NeedsInputKind::Permission,
+        "push to origin/main?",
+        RiskHint::Network,
+    );
+    remote.host = Some("forge".to_owned());
+    let local = needs_input(
+        "local",
+        NeedsInputKind::Question,
+        "which database should I use?",
+        RiskHint::Neutral,
+    );
+    let (store, _) = hydrated(
+        vec![remote, local],
+        vec![project("a", "A")],
+        Prefs::default(),
+    );
+
+    let items = store.inbox_items_at(DateMillis(100.0));
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0].session_id, id("remote"));
+    assert!(items[0].is_remote());
+    assert_eq!(items[0].key.session_id, id("remote"));
+    assert_eq!(items[1].session_id, id("local"));
+    assert!(!items[1].is_remote());
+    assert_eq!(items[1].headline, "which database should I use?");
+}
+
+#[test]
+fn the_inbox_never_lists_working_or_unnamed_sessions() {
+    let mut working = needs_input(
+        "working",
+        NeedsInputKind::Permission,
+        "approve the deploy?",
+        RiskHint::Destructive,
+    );
+    working.status = SessionStatus::Working;
+    let mut unnamed = session("unnamed", "a", 1.0);
+    unnamed.status = SessionStatus::NeedsInput(NeedsInputKind::Permission);
+    let (store, _) = hydrated(
+        vec![working, unnamed],
+        vec![project("a", "A")],
+        Prefs::default(),
+    );
+
+    assert!(store.inbox_items_at(DateMillis(100.0)).is_empty());
+}
+
+#[test]
+fn inbox_approve_and_deny_run_the_same_answers_notifications_run() {
+    let (mut store, _) = hydrated(
+        vec![needs_input(
+            "one",
+            NeedsInputKind::Permission,
+            "delete /tmp?",
+            RiskHint::Destructive,
+        )],
+        vec![project("a", "A")],
+        Prefs::default(),
+    );
+    assert!(store.toggle_inbox());
+
+    let approve = store.handle_inbox_key(InboxKey::Approve);
+    let InboxHandled::Answer(approve) = approve else {
+        panic!("expected an approve answer, got {approve:?}");
+    };
+    assert_eq!(approve.session_id, id("one"));
+    assert_eq!(approve.text, "1");
+    assert!(approve.submit);
+
+    let deny = store.handle_inbox_key(InboxKey::Deny);
+    let InboxHandled::Answer(deny) = deny else {
+        panic!("expected a deny answer, got {deny:?}");
+    };
+    assert_eq!(deny.session_id, id("one"));
+    assert_eq!(deny.text, "\u{1b}");
+    assert!(!deny.submit);
+
+    assert!(
+        store.inbox_state().is_visible(),
+        "answering keeps the inbox up for the next decision"
+    );
+}
+
+#[test]
+fn questions_have_no_one_tap_answer() {
+    let (mut store, _) = hydrated(
+        vec![needs_input(
+            "one",
+            NeedsInputKind::Question,
+            "which database?",
+            RiskHint::Neutral,
+        )],
+        vec![project("a", "A")],
+        Prefs::default(),
+    );
+    store.toggle_inbox();
+
+    assert_eq!(
+        store.handle_inbox_key(InboxKey::Approve),
+        InboxHandled::Consumed
+    );
+    assert_eq!(
+        store.handle_inbox_key(InboxKey::Deny),
+        InboxHandled::Consumed
+    );
+}
+
+#[test]
+fn inbox_jump_selects_the_session_and_closes_the_overlay() {
+    let (mut store, mut effects) = hydrated(
+        vec![needs_input(
+            "one",
+            NeedsInputKind::Permission,
+            "delete /tmp?",
+            RiskHint::Neutral,
+        )],
+        vec![project("a", "A")],
+        Prefs::default(),
+    );
+    store.toggle_inbox();
+    drain(&mut effects);
+
+    let outcome = store.handle_inbox_key(InboxKey::Jump);
+    assert_eq!(outcome, InboxHandled::Jumped(id("one")));
+    assert!(!store.inbox_state().is_visible());
+    assert_eq!(store.selected_session_id(), Some(&id("one")));
+    assert!(
+        drain(&mut effects)
+            .into_iter()
+            .any(|effect| matches!(effect, StoreEffect::MarkSeen(session) if session == id("one"))),
+        "jumping counts as looking at the session"
+    );
+}
+
+#[test]
+fn inbox_dismiss_and_snooze_hide_items_from_the_queue() {
+    let (mut store, _) = hydrated(
+        vec![needs_input(
+            "one",
+            NeedsInputKind::Permission,
+            "delete /tmp?",
+            RiskHint::Neutral,
+        )],
+        vec![project("a", "A")],
+        Prefs::default(),
+    );
+    store.toggle_inbox();
+
+    assert_eq!(
+        store.handle_inbox_key(InboxKey::Dismiss),
+        InboxHandled::Hidden
+    );
+    assert!(store.inbox_items_at(DateMillis(100.0)).is_empty());
+    assert!(
+        store.inbox_state().is_visible(),
+        "dismissing keeps the inbox up for the next decision"
+    );
+}
+
+#[test]
+fn inbox_snooze_expires_without_sleeping() {
+    let (mut store, _) = hydrated(
+        vec![needs_input(
+            "one",
+            NeedsInputKind::Permission,
+            "delete /tmp?",
+            RiskHint::Neutral,
+        )],
+        vec![project("a", "A")],
+        Prefs::default(),
+    );
+    store.toggle_inbox();
+    assert_eq!(
+        store.handle_inbox_key(InboxKey::Snooze),
+        InboxHandled::Hidden
+    );
+
+    let now = super::now_millis();
+    assert!(store.inbox_items_at(now).is_empty());
+    let almost = DateMillis(now.0 + INBOX_SNOOZE.as_millis() as f64 - 1.0);
+    assert!(store.inbox_items_at(almost).is_empty());
+    let after = DateMillis(now.0 + INBOX_SNOOZE.as_millis() as f64);
+    assert_eq!(store.inbox_items_at(after).len(), 1);
+}
+
+#[test]
+fn done_with_diff_requires_a_probe_for_the_current_turn() {
+    let mut finished = session("finished", "a", 1.0);
+    finished.last_turn_completed_at = Some(DateMillis(50.0));
+    let idle = session("idle", "a", 1.0);
+    let (mut store, mut effects) = hydrated(
+        vec![finished, idle],
+        vec![project("a", "A")],
+        Prefs::default(),
+    );
+    drain(&mut effects);
+
+    // Only a session that finished a turn is worth probing, and nothing is
+    // queued before the probe answers.
+    assert_eq!(store.inbox_probe_targets(), vec![id("finished")]);
+    assert!(store.inbox_items_at(DateMillis(100.0)).is_empty());
+
+    store.request_inbox_probes();
+    let probed: Vec<_> = drain(&mut effects)
+        .into_iter()
+        .filter_map(|effect| match effect {
+            StoreEffect::ProbeInboxChange { id, completed_at } => Some((id, completed_at)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(probed, vec![(id("finished"), DateMillis(50.0))]);
+    assert!(
+        store.inbox_probe_targets().is_empty(),
+        "an in-flight probe is not restarted"
+    );
+
+    store.apply_inbox_change(
+        id("finished"),
+        DateMillis(50.0),
+        SessionChange::Changed { files: 3 },
+    );
+    assert!(store.inbox_probe_targets().is_empty());
+    let items = store.inbox_items_at(DateMillis(100.0));
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].session_id, id("finished"));
+    assert_eq!(items[0].reason, InboxItemKind::DoneWithDiff { files: 3 });
+    assert_eq!(items[0].headline, "3 files changed");
+
+    // A later turn invalidates the signal: the queue goes quiet until the new
+    // turn is probed, and the old answer is never lent to it.
+    let mut next_turn = session("finished", "a", 1.0);
+    next_turn.last_turn_completed_at = Some(DateMillis(80.0));
+    store.upsert_session(next_turn);
+    assert_eq!(store.inbox_probe_targets(), vec![id("finished")]);
+    assert!(
+        store.inbox_items_at(DateMillis(100.0)).is_empty(),
+        "a signal probed for an older turn cannot classify a newer one"
+    );
+
+    store.apply_inbox_change(id("finished"), DateMillis(80.0), SessionChange::Unchanged);
+    assert!(store.inbox_items_at(DateMillis(100.0)).is_empty());
+    assert!(
+        store.inbox_probe_targets().is_empty(),
+        "an unchanged answer still counts as probed for that turn"
+    );
+}
+
+#[test]
+fn failures_reach_the_inbox_without_any_probe() {
+    let mut crashed = session("crashed", "a", 1.0);
+    crashed.status = SessionStatus::Exited(ExitInfo {
+        reason: ExitReason::Exited,
+        code: Some(1),
+        signal: None,
+    });
+    let (store, _) = hydrated(vec![crashed], vec![project("a", "A")], Prefs::default());
+
+    let items = store.inbox_items_at(DateMillis(100.0));
+    assert_eq!(items.len(), 1);
+    assert_eq!(
+        items[0].reason,
+        InboxItemKind::Failure {
+            detail: "exited with code 1".to_owned()
+        }
+    );
+}
+
+#[test]
+fn opening_the_inbox_requests_only_finished_turn_probes() {
+    let mut finished = session("finished", "a", 1.0);
+    finished.last_turn_completed_at = Some(DateMillis(50.0));
+    let (mut store, mut effects) = hydrated(
+        vec![finished, session("idle", "a", 1.0)],
+        vec![project("a", "A")],
+        Prefs::default(),
+    );
+    drain(&mut effects);
+
+    assert!(store.toggle_inbox());
+    let probed: Vec<_> = drain(&mut effects)
+        .into_iter()
+        .filter_map(|effect| match effect {
+            StoreEffect::ProbeInboxChange { id, .. } => Some(id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(probed, vec![id("finished")]);
+
+    assert!(!store.toggle_inbox(), "toggling again closes");
+    // A failed probe is simply retried on the next open, not remembered.
+    store.fail_inbox_change(id("finished"));
+    assert!(store.toggle_inbox());
+    let retried: Vec<_> = drain(&mut effects)
+        .into_iter()
+        .filter_map(|effect| match effect {
+            StoreEffect::ProbeInboxChange { id, .. } => Some(id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(retried, vec![id("finished")]);
 }

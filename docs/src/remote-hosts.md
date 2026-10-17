@@ -84,7 +84,9 @@ Holder internals are in the
 [developer guide on GitHub](https://github.com/nnayz/taskmaster/blob/main/docs/dev/src/remote.md), not here.
 
 Prefer a dedicated non-admin account and narrowly scoped credentials. See
-the [security model](security-model.md).
+the [security model](security-model.md). The transport design itself —
+bootstrap, holder lifecycle, protocol, and performance gates — is documented
+in the [developer guide on GitHub](dev/remote.html).
 
 ## First-party nodes
 

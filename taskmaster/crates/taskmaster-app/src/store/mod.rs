@@ -16,15 +16,18 @@ use taskmaster_proto::paths::TaskmasterPaths;
 use taskmaster_proto::remote_pty::DirectoryListResult;
 use taskmaster_proto::{
     AgentDescriptor, AgentKind, AgentReadinessResult, AttentionLevel, DateMillis, EventName,
-    ExitReason, GovernorConfigureParams, HostEntry, HostsConfig, Project, ProjectId, Resumability,
-    SessionId, SessionListResult, SessionRecord, SessionSpawnParams, SessionStatus,
+    ExitReason, GovernorConfigureParams, HostEntry, HostsConfig, InboxItem, InboxQueue, Project,
+    ProjectId, Resumability, SessionChange, SessionId, SessionListResult, SessionRecord,
+    SessionSpawnParams, SessionStatus,
 };
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 
+use crate::inbox::{InboxAction, InboxKey, InboxOutcome, InboxSnapshot, InboxSurfaceState};
 use crate::notifications::{
-    SendTextCommand, StatusTransition, migration_transition, prefs_sync_transition,
-    reach_failure_transition, transitions_for_update,
+    APPROVE_ACTION_ID, DENY_ACTION_ID, SendTextCommand, StatusTransition, command_for_action,
+    migration_transition, permission_action_data, prefs_sync_transition, reach_failure_transition,
+    transitions_for_update,
 };
 use crate::switcher::{
     OverviewArrow, OverviewFilter, OverviewMode, OverviewOutcome, SessionOverviewState,
@@ -171,6 +174,35 @@ pub enum StoreEffect {
     DetachAttachment(SessionId),
     /// T15 consumes this without involving daemon lifecycle operations.
     StatusTransition(StatusTransition),
+    /// `git.workspace` for one finished session. The answer becomes the
+    /// change signal behind `done-with-diff`, so an item exists only when a
+    /// probe actually found changes. The turn is carried along so a signal
+    /// measured for an older turn cannot attach to a newer one.
+    ProbeInboxChange {
+        id: SessionId,
+        completed_at: DateMillis,
+    },
+}
+
+/// How long a snoozed inbox item stays hidden. It returns afterwards unless
+/// the session resolved it first.
+pub const INBOX_SNOOZE: Duration = Duration::from_secs(60 * 60);
+
+/// What routing one triage key produced, for the shell to act on.
+#[derive(Clone, Debug, PartialEq)]
+pub enum InboxHandled {
+    /// The inbox is closed and does not own the key.
+    Ignored,
+    /// The key belonged to the inbox but asked for nothing.
+    Consumed,
+    /// The overlay state changed; repaint.
+    Changed,
+    /// The item was acted on and is hidden (dismissed or snoozed).
+    Hidden,
+    /// Jumped to the session; the overlay is closed.
+    Jumped(SessionId),
+    /// An answer to deliver with the daemon's `send_text`.
+    Answer(SendTextCommand),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -310,6 +342,16 @@ pub struct SessionStore {
     /// Empty until the first successful connect, and empty forever against a
     /// daemon too old to send descriptors — every reader must have a fallback.
     agents: AgentReadinessResult,
+    /// Navigation state of the needs-you inbox overlay.
+    inbox: InboxSurfaceState,
+    /// The human's dismiss/snooze decisions over derived inbox items.
+    inbox_queue: InboxQueue,
+    /// Workspace change answers per session, from `git.workspace` probes.
+    inbox_changes: HashMap<SessionId, SessionChange>,
+    /// The `last_turn_completed_at` value each session was last probed at.
+    inbox_probed: HashMap<SessionId, f64>,
+    /// Session ids with an inbox probe in flight.
+    inbox_probes: HashSet<SessionId>,
     effects: mpsc::UnboundedSender<StoreEffect>,
 }
 
@@ -368,6 +410,11 @@ impl SessionStore {
                 ui_notify: None,
                 hosts: Vec::new(),
                 agents: AgentReadinessResult::default(),
+                inbox: InboxSurfaceState::default(),
+                inbox_queue: InboxQueue::default(),
+                inbox_changes: HashMap::new(),
+                inbox_probed: HashMap::new(),
+                inbox_probes: HashSet::new(),
                 effects,
             },
             receiver,
@@ -1888,6 +1935,11 @@ impl SessionStore {
             self.auto_select_if_needed_without_resume();
         }
         self.reconcile_navigation();
+        if self.inbox.is_visible() {
+            // A session that just finished a turn should reach the open inbox
+            // without waiting for a reopen; probes are deduped per turn.
+            self.request_inbox_probes();
+        }
     }
 
     pub fn remove_session_record(&mut self, id: &SessionId) {
@@ -1900,6 +1952,11 @@ impl SessionStore {
         self.mru_order.retain(|candidate| candidate != id);
         self.auto_resuming.remove(id);
         self.migrating.remove(id);
+        self.inbox_changes.remove(id);
+        self.inbox_probed.remove(id);
+        self.inbox_probes.remove(id);
+        let live: HashSet<SessionId> = self.sessions.keys().cloned().collect();
+        self.inbox_queue.retain_sessions(&live);
         if self.terminal_residency.remove(id) {
             self.emit(StoreEffect::DetachAttachment(id.clone()));
         }
@@ -1917,6 +1974,188 @@ impl SessionStore {
         self.sidebar_selection.clear();
         self.sidebar_selection_anchor = Some(id.clone());
         self.focus_session(id);
+    }
+
+    // -- Needs-you inbox ----------------------------------------------------
+
+    /// The inbox overlay's navigation state.
+    pub fn inbox_state(&self) -> &InboxSurfaceState {
+        &self.inbox
+    }
+
+    /// The triage queue as of now, with the highlight clamped to it.
+    pub fn inbox_snapshot(&mut self) -> InboxSnapshot {
+        let items = self.inbox_items_at(now_millis());
+        self.inbox.reconcile(items.len());
+        InboxSnapshot {
+            items,
+            highlight: self.inbox.highlight(),
+        }
+    }
+
+    /// The triage queue as of `now`. Deterministic: the caller passes the
+    /// clock, which is what makes snooze expiry testable without sleeping.
+    pub fn inbox_items_at(&self, now: DateMillis) -> Vec<InboxItem> {
+        // A change signal belongs to the turn it was probed for. Anything
+        // older is dropped rather than lent to a newer turn.
+        let changes: HashMap<SessionId, SessionChange> = self
+            .sessions
+            .values()
+            .filter(|session| {
+                matches!(
+                    self.inbox_probed.get(&session.id),
+                    Some(probed)
+                        if session
+                            .last_turn_completed_at
+                            .is_some_and(|completed| completed.0 == *probed)
+                )
+            })
+            .filter_map(|session| {
+                self.inbox_changes
+                    .get(&session.id)
+                    .copied()
+                    .map(|change| (session.id.clone(), change))
+            })
+            .collect();
+        self.inbox_queue.items(
+            self.sessions
+                .values()
+                .filter(|session| !self.closing.contains(&session.id))
+                .map(AsRef::as_ref),
+            &changes,
+            now,
+        )
+    }
+
+    /// Opens or closes the inbox. At most one overlay is up at a time, and
+    /// opening asks for the workspace probes `done-with-diff` needs.
+    pub fn toggle_inbox(&mut self) -> bool {
+        if self.inbox.is_visible() {
+            self.inbox.close();
+            return false;
+        }
+        self.inbox.open();
+        self.overview.dismiss();
+        self.switcher.cancel();
+        self.request_inbox_probes();
+        true
+    }
+
+    pub fn close_inbox(&mut self) {
+        self.inbox.close();
+    }
+
+    /// Click-activation of one inbox row: the same as pressing return on it.
+    pub fn inbox_open_session(&mut self, id: SessionId) {
+        self.inbox.close();
+        self.select(id);
+    }
+
+    /// Sessions whose finished-turn change signal was never probed, or was
+    /// probed for an older turn. Sorted so probes are emitted deterministically.
+    pub fn inbox_probe_targets(&self) -> Vec<SessionId> {
+        let mut targets: Vec<_> = self
+            .sessions
+            .values()
+            .filter(|session| matches!(session.status, SessionStatus::Idle))
+            .filter(|session| session.last_turn_completed_at.is_some())
+            .filter(|session| !self.inbox_probes.contains(&session.id))
+            .filter(|session| {
+                self.inbox_probed.get(&session.id).copied()
+                    != session.last_turn_completed_at.map(|completed| completed.0)
+            })
+            .map(|session| session.id.clone())
+            .collect();
+        targets.sort_by(|left, right| left.0.cmp(&right.0));
+        targets
+    }
+
+    /// Emit one probe per session that still needs a change answer.
+    pub fn request_inbox_probes(&mut self) {
+        for id in self.inbox_probe_targets() {
+            let Some(completed_at) = self
+                .sessions
+                .get(&id)
+                .and_then(|session| session.last_turn_completed_at)
+            else {
+                continue;
+            };
+            self.inbox_probes.insert(id.clone());
+            self.emit(StoreEffect::ProbeInboxChange { id, completed_at });
+        }
+    }
+
+    /// A probe answered: remember the change signal for the turn it measured.
+    pub fn apply_inbox_change(
+        &mut self,
+        id: SessionId,
+        completed_at: DateMillis,
+        change: SessionChange,
+    ) {
+        self.inbox_probes.remove(&id);
+        self.inbox_probed.insert(id.clone(), completed_at.0);
+        self.inbox_changes.insert(id, change);
+    }
+
+    /// A probe failed transiently: leave the signal unknown so a later open
+    /// can retry instead of remembering a wrong "unchanged".
+    pub fn fail_inbox_change(&mut self, id: SessionId) {
+        self.inbox_probes.remove(&id);
+    }
+
+    /// Routes one triage key to the highlighted item.
+    pub fn handle_inbox_key(&mut self, key: InboxKey) -> InboxHandled {
+        let now = now_millis();
+        let items = self.inbox_items_at(now);
+        let outcome = self.inbox.handle(key, items.len());
+        let index = self.inbox.highlight();
+        match outcome {
+            InboxOutcome::Ignored => InboxHandled::Ignored,
+            InboxOutcome::Consumed => InboxHandled::Consumed,
+            InboxOutcome::Changed => InboxHandled::Changed,
+            InboxOutcome::Act(action) => {
+                let Some(item) = items.get(index).cloned() else {
+                    return InboxHandled::Consumed;
+                };
+                match action {
+                    InboxAction::Jump => {
+                        self.inbox.close();
+                        self.select(item.session_id.clone());
+                        InboxHandled::Jumped(item.session_id)
+                    }
+                    InboxAction::Approve => self.inbox_answer(&item.session_id, true),
+                    InboxAction::Deny => self.inbox_answer(&item.session_id, false),
+                    InboxAction::Snooze => {
+                        self.inbox_queue.snooze(
+                            &item.key,
+                            DateMillis(now.0 + INBOX_SNOOZE.as_millis() as f64),
+                        );
+                        InboxHandled::Hidden
+                    }
+                    InboxAction::Dismiss => {
+                        self.inbox_queue.dismiss(&item.key);
+                        InboxHandled::Hidden
+                    }
+                }
+            }
+        }
+    }
+
+    /// Resolve approve/deny against the live record and the agent manifest —
+    /// the exact keystrokes the notification action would send. Questions,
+    /// shells, and agents without a verified dialog answer nothing.
+    fn inbox_answer(&self, id: &SessionId, approve: bool) -> InboxHandled {
+        let Some(session) = self.sessions.get(id) else {
+            return InboxHandled::Consumed;
+        };
+        let action = if approve {
+            APPROVE_ACTION_ID
+        } else {
+            DENY_ACTION_ID
+        };
+        permission_action_data(session, self.agents.descriptor(session.effective_kind()))
+            .and_then(|data| command_for_action(action, &data))
+            .map_or(InboxHandled::Consumed, InboxHandled::Answer)
     }
 
     fn apply_spawn_result(&mut self, id: SessionId) {
@@ -2048,6 +2287,10 @@ impl SessionStore {
             Vec::new()
         };
         let outcome = self.switcher.key_down(key, &order);
+        if matches!(outcome, SwitcherOutcome::Opened) {
+            // One overlay at a time: the switcher takes over the screen.
+            self.inbox.close();
+        }
         let consumed = outcome.consumed();
         self.apply_switcher_outcome(outcome);
         consumed
@@ -2076,6 +2319,7 @@ impl SessionStore {
         self.overview.toggle(&sessions);
         if self.overview.is_visible() {
             self.switcher.cancel();
+            self.inbox.close();
         }
     }
 
@@ -3163,6 +3407,34 @@ async fn run_effects(
         let result: Result<(), ClientError> = match effect {
             StoreEffect::UiChanged | StoreEffect::PublishSnapshot => Ok(()),
             StoreEffect::MarkSeen(id) => client.mark_seen(&id).await,
+            StoreEffect::ProbeInboxChange { id, completed_at } => {
+                match client.git_workspace(id.clone(), None).await {
+                    Ok(workspace) => {
+                        let files = workspace.status.staged.len()
+                            + workspace.status.unstaged.len()
+                            + workspace.status.untracked.len()
+                            + workspace.status.conflicted.len();
+                        let change = if files > 0 {
+                            SessionChange::Changed {
+                                files: files as u32,
+                            }
+                        } else {
+                            SessionChange::Unchanged
+                        };
+                        store
+                            .write()
+                            .expect("session store lock poisoned")
+                            .apply_inbox_change(id, completed_at, change);
+                    }
+                    Err(_) => {
+                        store
+                            .write()
+                            .expect("session store lock poisoned")
+                            .fail_inbox_change(id);
+                    }
+                }
+                Ok(())
+            }
             StoreEffect::Remove(id) => client.remove(&id).await,
             StoreEffect::Resume { id, automatic } => {
                 let result = client.resume(&id).await.map(|_| ());

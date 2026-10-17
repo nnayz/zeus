@@ -17,6 +17,9 @@ Include with your email:
 - steps to reproduce
 - a small, redacted log excerpt
 
+Building Taskmaster from source, running tests, or filing a pull request? Start
+with the [developer guide on GitHub](dev/introduction.html) instead.
+
 ## Logs
 
 Daemon logs and session state:

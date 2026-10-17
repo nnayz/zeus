@@ -270,6 +270,29 @@ pub fn command_for_action(action_id: &str, data: &ActionData) -> Option<SendText
     })
 }
 
+/// The approve/deny answers for a captured permission prompt, when the agent's
+/// manifest (or the pre-descriptor fallback) declares an approve keystroke.
+///
+/// `None` for anything a one-tap answer would be unsafe for — a question, a
+/// shell, or an agent whose dialog nobody has verified — so the notification
+/// policy and the inbox triage keys offer the exact same actions.
+#[must_use]
+pub fn permission_action_data(
+    session: &SessionRecord,
+    descriptor: Option<&AgentDescriptor>,
+) -> Option<ActionData> {
+    let detail = session.needs_input.as_ref()?;
+    if detail.kind != NeedsInputKind::Permission {
+        return None;
+    }
+    let approve = approve_answer(session.effective_kind(), descriptor)?;
+    Some(ActionData {
+        session_id: session.id.clone(),
+        approve,
+        deny: deny_answer(descriptor),
+    })
+}
+
 /// Produce sound/banner work for a single authoritative session update.
 ///
 /// Chimes are emitted even for the focused session. Banners are suppressed only
@@ -353,14 +376,7 @@ fn attention_request(
     let (title, body, suffix, action_data) = match session.attention() {
         AttentionLevel::NeedsInput => {
             let detail = session.needs_input.as_ref();
-            let action_data = detail
-                .filter(|detail| detail.kind == NeedsInputKind::Permission)
-                .and_then(|_| approve_answer(session.effective_kind(), descriptor))
-                .map(|approve| ActionData {
-                    session_id: session.id.clone(),
-                    approve,
-                    deny: deny_answer(descriptor),
-                });
+            let action_data = permission_action_data(session, descriptor);
             (
                 format!(
                     "{} needs you",

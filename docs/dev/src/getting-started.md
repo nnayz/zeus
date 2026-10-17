@@ -8,6 +8,8 @@
   The pin is currently 1.99.0, with `clippy` and `rustfmt`. `rustup` installs
   that toolchain when you build inside `taskmaster/`.
 - Xcode command-line tools, for the macOS app.
+- [just](https://github.com/casey/just) 1.31 or newer for the repository-level
+  developer commands (`brew install just`).
 - A working `cargo` on `PATH`. The first build compiles GPUI from Taskmaster's
   pinned Zed revision and takes longer than a typical crate.
 
@@ -26,20 +28,22 @@ Commands below assume the repository root unless they say `taskmaster/`.
 ## Build
 
 ```sh
-(cd taskmaster && cargo build)
+just build
 ```
 
-Run a development bundle from `taskmaster/`. `scripts/dev.sh` builds a throwaway
+Run a development bundle with `just dev`. The underlying
+`taskmaster/scripts/dev.sh` builds a throwaway
 app with a commit-specific name, window title, Dock icon, and in-window
 build marker. The bundle id stays stable so macOS folder grants survive
 rebuilds. Engine, Holder, and CLI helpers run from that bundle.
 
 ```sh
-(cd taskmaster && ./scripts/dev.sh)
+just dev
 ```
 
-`./scripts/dev.sh --watch` rebuilds on save (install `watchexec` first).
-`./scripts/dev.sh --release` and `./scripts/dev.sh --settings remote` are
+`just dev-watch` rebuilds on save (install `watchexec` first).
+`taskmaster/scripts/dev.sh --release` and
+`taskmaster/scripts/dev.sh --settings remote` are
 the other everyday switches. Details, including
 `TASKMASTER_DEV_SIGN_IDENTITY` for Desktop and Documents access, are in
 [`taskmaster/README.md`](https://github.com/nnayz/taskmaster/blob/main/taskmaster/README.md).
@@ -53,13 +57,13 @@ at different terminal sizes: each client can resize the shared PTY.
 
 ## Required checks
 
-From the repository root, the CI-equivalent script is:
+From the repository root, the CI-equivalent command is:
 
 ```sh
-./scripts/check.sh
+just check
 ```
 
-That runs the shell and release-publishing guards, then from `taskmaster/`:
+That wraps `./scripts/check.sh`, which runs the shell and release-publishing guards, then from `taskmaster/`:
 
 ```sh
 cargo fmt --all -- --check
@@ -70,7 +74,7 @@ cargo test --workspace
 Before a release-oriented handoff, also build the workspace in release mode:
 
 ```sh
-(cd taskmaster && cargo build --workspace --release)
+just build-release
 ```
 
 Remote Holder acceptance (`taskmaster/scripts/remote-acceptance.sh`) and the
@@ -84,10 +88,10 @@ The user guide and the playbooks are one static site under `/docs/`. Pages in
 this directory stay Markdown on GitHub; they are not published.
 
 ```sh
-cd website
-npm test
-npm run dev
+just docs
 ```
+
+Run `npm test` inside `website/` before submitting website or guide changes.
 
 User guide: <http://127.0.0.1:4177/docs/>. Playbooks:
 <http://127.0.0.1:4177/docs/playbooks/>. `npm test` checks that every chapter

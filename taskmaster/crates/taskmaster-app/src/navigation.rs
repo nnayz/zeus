@@ -96,6 +96,7 @@ enum QuickSelection {
 pub enum NavigationEvent {
     ToggleSidebar,
     OpenOverview,
+    OpenInbox,
     OpenWorktrees,
     OpenBranches,
     GoToPullRequest,
@@ -859,6 +860,10 @@ impl NavigationOverlay {
             }
             PaletteCommand::OpenSessionOverview => {
                 cx.emit(NavigationEvent::OpenOverview);
+                self.close_overlay(cx);
+            }
+            PaletteCommand::OpenInbox => {
+                cx.emit(NavigationEvent::OpenInbox);
                 self.close_overlay(cx);
             }
             PaletteCommand::OpenWorktrees => {

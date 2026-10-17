@@ -20,7 +20,7 @@ use crate::navigation::{
 };
 use crate::notifications::{InAppBanner, NotificationSound};
 use crate::seam::{SeamSlide, toggle_has_settled};
-use crate::session_surfaces::SessionSurfaces;
+use crate::session_surfaces::{SessionSurfaces, SessionSurfacesEvent};
 use crate::sidebar::{PreviewScenario, Sidebar, SidebarEvent};
 use crate::sounds::{self, AfplayPlayer, SoundGate, StatusSound};
 use crate::store::SpawnOptions;
@@ -378,6 +378,11 @@ impl RootView {
                         surfaces.update(cx, |surfaces, cx| surfaces.open_overview(cx));
                     }
                 }
+                NavigationEvent::OpenInbox => {
+                    if let Some(surfaces) = &this.session_surfaces {
+                        surfaces.update(cx, |surfaces, cx| surfaces.open_inbox(cx));
+                    }
+                }
                 NavigationEvent::OpenWorktrees => {
                     if let Some(surfaces) = &this.utility_surfaces {
                         surfaces.update(cx, |surfaces, cx| surfaces.open_worktrees(cx));
@@ -443,6 +448,16 @@ impl RootView {
                     }
                 },
             )
+            .detach();
+        }
+        if let Some(surfaces) = &session_surfaces {
+            // An inbox jump is a jump into the session: the keyboard moves to
+            // the terminal, mirroring what activating a row elsewhere does.
+            cx.subscribe_in(surfaces, window, |this, _, event, window, cx| match event {
+                SessionSurfacesEvent::InboxJumped(_) => {
+                    this.focus_workbench(window, cx);
+                }
+            })
             .detach();
         }
 

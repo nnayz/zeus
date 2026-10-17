@@ -27,7 +27,7 @@ for tool in bash cargo python3; do
 done
 
 echo "==> Shell and release publishing guards"
-bash -n "${root}"/scripts/*.sh "${root}"/taskmaster/scripts/*.sh
+bash -n "${root}"/scripts/*.sh "${root}"/ios/scripts/*.sh "${root}"/taskmaster/scripts/*.sh
 bash "${root}/taskmaster/scripts/test-publish-github-release.sh"
 bash "${root}/taskmaster/scripts/test-publish-homebrew-cask.sh"
 

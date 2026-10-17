@@ -1,0 +1,21 @@
+set shell := ["bash", "-uc"]
+
+# List the available recipes.
+default:
+    @just --list
+
+# Start the Companion web fixture at http://127.0.0.1:4174/fixture.
+start:
+    npm --prefix companion-web start
+
+# Run the Companion web contract tests.
+test:
+    npm --prefix companion-web test
+
+# Run the fixture measurements (numeric output only).
+measure:
+    npm --prefix companion-web run measure
+
+# Run the opt-in Chromium browser tests (set COMPANION_BROWSER to a Chromium path).
+browser-test:
+    cd companion-web && node --test test/client.test.mjs test/browser.test.mjs

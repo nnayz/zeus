@@ -4,6 +4,12 @@ For first-party VPS execution, per-node Claude/Codex accounts, fleet usage,
 and transactional local↔cloud handoff, see
 [Remote nodes](../docs/src/remote-nodes.md).
 
+New contributors: the repository's [Developer Guide](../docs/dev/src/introduction.md)
+covers setup, the crate map, and required checks. Canonical engineering
+documents such as [`PACKAGING.md`](PACKAGING.md), [`UPDATING.md`](UPDATING.md),
+and [`REMOTE_PORT.md`](REMOTE_PORT.md) stay authoritative here and are indexed
+by the guide.
+
 `taskmaster` is the Rust + GPUI desktop app, shipped self-contained: the app bundle
 carries the Engine (`taskmasterd-rs`), the session holders that keep agents alive
 across Engine restarts and upgrades, the `taskmaster` CLI, and the MCP proxy. The

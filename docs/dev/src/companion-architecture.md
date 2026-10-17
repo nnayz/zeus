@@ -24,8 +24,9 @@ V1 is command-oriented: read-only full screen snapshots and selected commands
 with explicit controller takeover. Raw mobile resize, signal, PTY bytes and
 terminal diffs are excluded. The PWA prototype lives at
 `prototypes/companion-web` in this repository. Rust gateway/API/reference-client
-code lives under `taskmaster/`. Native iOS lives in a separate repository, consuming
-external schemas and fixtures; no Swift enters this repository or runtime.
+code lives under `taskmaster/`. The native SwiftUI client lives at
+`ios/TaskmasterCompanion/` and consumes the versioned external HTTPS API; Swift stays
+a client and never enters the Engine, Holder, or remote-helper runtime.
 
 ## Authority and data flow
 

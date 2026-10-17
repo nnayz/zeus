@@ -4,24 +4,28 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 
+use crate::inbox::InboxKey;
 use crate::macos::sf_symbols::{SymbolWeight, sf_symbol, sf_symbol_weighted};
-use crate::store::{SessionStore, StoreRuntime};
+use crate::notifications::SendTextCommand;
+use crate::store::{InboxHandled, SessionStore, StoreRuntime};
 use crate::switcher::{
     OverviewArrow, OverviewFilter, OverviewLane, OverviewMode, SwitcherKey, display_title,
 };
 use gpui::{
-    AnyElement, BoxShadow, ClickEvent, Context, Entity, FocusHandle, FontWeight, KeyDownEvent,
-    KeyUpEvent, ModifiersChangedEvent, MouseButton, Render, ScrollHandle, SharedString, Task,
-    Window, div, point, prelude::*, px, rgba,
+    AnyElement, BoxShadow, ClickEvent, Context, Entity, EventEmitter, FocusHandle, FontWeight,
+    KeyDownEvent, KeyUpEvent, ModifiersChangedEvent, MouseButton, Render, ScrollHandle,
+    SharedString, Task, Window, div, point, prelude::*, px, rgba,
 };
 use taskmaster_proto::{
-    AgentKind as ProtoAgentKind, AttentionLevel, RiskHint, SessionId, SessionRecord, SessionStatus,
+    AgentKind as ProtoAgentKind, AttentionLevel, InboxItem, InboxItemKind, RiskHint, SessionId,
+    SessionRecord, SessionStatus,
 };
 use taskmaster_term::element::{SharedGridBuffer, TerminalElement};
 use taskmaster_ui::{
     AgentKind, AgentLogo, HairlineDivider, Ink, Palette, Radius, SemanticColors, StatusGlyph,
     StatusState,
 };
+use tokio::sync::mpsc;
 
 pub struct SessionSurfaces {
     store: Arc<RwLock<SessionStore>>,
@@ -31,10 +35,23 @@ pub struct SessionSurfaces {
     overview_board_scroll: ScrollHandle,
     overview_lane_scrolls: HashMap<OverviewLane, ScrollHandle>,
     overview_list_scroll: ScrollHandle,
+    inbox_scroll: ScrollHandle,
+    /// Answer delivery for inbox triage keys: the same channel the
+    /// notification quick actions post to.
+    action_sender: mpsc::UnboundedSender<SendTextCommand>,
     /// This view is `.cached()` in RootView, so ambient window redraws no
     /// longer reach it: store changes must notify it directly.
     _store_changes: Task<()>,
 }
+
+/// Handed to the shell when the inbox gives the keyboard back, so focus can
+/// follow a jump into the terminal.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SessionSurfacesEvent {
+    InboxJumped(SessionId),
+}
+
+impl EventEmitter<SessionSurfacesEvent> for SessionSurfaces {}
 
 impl SessionSurfaces {
     pub fn new(runtime: Arc<StoreRuntime>, cx: &mut Context<Self>) -> Self {
@@ -62,6 +79,8 @@ impl SessionSurfaces {
                 .map(|lane| (lane, ScrollHandle::new()))
                 .collect(),
             overview_list_scroll: ScrollHandle::new(),
+            inbox_scroll: ScrollHandle::new(),
+            action_sender: runtime.notification_action_sender(),
             _store_changes: store_changes,
         }
     }
@@ -115,18 +134,27 @@ impl SessionSurfaces {
         }
         cx.notify();
     }
+
+    pub(crate) fn open_inbox(&mut self, cx: &mut Context<Self>) {
+        let mut store = self.store.write().expect("session store lock poisoned");
+        if !store.inbox_state().is_visible() {
+            store.toggle_inbox();
+        }
+        cx.notify();
+    }
 }
 
 impl Render for SessionSurfaces {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (overview_visible, switcher_visible) = {
+        let (overview_visible, switcher_visible, inbox_visible) = {
             let store = self.store.read().expect("session store lock poisoned");
             (
                 store.overview_state().is_visible(),
                 store.switcher_state().is_visible(),
+                store.inbox_state().is_visible(),
             )
         };
-        if overview_visible || switcher_visible {
+        if overview_visible || switcher_visible || inbox_visible {
             let session_ids: HashSet<_> = {
                 let store = self.store.read().expect("session store lock poisoned");
                 store.sessions().keys().cloned().collect()
@@ -150,6 +178,8 @@ impl Render for SessionSurfaces {
             root.inset_0().child(self.render_overview(window, cx))
         } else if switcher_visible {
             root.inset_0().child(self.render_switcher(window, cx))
+        } else if inbox_visible {
+            root.inset_0().child(self.render_inbox(window, cx))
         } else {
             root.size(px(0.0))
         }
@@ -190,6 +220,37 @@ impl SessionSurfaces {
             store.toggle_overview();
             cx.stop_propagation();
             cx.notify();
+            return;
+        }
+
+        if event.keystroke.key == "i" && modifiers.platform && modifiers.shift {
+            store.toggle_inbox();
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
+
+        if store.inbox_state().is_visible() {
+            let outcome = store.handle_inbox_key(inbox_key(event));
+            drop(store);
+            match outcome {
+                InboxHandled::Ignored => {}
+                InboxHandled::Consumed => cx.stop_propagation(),
+                InboxHandled::Changed | InboxHandled::Hidden => {
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+                InboxHandled::Jumped(id) => {
+                    cx.stop_propagation();
+                    cx.notify();
+                    cx.emit(SessionSurfacesEvent::InboxJumped(id));
+                }
+                InboxHandled::Answer(command) => {
+                    cx.stop_propagation();
+                    cx.notify();
+                    let _ = self.action_sender.send(command);
+                }
+            }
             return;
         }
 
@@ -458,6 +519,283 @@ impl SessionSurfaces {
             )
             .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
             .child(panel)
+            .into_any_element()
+    }
+
+    /// The needs-you inbox: one triage list across local and remote sessions.
+    ///
+    /// It is a decision surface, not a second transcript: rows carry the ask
+    /// the reducer already named, and the keys do the same things the rest of
+    /// the app does (approve/deny answer exactly like the notification does).
+    fn render_inbox(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let snapshot = {
+            let mut store = self.store.write().expect("session store lock poisoned");
+            store.inbox_snapshot()
+        };
+        let colors = self.colors();
+
+        let header = div()
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .child(
+                div()
+                    .text_size(px(15.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(colors.primary)
+                    .child("Needs you"),
+            )
+            .child(
+                div()
+                    .px(px(7.0))
+                    .py(px(1.0))
+                    .rounded(px(Radius::BADGE))
+                    .bg(Palette::CLAY.alpha(if snapshot.items.is_empty() { 0.0 } else { 0.22 }))
+                    .text_size(px(11.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(if snapshot.items.is_empty() {
+                        colors.tertiary
+                    } else {
+                        Palette::CLAY
+                    })
+                    .child(snapshot.items.len().to_string()),
+            )
+            .child(div().flex_1())
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(colors.tertiary)
+                    .child("⌘⇧I"),
+            );
+
+        let body: AnyElement = if snapshot.items.is_empty() {
+            div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .h(px(128.0))
+                .gap(px(4.0))
+                .child(
+                    div()
+                        .text_size(px(13.0))
+                        .text_color(colors.secondary)
+                        .child("Nothing needs you."),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(colors.tertiary)
+                        .child("Blocked, failed, and finished sessions land here."),
+                )
+                .into_any_element()
+        } else {
+            let mut list = div()
+                .id("inbox-list")
+                .debug_selector(|| "INBOX_LIST".into())
+                .flex()
+                .flex_col()
+                .gap(px(4.0))
+                .max_h(px(430.0))
+                .overflow_y_scroll()
+                .track_scroll(&self.inbox_scroll);
+            for (index, item) in snapshot.items.iter().enumerate() {
+                list = list.child(self.inbox_row(
+                    index,
+                    item,
+                    index == snapshot.highlight,
+                    colors,
+                    cx,
+                ));
+            }
+            list.into_any_element()
+        };
+
+        let footer = div()
+            .flex()
+            .items_center()
+            .gap(px(10.0))
+            .text_size(px(11.0))
+            .text_color(colors.tertiary)
+            .child("↑↓ move")
+            .child("⏎ jump")
+            .child("A approve")
+            .child("D deny")
+            .child("S snooze 1h")
+            .child("X dismiss")
+            .child("esc close");
+
+        let panel = div()
+            .id("inbox-panel")
+            .flex()
+            .flex_col()
+            .gap(px(12.0))
+            .w(px(620.0))
+            .p(px(18.0))
+            .rounded(px(22.0))
+            .bg(colors.sidebar_surface())
+            .border_1()
+            .border_color(colors.primary.alpha(0.08))
+            .shadow(vec![BoxShadow {
+                color: rgba(0x00000080).into(),
+                offset: point(px(0.0), px(18.0)),
+                blur_radius: px(44.0),
+                spread_radius: px(0.0),
+                inset: false,
+            }])
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(header)
+            .child(body)
+            .child(footer);
+
+        div()
+            .id("inbox-scrim")
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(rgba(0x0000001a))
+            .occlude()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.store
+                        .write()
+                        .expect("session store lock poisoned")
+                        .close_inbox();
+                    cx.notify();
+                    cx.stop_propagation();
+                }),
+            )
+            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+            .child(panel)
+            .into_any_element()
+    }
+
+    fn inbox_row(
+        &self,
+        index: usize,
+        item: &InboxItem,
+        highlighted: bool,
+        colors: SemanticColors,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let mut chips = div().flex().items_center().gap(px(6.0)).child(
+            div()
+                .px(px(6.0))
+                .py(px(1.0))
+                .rounded(px(Radius::CHIP))
+                .bg(colors.primary.alpha(0.08))
+                .text_size(px(10.0))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(colors.secondary)
+                .child(item.priority().label()),
+        );
+        if let Some(risk) = item.reason.risk() {
+            let color = risk_color(risk, colors);
+            chips = chips.child(
+                div()
+                    .px(px(6.0))
+                    .py(px(1.0))
+                    .rounded(px(Radius::CHIP))
+                    .bg(color.alpha(0.16))
+                    .text_size(px(10.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(color)
+                    .child(risk_label(risk)),
+            );
+        }
+        if let Some(host) = item.host.as_deref() {
+            chips = chips.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(4.0))
+                    .px(px(6.0))
+                    .py(px(1.0))
+                    .rounded(px(Radius::CHIP))
+                    .bg(Palette::GEMINI_BLUE.alpha(0.16))
+                    .text_size(px(10.0))
+                    .text_color(Palette::GEMINI_BLUE)
+                    .child(sf_symbol("globe", 9.0, Palette::GEMINI_BLUE))
+                    .child(host.to_owned()),
+            );
+        }
+
+        let mut details = div()
+            .flex()
+            .flex_col()
+            .min_w_0()
+            .gap(px(2.0))
+            .child(
+                div()
+                    .text_size(px(13.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(colors.primary)
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .child(item.title.clone()),
+            )
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(if matches!(item.reason, InboxItemKind::Failure { .. }) {
+                        Ink::DANGER
+                    } else {
+                        colors.secondary
+                    })
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .child(item.headline.clone()),
+            );
+        if let Some(excerpt) = item.excerpt.as_ref() {
+            details = details.child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(colors.tertiary)
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .child(excerpt.clone()),
+            );
+        }
+
+        let session_id = item.session_id.clone();
+        let click_id = session_id.clone();
+        div()
+            .id(("inbox-row", index))
+            .debug_selector(move || format!("INBOX_ROW_{}", click_id.0))
+            .flex()
+            .items_start()
+            .gap(px(10.0))
+            .px(px(12.0))
+            .py(px(10.0))
+            .rounded(px(Radius::ROW))
+            .bg(if highlighted {
+                Palette::CLAY.alpha(0.16)
+            } else {
+                colors.floating_surface()
+            })
+            .border_1()
+            .border_color(if highlighted {
+                Palette::CLAY.alpha(0.55)
+            } else {
+                colors.primary.alpha(0.06)
+            })
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, _, _, cx| {
+                // Clicking a row means the same as pressing return on it.
+                this.store
+                    .write()
+                    .expect("session store lock poisoned")
+                    .inbox_open_session(session_id.clone());
+                cx.notify();
+                cx.emit(SessionSurfacesEvent::InboxJumped(session_id.clone()));
+            }))
+            .child(AgentLogo::new(ui_agent_kind(&item.kind), 20.0, colors))
+            .child(details)
+            .child(div().flex_1())
+            .child(chips)
             .into_any_element()
     }
 
@@ -1385,6 +1723,45 @@ pub(crate) fn switcher_key(event: &KeyDownEvent) -> SwitcherKey {
     }
 }
 
+/// Interpret one keydown for the inbox overlay. Bare keys only: platform and
+/// control chords belong to the app and to the terminal behind the overlay.
+fn inbox_key(event: &KeyDownEvent) -> InboxKey {
+    let modifiers = event.keystroke.modifiers;
+    if modifiers.platform || modifiers.control || modifiers.alt {
+        return InboxKey::Other;
+    }
+    match event.keystroke.key.as_str() {
+        "up" => InboxKey::Up,
+        "down" => InboxKey::Down,
+        "enter" => InboxKey::Jump,
+        "escape" => InboxKey::Escape,
+        "a" => InboxKey::Approve,
+        "d" => InboxKey::Deny,
+        "s" => InboxKey::Snooze,
+        "x" => InboxKey::Dismiss,
+        _ => InboxKey::Other,
+    }
+}
+
+fn risk_label(risk: RiskHint) -> &'static str {
+    match risk {
+        RiskHint::Destructive => "Destructive",
+        RiskHint::Network => "Network",
+        RiskHint::FileWrite => "File write",
+        RiskHint::Neutral => "Neutral",
+        RiskHint::Unknown => "Unknown",
+    }
+}
+
+fn risk_color(risk: RiskHint, colors: SemanticColors) -> gpui::Rgba {
+    match risk {
+        RiskHint::Destructive => Ink::DANGER,
+        RiskHint::Network => Palette::GEMINI_BLUE,
+        RiskHint::FileWrite => Ink::ATTENTION,
+        RiskHint::Neutral | RiskHint::Unknown => colors.secondary,
+    }
+}
+
 fn ui_agent_kind(kind: &ProtoAgentKind) -> AgentKind {
     AgentKind::from_id(kind.id())
 }
@@ -1644,6 +2021,88 @@ mod tests {
             background_scrolls.load(Ordering::Relaxed),
             0,
             "overview wheel input must not leak to the terminal behind it"
+        );
+    }
+
+    #[gpui::test]
+    fn inbox_overlay_renders_one_row_per_queued_session(cx: &mut TestAppContext) {
+        let runtime = Arc::new(StoreRuntime::inert());
+        let mut permission = session(1);
+        permission.status = SessionStatus::NeedsInput(taskmaster_proto::NeedsInputKind::Permission);
+        permission.needs_input = Some(taskmaster_proto::NeedsInputDetail {
+            kind: taskmaster_proto::NeedsInputKind::Permission,
+            source: taskmaster_proto::NeedsInputSource::ClaudePermissionHook,
+            tool_name: Some("Bash".to_owned()),
+            summary: "delete the build directory?".to_owned(),
+            prompt_excerpt: None,
+            options: None,
+            risk_hint: taskmaster_proto::RiskHint::Destructive,
+            occurred_at: DateMillis(10.0),
+        });
+        permission.host = Some("forge".to_owned());
+        let mut question = session(2);
+        question.status = SessionStatus::NeedsInput(taskmaster_proto::NeedsInputKind::Question);
+        question.needs_input = Some(taskmaster_proto::NeedsInputDetail {
+            kind: taskmaster_proto::NeedsInputKind::Question,
+            source: taskmaster_proto::NeedsInputSource::ClaudeNotificationHook,
+            tool_name: None,
+            summary: "which database should I use?".to_owned(),
+            prompt_excerpt: None,
+            options: None,
+            risk_hint: taskmaster_proto::RiskHint::Neutral,
+            occurred_at: DateMillis(20.0),
+        });
+        let busy = session(3);
+        {
+            let mut store = runtime.store.write().expect("session store lock poisoned");
+            store.hydrate(SessionListResult {
+                sessions: vec![permission, question, busy],
+                projects: vec![Project {
+                    id: ProjectId::new("overview"),
+                    root: "/work/overview".into(),
+                    name: "Overview".into(),
+                    pinned_order: None,
+                }],
+            });
+            assert!(store.toggle_inbox());
+        }
+
+        let background_scrolls = Arc::new(AtomicUsize::new(0));
+        let background_probe = Arc::clone(&background_scrolls);
+        let view_runtime = Arc::clone(&runtime);
+        let (_view, cx) = cx.add_window_view(move |_window, cx| OverviewHarness {
+            surfaces: cx.new(|cx| SessionSurfaces::new(view_runtime, cx)),
+            background_scrolls: background_probe,
+        });
+        cx.simulate_resize(size(px(1100.0), px(700.0)));
+
+        cx.debug_bounds("INBOX_LIST")
+            .expect("the inbox list should render while open");
+        let permission_row = cx
+            .debug_bounds("INBOX_ROW_running-01")
+            .expect("the permission row should render");
+        cx.debug_bounds("INBOX_ROW_running-02")
+            .expect("the question row should render");
+        assert!(
+            cx.debug_bounds("INBOX_ROW_running-03").is_none(),
+            "a working session must not get a row"
+        );
+        assert!(
+            permission_row.size.width > px(300.0),
+            "rows span the panel, not just their content"
+        );
+
+        // Wheel input inside the overlay must not reach the terminal behind it.
+        assert_eq!(background_scrolls.load(Ordering::Relaxed), 0);
+        cx.simulate_event(ScrollWheelEvent {
+            position: permission_row.center(),
+            delta: ScrollDelta::Pixels(point(px(0.0), px(-40.0))),
+            ..ScrollWheelEvent::default()
+        });
+        assert_eq!(
+            background_scrolls.load(Ordering::Relaxed),
+            0,
+            "inbox wheel input must not leak to the terminal behind it"
         );
     }
 }

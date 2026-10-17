@@ -40,6 +40,7 @@ pub enum PaletteCommand {
     },
     OpenQuickOpen,
     OpenSessionOverview,
+    OpenInbox,
     OpenWorktrees,
     OpenBranches,
     GoToPullRequest,
@@ -148,6 +149,16 @@ pub fn actions_for_default_host(
             enabled: true,
             command: PaletteCommand::OpenSessionOverview,
             keywords: "board grid switcher all sessions".into(),
+        },
+        PaletteAction {
+            id: "needs-you-inbox".into(),
+            title: "Needs You".into(),
+            system_image: "checklist",
+            shortcut: Some("⌘⇧I"),
+            detail: None,
+            enabled: true,
+            command: PaletteCommand::OpenInbox,
+            keywords: "inbox triage queue attention approve deny permission question failure blocked stuck".into(),
         },
     ]);
 
@@ -641,6 +652,7 @@ mod tests {
                 "new-terminal",
                 "quick-open",
                 "session-overview",
+                "needs-you-inbox",
                 "new-default-in-/work/taskmaster",
                 "worktrees",
                 "review-branches",
@@ -655,7 +667,7 @@ mod tests {
         assert_eq!(result[0].title, "New Codex Session");
         assert_eq!(result[0].shortcut, Some("⌘T"));
         assert_eq!(result[1].title, "New Claude Code Session");
-        assert_eq!(result[7].title, "New Codex in taskmaster");
+        assert_eq!(result[8].title, "New Codex in taskmaster");
     }
 
     #[test]

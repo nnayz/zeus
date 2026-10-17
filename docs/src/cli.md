@@ -8,6 +8,9 @@ map:
 zeus <resource> <action> [target] [options]
 ```
 
+The same CLI drives a headless Engine on Linux; see
+[Headless Linux Engine](headless-linux.md).
+
 `--json` is accepted on the session, worktree, events, and artifacts
 commands when you want to script.
 

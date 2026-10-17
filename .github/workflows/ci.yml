@@ -94,6 +94,35 @@ jobs:
       - name: Test fail-closed optional package validation
         run: bash scripts/check-power-helper-package.sh --self-test
 
+  headless-linux:
+    name: Headless Engine + CLI (Linux)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: zeus
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5.0.0
+      - name: Cache cargo registry and target
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            zeus/target
+          key: ${{ runner.os }}-headless-${{ hashFiles('zeus/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-headless-
+      - name: Clippy the headless subset
+        run: cargo clippy --locked -p zeus-engine -p zeus-cli -p zeus-mcp -p zeus-proto -p zeus-pty -p zeus-terminal-state -p zeus-remote -p zeus-usage --all-targets -- -D warnings
+      - name: Build the headless cockpit binaries
+        run: cargo build --locked -p zeus-engine -p zeus-cli -p zeus-mcp
+      - name: Test the shared crates and CLI
+        run: cargo test --locked -p zeus-proto -p zeus-pty -p zeus-terminal-state -p zeus-cli -p zeus-usage
+      - name: Test the Engine
+        run: cargo test --locked -p zeus-engine
+      - name: Headless cockpit smoke
+        run: scripts/headless-cockpit-smoke.sh
+
   app:
     name: Rust app (zeus)
     runs-on: macos-15

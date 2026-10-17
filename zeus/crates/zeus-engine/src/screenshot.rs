@@ -5,6 +5,13 @@
 //! therefore runs in a short-lived child of the app-launched Engine. The
 //! Engine bounds that process and kills it on timeout, which also guarantees a
 //! stuck capturer cannot leave the recording indicator or stream running.
+//!
+//! Capture is macOS-only: on other platforms `capture` and `capture_in_process`
+//! return a structured `unsupported` error. The target-resolution and
+//! JPEG-encoding machinery stays compiled everywhere so the fake-backend tests
+//! below can cover it, which makes it dead code for a non-macOS non-test build.
+
+#![cfg_attr(not(target_os = "macos"), allow(dead_code))]
 
 use std::fmt;
 

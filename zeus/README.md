@@ -28,6 +28,9 @@ adopted by whatever Engine starts next.
 `zeusd-rs` ([`crates/zeus-engine`](crates/zeus-engine)) is the only daemon. The
 app refuses any other `Hello` identity.
 
+The Engine, holders, and CLI are Rust and also run headless on Linux — no GPUI
+window, no `tmux`; see [Headless Linux Engine](../docs/src/headless-linux.md).
+
 ## Install
 
 ```sh

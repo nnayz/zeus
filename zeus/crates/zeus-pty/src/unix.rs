@@ -45,13 +45,16 @@ impl Pty {
         // SAFETY: both output pointers refer to initialized local storage and
         // `winsize` is fully initialized. On success both returned fds are new
         // owned descriptors, transferred immediately into `OwnedFd`.
+        // `winsize` is passed as a raw pointer because Linux declares the
+        // parameter `*const winsize` while macOS declares it `*mut winsize`;
+        // the raw pointer coerces to either without a platform-specific branch.
         let result = unsafe {
             libc::openpty(
                 &mut master,
                 &mut slave,
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
-                &mut winsize,
+                std::ptr::addr_of_mut!(winsize),
             )
         };
         if result != 0 {

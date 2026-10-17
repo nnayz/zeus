@@ -22,6 +22,8 @@ use zeus_engine::detect::ManifestEngine;
 use zeus_engine::registry::Registry;
 #[cfg(unix)]
 use zeus_engine::session::HolderConfig;
+#[cfg(unix)]
+use zeus_proto::paths::ZeusPaths;
 
 #[cfg(not(unix))]
 fn main() {
@@ -367,11 +369,8 @@ fn anonymous_capture_file() -> std::io::Result<std::fs::File> {
 
 #[cfg(unix)]
 fn app_support_dir() -> PathBuf {
-    if let Ok(root) = std::env::var("ZEUS_APP_SUPPORT") {
-        return PathBuf::from(root);
-    }
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-    Path::new(&home).join("Library/Application Support/Zeus")
+    ZeusPaths::app_support(home)
 }
 
 /// Copy `zeus`, `zeus-mcp`, and the Agent catalog into App Support `bin/`,

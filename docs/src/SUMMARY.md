@@ -15,6 +15,7 @@
 - [Command line](cli.md)
 - [Remote hosts](remote-hosts.md)
 - [Remote nodes](remote-nodes.md)
+- [Headless Linux Engine](headless-linux.md)
 - [iOS Companion](ios-companion.md)
 - [Updates](updates.md)
 
